@@ -31,6 +31,7 @@ def test_builtin_registry_exposes_structured_schemas(workspace: Path) -> None:
         "search_text",
         "read_file",
         "write_or_replace",
+        "apply_patch",
         "run_command",
     }
     assert all(item["type"] == "function" for item in schemas)
@@ -134,6 +135,48 @@ def test_create_is_exclusive(workspace: Path) -> None:
     assert created.ok and created.output["created"] is True
     assert not duplicate.ok
     assert (workspace / "created.txt").read_text(encoding="utf-8") == "new"
+
+
+def test_apply_patch_applies_multiple_exact_edits_after_approval(tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("first\nsecond\n", encoding="utf-8")
+    executor = ToolExecutor(
+        WorkspacePolicy(tmp_path, allow_write=True), approval_callback=lambda *_: True
+    )
+    result = execute(
+        executor,
+        "apply_patch",
+        path="target.txt",
+        edits=[
+            {"old": "first", "new": "FIRST"},
+            {"old": "second", "new": "SECOND"},
+        ],
+    )
+    assert result.ok
+    assert result.output["edits_applied"] == 2
+    assert target.read_text(encoding="utf-8") == "FIRST\nSECOND\n"
+
+
+def test_apply_patch_is_atomic_when_later_edit_is_not_unique(tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    original = "first\nrepeated\nrepeated\n"
+    target.write_text(original, encoding="utf-8")
+    executor = ToolExecutor(
+        WorkspacePolicy(tmp_path, allow_write=True), approval_callback=lambda *_: True
+    )
+    result = execute(
+        executor,
+        "apply_patch",
+        path="target.txt",
+        edits=[
+            {"old": "first", "new": "FIRST"},
+            {"old": "repeated", "new": "REPLACED"},
+        ],
+    )
+    assert not result.ok
+    assert "第 2 个 edit" in result.error
+    assert "必须唯一" in result.error
+    assert target.read_text(encoding="utf-8") == original
 
 
 def test_write_size_limits_cover_input_target_and_result(tmp_path: Path) -> None:

@@ -25,6 +25,12 @@ uv run pytest
 - 验证真实模型的 Chat Completions、结构化 Tool Call 和多轮工具循环兼容性；
 - 比较不同模型在固定任务集上的质量、延迟和错误率。
 
+真实模型主入口使用 `chat --print` 或交互式 `chat`，因为它包含 Session、项目 Prompt、活动
+Context 和终端审批。`run` 仅作为兼容 v0 的单轮入口保留。
+
+真实会话会保存 Provider、模型和 Base URL 以供 `--continue` 恢复，但不会保存 API key。
+重新打开终端后，仍需先加载对应供应商的专属 Key 环境变量。
+
 以下情况不需要 API Key：
 
 - `uv run pi-claw demo --yes`；
@@ -72,8 +78,9 @@ unset OPENAI_BASE_URL
 ```bash
 mkdir -p runs
 
-uv run pi-claw run \
+uv run pi-claw chat \
   "只读列出工作区中最重要的文件，不要修改。" \
+  --print \
   --provider openai \
   --workspace "/ABSOLUTE/PATH/TO/SAFE_WORKSPACE" \
   --trace "runs/openai-smoke.jsonl"
@@ -83,7 +90,7 @@ uv run pi-claw run \
 
 - 模型必须支持 Chat Completions 的 `messages`、`tools`、`tool_choice` 和 `tool_calls`。
 - Pi-Claw 当前不直接调用 Responses API；不要把 Responses 端点配置成 Base URL。
-- 首版每轮只接受一个 Tool Call。
+- Pi-Claw v1 可解析同轮多个标准 Tool Call，并按返回顺序执行；有依赖关系的动作仍应分轮进行。
 
 ### Kimi（Moonshot AI 国内平台）
 
@@ -109,8 +116,9 @@ export OPENAI_MODEL="<KIMI_CHAT_COMPLETIONS_TOOL_MODEL_ID>"
 ```bash
 mkdir -p runs
 
-uv run pi-claw run \
+uv run pi-claw chat \
   "只读列出工作区中最重要的文件，不要修改。" \
+  --print \
   --provider openai \
   --workspace "/ABSOLUTE/PATH/TO/SAFE_WORKSPACE" \
   --trace "runs/kimi-smoke.jsonl"
@@ -154,8 +162,9 @@ export OPENAI_MODEL="<QWEN_CHAT_COMPLETIONS_TOOL_MODEL_ID>"
 ```bash
 mkdir -p runs
 
-uv run pi-claw run \
+uv run pi-claw chat \
   "只读列出工作区中最重要的文件，不要修改。" \
+  --print \
   --provider openai \
   --workspace "/ABSOLUTE/PATH/TO/SAFE_WORKSPACE" \
   --trace "runs/qwen-smoke.jsonl"
@@ -191,8 +200,9 @@ export OPENAI_MODEL="<DEEPSEEK_CHAT_COMPLETIONS_TOOL_MODEL_ID>"
 ```bash
 mkdir -p runs
 
-uv run pi-claw run \
+uv run pi-claw chat \
   "只读列出工作区中最重要的文件，不要修改。" \
+  --print \
   --provider openai \
   --workspace "/ABSOLUTE/PATH/TO/SAFE_WORKSPACE" \
   --trace "runs/deepseek-smoke.jsonl"
@@ -284,7 +294,7 @@ POST https://api.openai.com/v1/chat/completions
 - 接受 `messages`、`tools` 和 `tool_choice`；
 - 返回 `choices[0].message`；
 - 工具调用使用 `message.tool_calls[].function`，其中 `arguments` 是 JSON 对象的字符串表示；
-- 每轮最多返回一个 Tool Call，因为 Pi-Claw 首版每轮只接受一个。
+- 可以返回同轮多个标准 Tool Call；Pi-Claw v1 会顺序执行并为每个调用追加独立 ToolResult。
 
 不要把 Responses API 地址填入 `OPENAI_BASE_URL`。该变量应是 API 根地址；Pi-Claw 会自动追加 `/chat/completions`。如果传入值已经以 `/chat/completions` 结尾，项目不会重复追加。
 
@@ -356,7 +366,7 @@ Pi-Claw 会自动在 Base URL 后追加 `/chat/completions`。先确认最终应
 - API 明确拒绝 `tools` 或 `tool_choice`；
 - 模型只返回普通文本，始终不产生 `tool_calls`；
 - 返回字段看似相似，但不符合 Chat Completions 的 `choices[0].message.tool_calls`；
-- 一轮返回多个 Tool Call，被 Pi-Claw 首版拒绝。
+- 返回了非标准、多层嵌套或参数不是 JSON 对象的 Tool Call，因协议不兼容被拒绝。
 
 处理方式：确认模型支持 Chat Completions 工具调用；用准确模型 ID 更新 `OPENAI_MODEL`；检查兼容服务的响应格式。不要仅因为服务自称“OpenAI-compatible”就假设工具调用完全兼容。
 
@@ -373,8 +383,9 @@ export OPENAI_API_KEY="<THIRD_PARTY_API_KEY>"
 export OPENAI_MODEL="<THIRD_PARTY_CHAT_COMPLETIONS_TOOL_MODEL_ID>"
 export OPENAI_BASE_URL="<THIRD_PARTY_OPENAI_COMPATIBLE_API_ROOT>"
 
-uv run pi-claw run \
+uv run pi-claw chat \
   "只读列出工作区文件，不要修改。" \
+  --print \
   --provider openai \
   --workspace "/ABSOLUTE/PATH/TO/SAFE_WORKSPACE" \
   --trace "runs/third-party-smoke.jsonl"

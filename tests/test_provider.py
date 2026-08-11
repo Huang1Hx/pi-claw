@@ -98,30 +98,51 @@ def test_openai_provider_parses_single_tool_call(
     assert payload["tool_choice"] == "auto"
 
 
+def test_openai_provider_parses_multiple_tool_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_response(
+        monkeypatch,
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "one",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": '{"path": "alpha.txt"}',
+                                },
+                            },
+                            {
+                                "id": "two",
+                                "function": {
+                                    "name": "list_files",
+                                    "arguments": '{"path": "."}',
+                                },
+                            },
+                        ],
+                    }
+                }
+            ]
+        },
+    )
+    provider = OpenAICompatibleProvider(api_key="test-key", model="test-model", timeout=7)
+
+    reply = provider.complete([{"role": "user", "content": "inspect"}])
+
+    assert [call.id for call in reply.tool_calls] == ["one", "two"]
+    assert [call.name for call in reply.tool_calls] == ["read_file", "list_files"]
+
+
 @pytest.mark.parametrize(
     "payload",
     [
         {},
         {"choices": []},
         {"choices": [{"message": {"content": None}}]},
-        {
-            "choices": [
-                {
-                    "message": {
-                        "tool_calls": [
-                            {
-                                "id": "one",
-                                "function": {"name": "read_file", "arguments": "{}"},
-                            },
-                            {
-                                "id": "two",
-                                "function": {"name": "read_file", "arguments": "{}"},
-                            },
-                        ]
-                    }
-                }
-            ]
-        },
         {
             "choices": [
                 {

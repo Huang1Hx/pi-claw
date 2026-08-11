@@ -54,6 +54,24 @@ def test_model_reply_factories_and_serialization() -> None:
     assert ModelReply.call(call).to_dict() == {"tool_call": call.to_dict()}
 
 
+def test_model_reply_multiple_calls_are_preserved() -> None:
+    first = ToolCall("call-1", "read_file", {"path": "alpha.txt"})
+    second = ToolCall("call-2", "list_files", {"path": "."})
+    reply = ModelReply.calls([first, second])
+
+    assert reply.tool_call is None
+    assert reply.tool_calls == (first, second)
+    assert reply.to_dict() == {
+        "tool_calls": [first.to_dict(), second.to_dict()],
+    }
+
+
+def test_model_reply_rejects_legacy_and_new_call_fields_together() -> None:
+    call = ToolCall("call-1", "read_file", {})
+    with pytest.raises(ValueError, match="不能同时"):
+        ModelReply(tool_call=call, tool_calls=(call,))
+
+
 def test_result_and_decision_serialization() -> None:
     result = ToolResult("call-1", "read_file", True, output={"content": "ok"})
     decision = PolicyDecision(PolicyAction.ASK, "需要审批", {"safe": True})

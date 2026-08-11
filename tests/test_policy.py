@@ -20,17 +20,79 @@ def test_policy_denies_unknown_tool(workspace: Path) -> None:
 
 
 @pytest.mark.parametrize("allow_write", [False, True])
-def test_write_is_always_ask(workspace: Path, allow_write: bool) -> None:
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("write_or_replace", {"path": "alpha.txt", "old": "alpha", "new": "changed"}),
+        (
+            "apply_patch",
+            {"path": "alpha.txt", "edits": [{"old": "alpha", "new": "changed"}]},
+        ),
+    ],
+)
+def test_write_is_always_ask(
+    workspace: Path,
+    allow_write: bool,
+    tool_name: str,
+    arguments: dict[str, object],
+) -> None:
     decision = WorkspacePolicy(workspace, allow_write=allow_write).evaluate(
-        call("write_or_replace", path="alpha.txt", old="alpha", new="changed")
+        call(tool_name, **arguments)
     )
     assert decision.action is PolicyAction.ASK
 
 
-@pytest.mark.parametrize("command", ["sudo", "curl", "uv", "pytest"])
+@pytest.mark.parametrize("command", ["sudo", "curl", "pytest"])
 def test_policy_denies_dangerous_or_unlisted_commands(workspace: Path, command: str) -> None:
     decision = WorkspacePolicy(workspace, allow_commands=True).evaluate(
         call("run_command", argv=[command, "--version"])
+    )
+    assert decision.action is PolicyAction.DENY
+
+
+def test_uv_is_denied_by_minimal_profile(workspace: Path) -> None:
+    decision = WorkspacePolicy(workspace, allow_commands=True).evaluate(
+        call("run_command", argv=["uv", "run", "pytest", "-q"])
+    )
+    assert decision.action is PolicyAction.DENY
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["uv", "sync", "--locked"],
+        ["uv", "sync", "--frozen"],
+        ["uv", "lock", "--check"],
+        ["uv", "run", "pytest", "-q", "test_sample.py"],
+        ["uv", "run", "ruff", "check", "--output-format=concise", "."],
+        ["uv", "run", "ruff", "format", "--check", "."],
+        ["uv", "run", "python", "-m", "unittest", "-v", "test_sample.py"],
+        ["uv", "run", "python", "-m", "compileall", "-q", "."],
+    ],
+)
+def test_coding_profile_allows_safe_uv_commands_as_ask(workspace: Path, argv: list[str]) -> None:
+    decision = WorkspacePolicy(workspace, allow_commands=True, command_profile="coding").evaluate(
+        call("run_command", argv=argv)
+    )
+    assert decision.action is PolicyAction.ASK
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["uv", "sync"],
+        ["uv", "add", "requests"],
+        ["uv", "run", "python", "-c", "print('unsafe')"],
+        ["uv", "run", "pytest", "--collect-only"],
+        ["uv", "run", "pytest", "../outside"],
+        ["uv", "run", "ruff", "format", "."],
+        ["uv", "run", "ruff", "check", "--fix", "."],
+        ["uv", "run", "python", "-m", "compileall", "../outside"],
+    ],
+)
+def test_coding_profile_denies_unsafe_uv_commands(workspace: Path, argv: list[str]) -> None:
+    decision = WorkspacePolicy(workspace, allow_commands=True, command_profile="coding").evaluate(
+        call("run_command", argv=argv)
     )
     assert decision.action is PolicyAction.DENY
 

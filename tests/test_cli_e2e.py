@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -112,3 +113,148 @@ def test_cli_scripted_run_is_offline_and_read_only(tmp_path: Path) -> None:
     assert '"status": "completed"' in completed.stdout
     assert (workspace / "file.txt").read_text(encoding="utf-8") == "content"
     assert any(event["event"] == "tool_result" for event in read_jsonl(trace))
+
+
+def test_cli_chat_print_creates_resumable_session(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    data_dir = tmp_path / "session-data"
+    workspace.mkdir()
+    (workspace / "README.md").write_text("demo", encoding="utf-8")
+    first_trace = tmp_path / "first.jsonl"
+
+    created = run_cli(
+        tmp_path,
+        "chat",
+        "只读查看项目",
+        "--print",
+        "--workspace",
+        str(workspace),
+        "--data-dir",
+        str(data_dir),
+        "--trace",
+        str(first_trace),
+    )
+
+    assert created.returncode == 0, created.stderr
+    assert "Pi-Claw Coding Agent" in created.stdout
+    assert "assistant> 离线 Coding Agent 已完成只读检查" in created.stdout
+    match = re.search(r"session: ([a-f0-9]{32})", created.stdout)
+    assert match is not None
+    session_id = match.group(1)
+    assert f"--session {session_id}" in created.stdout
+
+    listed = run_cli(
+        tmp_path,
+        "sessions",
+        "--workspace",
+        str(workspace),
+        "--data-dir",
+        str(data_dir),
+    )
+    assert listed.returncode == 0, listed.stderr
+    assert session_id in listed.stdout
+
+    resumed = run_cli(
+        tmp_path,
+        "chat",
+        "继续只读检查",
+        "--print",
+        "--workspace",
+        str(workspace),
+        "--data-dir",
+        str(data_dir),
+        "--session",
+        session_id,
+        "--trace",
+        str(tmp_path / "resumed.jsonl"),
+    )
+    assert resumed.returncode == 0, resumed.stderr
+    assert f"session: {session_id}" in resumed.stdout
+
+
+def test_cli_chat_continue_uses_latest_session(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    data_dir = tmp_path / "session-data"
+    workspace.mkdir()
+    created = run_cli(
+        tmp_path,
+        "chat",
+        "first",
+        "--print",
+        "--workspace",
+        str(workspace),
+        "--data-dir",
+        str(data_dir),
+        "--trace",
+        str(tmp_path / "first.jsonl"),
+    )
+    match = re.search(r"session: ([a-f0-9]{32})", created.stdout)
+    assert match is not None
+
+    continued = run_cli(
+        tmp_path,
+        "chat",
+        "second",
+        "--print",
+        "--continue",
+        "--workspace",
+        str(workspace),
+        "--data-dir",
+        str(data_dir),
+        "--trace",
+        str(tmp_path / "second.jsonl"),
+    )
+    assert continued.returncode == 0, continued.stderr
+    assert f"session: {match.group(1)}" in continued.stdout
+
+
+def test_cli_continue_reuses_openai_provider_metadata_without_key(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    data_dir = tmp_path / "session-data"
+    workspace.mkdir()
+    from pi_claw.session import SessionStore
+
+    session = SessionStore(data_dir).create(
+        workspace,
+        "system",
+        provider="openai",
+        model="provider-model",
+        base_url="https://example.invalid/v1",
+    )
+
+    resumed = run_cli(
+        tmp_path,
+        "chat",
+        "继续",
+        "--print",
+        "--continue",
+        "--workspace",
+        str(workspace),
+        "--data-dir",
+        str(data_dir),
+        "--trace",
+        str(tmp_path / "resume-openai.jsonl"),
+    )
+
+    assert resumed.returncode == 1
+    assert f"session: {session.session_id}" in resumed.stdout
+    assert "provider: openai" in resumed.stdout
+    assert "缺少 OPENAI_API_KEY" in resumed.stdout
+
+
+def test_cli_chat_print_requires_prompt(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    completed = run_cli(
+        tmp_path,
+        "chat",
+        "--print",
+        "--workspace",
+        str(workspace),
+        "--data-dir",
+        str(tmp_path / "sessions"),
+        "--trace",
+        str(tmp_path / "trace.jsonl"),
+    )
+    assert completed.returncode == 2
+    assert "--print 需要提供初始任务" in completed.stdout
