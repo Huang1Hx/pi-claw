@@ -28,7 +28,7 @@ Policy，再由 Tool Registry 执行，结果以 `ToolResult` 返回。这样可
 
 1. CLI 读取任务、工作区、最大步数和批准方式。
 2. Agent 把系统约束和用户任务交给 Model Provider。
-3. Provider 返回最终文本，或返回一个或多个结构化 ToolCall。
+3. Provider 返回最终文本，或返回一个结构化 ToolCall；首版每轮只接受一个。
 4. Policy 检查工具名、路径、敏感文件、命令白名单和是否需要人工批准。
 5. Tool 执行后返回结构化结果；异常会转换成失败结果，不泄漏为未处理堆栈。
 6. Agent 将结果追加到上下文和 JSONL trace，再进入下一轮。
@@ -45,8 +45,9 @@ Policy，再由 Tool Registry 执行，结果以 `ToolResult` 返回。这样可
 
 ## Trace 与 Replay
 
-每次关键事件按顺序写入 JSONL。Trace 是审计证据，不是再次执行的脚本；Replay 只读取并展示
-历史事件，不会重新运行写文件或命令。常见 token、key、password 字段在落盘前会被替换。
+CLI 每次运行都把关键事件按顺序写入 JSONL；嵌入库时由调用方显式传入 TraceWriter。Trace 是
+审计证据，不是再次执行的脚本；Replay 只读取并展示历史事件，不会重新运行写文件或命令。
+常见 token、API key、password 字段在落盘前会被替换，单事件与 replay 总量都有上限。
 
 ## 后续扩展顺序
 
@@ -54,4 +55,3 @@ Policy，再由 Tool Registry 执行，结果以 `ToolResult` 返回。这样可
 2. 更精确的上下文压缩和带来源的本地记忆。
 3. Docker Sandbox 适配器（用户自行准备 Docker）。
 4. Reviewer Subagent；只有评测证明有效后，再尝试并行 Agent Team。
-
