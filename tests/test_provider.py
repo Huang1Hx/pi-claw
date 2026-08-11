@@ -1,0 +1,196 @@
+from __future__ import annotations
+
+import io
+import json
+import urllib.error
+import urllib.request
+from typing import Any
+
+import pytest
+
+from pi_claw.providers import OpenAICompatibleProvider, ProviderError, ScriptedProvider
+from pi_claw.schemas import ModelReply
+
+
+class FakeResponse:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.body = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self) -> FakeResponse:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self.body
+
+
+def install_response(
+    monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any]
+) -> list[urllib.request.Request]:
+    requests: list[urllib.request.Request] = []
+
+    def fake_urlopen(request: urllib.request.Request, *, timeout: float) -> FakeResponse:
+        assert timeout == 7
+        requests.append(request)
+        return FakeResponse(payload)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    return requests
+
+
+def test_openai_provider_parses_text_without_real_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests = install_response(monkeypatch, {"choices": [{"message": {"content": "done"}}]})
+    provider = OpenAICompatibleProvider(
+        api_key="test-key", base_url="https://example.invalid/v1/", model="test-model", timeout=7
+    )
+    reply = provider.complete([{"role": "user", "content": "hello"}], [])
+
+    assert reply == ModelReply.final("done")
+    assert requests[0].full_url == "https://example.invalid/v1/chat/completions"
+    assert requests[0].get_header("Authorization") == "Bearer test-key"
+    payload = json.loads(requests[0].data)
+    assert payload == {
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+
+def test_openai_provider_parses_single_tool_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests = install_response(
+        monkeypatch,
+        {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": '{"path": "alpha.txt"}',
+                                },
+                            }
+                        ],
+                    }
+                }
+            ]
+        },
+    )
+    tools = [{"type": "function", "function": {"name": "read_file"}}]
+    provider = OpenAICompatibleProvider(
+        api_key="test-key", base_url="https://example.invalid/v1", model="test-model", timeout=7
+    )
+    reply = provider.complete([{"role": "user", "content": "read"}], tools)
+
+    assert reply.tool_call is not None
+    assert reply.tool_call.name == "read_file"
+    assert reply.tool_call.arguments == {"path": "alpha.txt"}
+    payload = json.loads(requests[0].data)
+    assert payload["tools"] == tools
+    assert payload["tool_choice"] == "auto"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"choices": []},
+        {"choices": [{"message": {"content": None}}]},
+        {
+            "choices": [
+                {
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "id": "one",
+                                "function": {"name": "read_file", "arguments": "{}"},
+                            },
+                            {
+                                "id": "two",
+                                "function": {"name": "read_file", "arguments": "{}"},
+                            },
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "id": "one",
+                                "function": {"name": "read_file", "arguments": "[]"},
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+    ],
+)
+def test_openai_provider_rejects_malformed_responses(
+    monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any]
+) -> None:
+    install_response(monkeypatch, payload)
+    provider = OpenAICompatibleProvider(api_key="test-key", model="test-model", timeout=7)
+    with pytest.raises(ProviderError):
+        provider.complete([{"role": "user", "content": "hello"}])
+
+
+def test_openai_provider_sanitizes_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "secret-api-key-value"
+    detail = f"invalid key {secret}; Authorization: Bearer bearer-secret"
+
+    def fail(_request: object, *, timeout: float) -> None:
+        assert timeout == 7
+        raise urllib.error.HTTPError(
+            "https://example.invalid",
+            401,
+            "Unauthorized",
+            hdrs=None,
+            fp=io.BytesIO(detail.encode("utf-8")),
+        )
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail)
+    provider = OpenAICompatibleProvider(api_key=secret, model="test-model", timeout=7)
+    with pytest.raises(ProviderError) as captured:
+        provider.complete([{"role": "user", "content": "hello"}])
+
+    message = str(captured.value)
+    assert "HTTP 401" in message
+    assert secret not in message
+    assert "bearer-secret" not in message
+    assert "[REDACTED]" in message
+
+
+def test_openai_provider_requires_key_and_model_before_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    with pytest.raises(ProviderError, match="OPENAI_API_KEY"):
+        OpenAICompatibleProvider(model="model").complete([])
+    with pytest.raises(ProviderError, match="OPENAI_MODEL"):
+        OpenAICompatibleProvider(api_key="key").complete([])
+
+
+def test_scripted_provider_exhaustion_and_reset() -> None:
+    provider = ScriptedProvider([ModelReply.final("done")])
+    assert provider.remaining == 1
+    assert provider.complete([]).final_text == "done"
+    with pytest.raises(ProviderError, match="耗尽"):
+        provider.complete([])
+    provider.reset()
+    assert provider.complete([]).final_text == "done"
