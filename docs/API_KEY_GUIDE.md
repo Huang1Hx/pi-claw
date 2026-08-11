@@ -31,6 +31,10 @@ Context 和终端审批。`run` 仅作为兼容 v0 的单轮入口保留。
 真实会话会保存 Provider、模型和 Base URL 以供 `--continue` 恢复，但不会保存 API key。
 重新打开终端后，仍需先加载对应供应商的专属 Key 环境变量。
 
+在交互 REPL 中执行 `/resume <SESSION_ID>` 时，如果目标会话的 Provider、模型或 Base URL 与
+当前运行时不同，Pi-Claw 会拒绝静默切换，并打印一条显式的 `uv run pi-claw chat ...` 重启
+命令。先映射该会话对应供应商的 Key，再运行提示命令，避免把一家 Key 发给另一家端点。
+
 以下情况不需要 API Key：
 
 - `uv run pi-claw demo --yes`；
@@ -45,6 +49,10 @@ Pi-Claw 当前统一读取这三个变量：
 - `OPENAI_API_KEY`：当前选中供应商的 Key；
 - `OPENAI_MODEL`：当前供应商中支持 Chat Completions Tool Call 的准确模型 ID；
 - `OPENAI_BASE_URL`：当前供应商的 OpenAI-compatible API 根地址，OpenAI 官方可省略。
+
+Base URL 必须是带主机名的 `http://` 或 `https://` API 根地址，不能内嵌用户名/密码，也不能带
+query（`?...`）或 fragment（`#...`）。这样可避免明显凭据进入 Session 元数据；API key 仍只能
+放在环境变量中。
 
 国内供应商有各自的官方 Key 变量。推荐先保存专属变量，再在**当前终端**映射到 Pi-Claw 使用的 `OPENAI_*`。这样能清楚看到当前选中哪家服务，也能避免把 A 厂商的 Key 发给 B 厂商的 Base URL。
 
@@ -295,8 +303,13 @@ POST https://api.openai.com/v1/chat/completions
 - 返回 `choices[0].message`；
 - 工具调用使用 `message.tool_calls[].function`，其中 `arguments` 是 JSON 对象的字符串表示；
 - 可以返回同轮多个标准 Tool Call；Pi-Claw v1 会顺序执行并为每个调用追加独立 ToolResult。
+- 成功响应和 HTTP 错误响应都必须在客户端读取上限内；当前默认上限为 `5,000,000` 字节。
 
 不要把 Responses API 地址填入 `OPENAI_BASE_URL`。该变量应是 API 根地址；Pi-Claw 会自动追加 `/chat/completions`。如果传入值已经以 `/chat/completions` 结尾，项目不会重复追加。
+
+不要把 Key 写成 `https://user:key@example.com/v1`，也不要在 Base URL 后追加 `?api_key=...` 或
+`#...`。这类地址会在 Session 元数据校验时被拒绝。模型响应或错误响应超过默认字节上限时也会
+安全失败；此时应检查 Provider 是否返回了异常页面或过大错误体，而不是提高上限后盲目重试。
 
 模型名称也不能凭教程猜测。请从当前 Provider 的官方模型文档或账号控制台选择准确模型 ID，并确认其支持 Chat Completions 工具调用。
 

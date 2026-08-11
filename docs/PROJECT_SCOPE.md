@@ -22,10 +22,14 @@ v1 参考 Kimi CLI 类产品的工程路线，但不复刻完整 Kimi Code，不
 - 默认只读；修改文件或执行命令需要明确批准。
 - 不需要网络、模型 API 或 Docker，也能运行固定脚本模型演示与测试。
 - 可创建、列出、加载和恢复按工作区隔离的本地会话。
-- 原始消息 append-only 保存；压缩只更新活动窗口，不覆盖原始历史。
+- 原始消息以带递增 `seq` 的分段 journal 保存；压缩只更新带 `through_seq` 的活动 checkpoint，
+  不覆盖原始历史。
 - 交互审批支持允许一次、本会话允许同类和拒绝，非 TTY 默认拒绝。
+- 审批展示有界脱敏 diff、目标 preimage 或完整 argv/cwd；写 session scope 绑定参数与已审阅版本，
+  写入执行前再次复核目标哈希。
 - Provider 可返回同轮多个 Tool Call，Agent 按顺序执行并分别记录结果。
 - 可选接入 OpenAI-compatible Chat Completions API，包括 Kimi、Qwen、DeepSeek 和 OpenAI。
+- OpenAI-compatible 响应体有字节上限；会话 Base URL 元数据拒绝内嵌凭据、query 和 fragment。
 - JSONL 轨迹包含步骤、工具、结果和 UTC 时间戳，并对常见凭据字段脱敏。
 - Agent 受最大步数限制，不允许无限循环。
 
@@ -55,7 +59,11 @@ v1 参考 Kimi CLI 类产品的工程路线，但不复刻完整 Kimi Code，不
 - `apply_patch` 任一 edit 不存在或不唯一时，整个文件保持原样。
 - `chat --print` 可离线创建会话；`sessions`、`--continue`、`--session` 可恢复。
 - Context 压缩后活动窗口变小，append-only 原始消息仍完整保留。
+- checkpoint 后的 journal 尾部可恢复；最后半行会忽略，中断 Tool Call 补失败结果且不自动重放。
 - 非 TTY 副作用审批默认拒绝，本会话批准只作用于精确工具 scope。
+- 会话 append/state/checkpoint 和工具文件写入使用 `fsync`；已有文件替换与新文件独占创建均先
+  落盘内容，再让完整文件可见。
+- REPL `/resume` 遇到 Provider、模型或 Base URL 不一致时拒绝静默切换，并打印显式重启命令。
 - 每次 CLI 运行默认生成脱敏 JSONL 轨迹；库调用方也可显式传入 TraceWriter。
   回放只读取历史事件，不重新执行工具。
 - README 能让初学者在 15 分钟内理解架构并完成演示。

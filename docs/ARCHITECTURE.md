@@ -44,8 +44,8 @@ v1 是 Kimi CLI 路线的学习实现，不是 Kimi Code 的完整复刻，也�
 3. Agent 把持久消息和新用户任务交给 Model Provider。
 4. Provider 返回最终文本，或返回一个/多个结构化 ToolCall。
 5. 同轮 ToolCall 先写成一条 assistant 消息，再按顺序经过 Policy、审批和 Tool 执行；首版不并行。
-6. 每个 ToolResult 单独追加到上下文、append-only 原始历史和 JSONL trace。
-7. 活动窗口过大时做确定性压缩，原始 `context.jsonl` 不覆盖，压缩结果保存为活动上下文。
+6. 每个 ToolResult 单独追加到上下文、带递增 `seq` 的 append-only journal 和 JSONL trace。
+7. 活动窗口过大时做确定性压缩；原始 journal 不覆盖，压缩结果保存为带 `through_seq` 的 checkpoint。
 8. 得到最终文本或达到最大步数后停止；会话 ID 可用于后续恢复。
 
 同轮多个 ToolCall 应彼此独立。有先后依赖的动作必须等待上一轮 ToolResult，不能把顺序执行
@@ -61,26 +61,56 @@ v1 是 Kimi CLI 路线的学习实现，不是 Kimi Code 的完整复刻，也�
 Qwen/百炼、DeepSeek 或其他兼容服务。先让离线基线稳定，再比较真实模型的成功率、步骤数、
 延迟和失败类型。
 
-## Session、Raw History 与 Active Context
+## Session Journal、Raw History 与 Active Context
 
-- `context.jsonl` 是 append-only 原始消息历史，用于审计和恢复，不因压缩而覆盖。
-- `active_context.json` 是下一轮实际加载的有界活动窗口，可以包含确定性摘要。
+- `context.jsonl` 和超过阈值后创建的 `context-<start_seq>.jsonl` 是分段 append-only journal；
+  新格式每行包含严格递增的 `seq` 与 `message`，用于审计和恢复，不因压缩而覆盖。
+- `active_context.json` 是 `{version, through_seq, messages}` checkpoint，其中 messages 是下一轮
+  实际加载的有界活动窗口，可以包含确定性摘要。
 - `state.json` 保存标题、时间、Provider/模型/Base URL 和本会话已批准的工具 scope，不保存 key。
 - 会话按工作区真实路径哈希隔离，拒绝用其他工作区加载同一 Session ID。
 - 默认数据目录为 `~/.pi-claw/sessions`，可用 `PI_CLAW_HOME` 或 CLI `--data-dir` 覆盖。
 
 Context 压缩保留第一条系统消息和最近消息，把历史工具输出明确标成不可信数据。事件数和读取
-字节都有上限，防止损坏或恶意会话文件造成无界加载。极端结构若无法在不破坏 system 或
+字节都有上限；checkpoint 与待重放 journal 尾部共用同一读取预算，防止损坏或恶意会话文件
+造成无界加载。极端结构若无法在不破坏 system 或
 tool-call/result 原子组的前提下缩小，会明确失败，不会构造发给 Provider 的非法上下文。
+
+恢复顺序是“checkpoint messages -> journal 中 `seq > through_seq` 的尾记录”。末尾无换行的半写
+记录会忽略；带换行的损坏记录会报错。如果中断点落在 assistant Tool Call 与 ToolResult 之间，
+系统补一个 synthetic failed ToolResult，明确不重放工具，也不假定副作用是否已经发生。
+
+journal append、checkpoint 和 state 都在写入时 `fsync`；JSON 状态先写同目录临时文件，再用
+`os.replace` 替换并同步父目录。会话目录/文件使用 `0700/0600`。这些设计提高恢复确定性，但
+不能替代数据库事务、备份或生产级文件系统故障方案。
+
+同一 Session 的读改写提交由 `.session.lock` 跨进程串行化。REPL 同时携带已加载的 journal
+序号；若另一进程已经推进序号，旧实例会拒绝保存并要求重新加载，避免重复 `seq` 或 stale
+checkpoint 覆盖新消息。
 
 ## Tool 与审批
 
 读取工具由 Policy 直接允许。写入和命令即使语法安全仍返回 ASK，由终端审批器选择允许一次、
 本会话允许同类或拒绝；非 TTY 默认拒绝，不会在 CI 中等待输入。硬拒绝不能被 `--yes` 绕过。
 
+审批预览对写入使用有界、脱敏 unified diff 和完整文件 preimage 哈希，对命令展示完整 argv 和
+cwd。会话 scope 对写入绑定完整参数与已审阅的 preimage，对命令绑定完整 argv/cwd；参数或文件
+版本改变即不复用旧批准。写入批准后、真正执行前
+再次计算目标文件哈希，若与预览时不同则拒绝，避免 TOCTOU 窗口内把批准应用到另一个内容版本。
+
 `write_or_replace` 用于单处精确替换；`apply_patch` 对同一文件执行 1 到 50 个顺序精确替换，
 先在内存验证全部 edit，通过后一次写回；任一 `old` 不唯一则零写入。它不是抗崩溃的 OS 级
-原子替换。Agent 单轮最多接受 16 个 Tool Call，超过上限会在执行前安全失败。
+原子替换。内容通过同目录临时文件写入并 `fsync`；已有目标用 `os.replace`，新目标用硬链接独占
+创建，父目录同步。Agent 单轮最多接受 16 个 Tool Call，超过上限会在执行前安全失败。
+
+## Provider 运行时边界
+
+REPL `/resume` 会比较会话保存的 Provider、模型和 Base URL。不同则拒绝在当前进程内静默切换，
+并打印包含原会话运行时参数的 `uv run pi-claw chat ...` 重启命令；API key 仍只来自环境变量。
+
+OpenAI-compatible Provider 对成功体和 HTTP 错误体都设置字节上限，避免一次读取无界响应。
+写入 Session 的 Base URL 必须是有主机名的 HTTP(S) 地址，并拒绝内嵌用户名/密码、query 和
+fragment。这是协议输入校验，不是第三方服务信任证明，也不是网络 Sandbox。
 
 ## Trace 与 Replay
 

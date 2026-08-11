@@ -10,15 +10,26 @@
 - **目录边界**：路径解析后必须仍位于工作区；拒绝 `..`、外部绝对路径和符号链接逃逸。
 - **敏感文件**：默认拒绝 `.env`、Git 内部目录和常见凭据文件。
 - **写入审批**：只读工具可自动执行；创建、替换和全量校验后一次写回的多段补丁都需要明确批准。
+  写入显示有界、脱敏 unified diff；命令显示完整 argv 与 cwd。
 - **三态审批**：允许一次、本会话允许同类或拒绝；非 TTY 默认拒绝，硬 DENY 不可被批准覆盖。
+- **精确授权与 TOCTOU**：写入 scope 绑定完整参数和已审阅文件的 preimage 哈希，命令 scope
+  绑定完整 argv/cwd；目标版本变化后不会复用本会话批准，预览后再变化也会由哈希复核拒绝。
 - **命令边界**：只接收 argv 数组且 `shell=False`；可执行程序必须在白名单中。
 - **uv Coding Profile**：只允许受限的 sync/lock check、pytest、Ruff check/format check、
   unittest 和 compileall 形态；仍需批准。`uv add`、任意 Python、Ruff 修复参数和路径逃逸拒绝。
-- **资源限制**：命令有超时；文件读取、搜索结果、单条 trace 事件和 replay 总量有上限。
-- **会话限制**：原始历史和活动上下文有事件数/字节上限，会话按工作区隔离并校验 Session ID。
-- **本机权限**：会话目录和文件显式设置为 `0700`、`0600`；Provider 元数据可恢复但不保存 key。
+- **资源限制**：命令有超时；文件读取、搜索结果、单条 trace 事件、replay 总量和
+  OpenAI-compatible HTTP 响应体都有上限。
+- **会话限制**：原始 journal 和活动 checkpoint 有事件数/字节上限，checkpoint 与恢复尾部共用
+  字节预算；会话按工作区隔离并校验 Session ID，跨进程提交使用文件锁与序号冲突检查；Base URL
+  元数据拒绝凭据、query 和 fragment。
+- **本机权限与耐久写入**：会话目录和文件显式设置为 `0700`、`0600`。会话 append/状态和工具
+  文件写入使用 `fsync`；替换走同目录临时文件 + `os.replace`，新建走硬链接独占创建。
+- **运行时身份**：Provider 元数据可恢复但不保存 key；REPL `/resume` 不会静默跨
+  Provider、模型或 Base URL 切换，而是给出显式重启命令。
 - **凭据脱敏**：trace 对 API key、token、password、authorization 等字段递归脱敏。
 - **原始历史保留**：压缩只写活动窗口，不覆盖 append-only 原始消息，便于审计压缩前事实。
+- **中断恢复**：journal 使用递增 `seq` 并按阈值分段；checkpoint 保存 `through_seq`。恢复重放
+  checkpoint 后的尾记录，忽略最后半行，对缺失 ToolResult 补 synthetic failed 结果且不重放工具。
 - **循环熔断**：达到最大步骤后停止，避免模型无限调用工具。
 
 ## 首版刻意禁止
@@ -37,6 +48,24 @@
 
 获批的 `uv sync --locked/--frozen` 可能访问包索引或下载缺失依赖，获批的 pytest/unittest 会
 执行仓库代码。需要严格断网或运行不可信代码时，应使用由用户准备的容器/虚拟机和独立网络策略。
+
+审批预览有长度上限，脱敏也只能降低常见凭据误显风险，不能证明任意文本都不敏感。TOCTOU
+哈希复核能发现审批后目标内容改变，但不能隔离同机恶意进程或替代操作系统权限边界。
+
+## 耐久写入与恢复不等于事务
+
+`fsync`、同目录临时文件、`os.replace` 和独占新建能减少半写与意外覆盖。journal 最后一条半行
+可忽略，checkpoint 后的完整尾记录可重放。但这不是跨多个文件的 ACID 事务，也不承诺所有
+文件系统、磁盘缓存或突然断电场景都零丢失。
+
+synthetic failed ToolResult 只表示“恢复时没有可信的已落盘结果，而且工具没有被自动重放”。
+它不能证明中断前工具绝对没有执行过；涉及副作用时，用户必须先检查目标文件、命令结果和 trace。
+
+## Provider 输入边界不等于网络隔离
+
+OpenAI-compatible 响应体上限防止单个成功或错误响应无界占用内存。Session 中的 Base URL 要求
+HTTP(S) 主机地址，并拒绝用户名、密码、query 和 fragment，以免把明显凭据写入元数据。它们
+不验证第三方服务可信度，也不阻止已获准的 Provider 网络请求。
 
 ## 尚未声称解决的问题
 

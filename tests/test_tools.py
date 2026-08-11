@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import stat
 import sys
 from pathlib import Path
 
 import pytest
 
+from pi_claw.approval import TerminalApprovalBroker
 from pi_claw.policy import WorkspacePolicy
 from pi_claw.schemas import ToolCall
 from pi_claw.tools import ToolExecutor, ToolRegistry
@@ -177,6 +179,136 @@ def test_apply_patch_is_atomic_when_later_edit_is_not_unique(tmp_path: Path) -> 
     assert "第 2 个 edit" in result.error
     assert "必须唯一" in result.error
     assert target.read_text(encoding="utf-8") == original
+
+
+def test_write_approval_receives_bounded_unified_diff(tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("before\n", encoding="utf-8")
+    previews: list[str] = []
+
+    def approve(_call: ToolCall, _decision: object, preview: str | None) -> bool:
+        previews.append(preview or "")
+        return True
+
+    executor = ToolExecutor(
+        WorkspacePolicy(tmp_path, allow_write=True),
+        approval_callback=approve,
+    )
+    result = execute(
+        executor,
+        "write_or_replace",
+        path="target.txt",
+        old="before",
+        new="after",
+    )
+
+    assert result.ok
+    assert "--- a/target.txt" in previews[0]
+    assert "+++ b/target.txt" in previews[0]
+    assert "-before" in previews[0]
+    assert "+after" in previews[0]
+
+
+def test_write_refuses_when_target_changes_during_approval(tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("before\n", encoding="utf-8")
+
+    def mutate_then_approve(_call: ToolCall, _decision: object, _preview: str | None) -> bool:
+        target.write_text("external change\n", encoding="utf-8")
+        return True
+
+    executor = ToolExecutor(
+        WorkspacePolicy(tmp_path, allow_write=True),
+        approval_callback=mutate_then_approve,
+    )
+    result = execute(
+        executor,
+        "write_or_replace",
+        path="target.txt",
+        old="before",
+        new="after",
+    )
+
+    assert not result.ok
+    assert "审批后目标文件发生变化" in result.error
+    assert target.read_text(encoding="utf-8") == "external change\n"
+
+
+def test_session_write_approval_is_bound_to_reviewed_file_version(tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("a\n", encoding="utf-8")
+    answers = iter(["a", "n"])
+    broker = TerminalApprovalBroker(
+        input_fn=lambda _prompt: next(answers),
+        interactive=True,
+    )
+    executor = ToolExecutor(
+        WorkspacePolicy(tmp_path, allow_write=True),
+        approval_callback=broker,
+    )
+    call = ToolCall(
+        "write-versioned",
+        "write_or_replace",
+        {"path": "target.txt", "old": "a", "new": "b"},
+    )
+
+    assert executor.execute(call).ok
+    target.write_text("external change\na\n", encoding="utf-8")
+    refused = executor.execute(call)
+
+    assert not refused.ok
+    assert "未获批准" in str(refused.error)
+    assert target.read_text(encoding="utf-8") == "external change\na\n"
+
+
+def test_atomic_replace_failure_preserves_original(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("before\n", encoding="utf-8")
+
+    def fail_replace(*_args: object) -> None:
+        raise OSError("boom")
+
+    monkeypatch.setattr("pi_claw.tools.os.replace", fail_replace)
+    executor = ToolExecutor(
+        WorkspacePolicy(tmp_path, allow_write=True),
+        approval_callback=lambda *_: True,
+    )
+
+    result = execute(
+        executor,
+        "write_or_replace",
+        path="target.txt",
+        old="before",
+        new="after",
+    )
+
+    assert not result.ok
+    assert target.read_text(encoding="utf-8") == "before\n"
+    assert not list(tmp_path.glob(".target.txt-*.tmp"))
+
+
+def test_atomic_replace_preserves_file_mode(tmp_path: Path) -> None:
+    target = tmp_path / "script.sh"
+    target.write_text("before\n", encoding="utf-8")
+    target.chmod(0o750)
+    executor = ToolExecutor(
+        WorkspacePolicy(tmp_path, allow_write=True),
+        approval_callback=lambda *_: True,
+    )
+
+    result = execute(
+        executor,
+        "write_or_replace",
+        path="script.sh",
+        old="before",
+        new="after",
+    )
+
+    assert result.ok
+    assert stat.S_IMODE(target.stat().st_mode) == 0o750
 
 
 def test_write_size_limits_cover_input_target_and_result(tmp_path: Path) -> None:
