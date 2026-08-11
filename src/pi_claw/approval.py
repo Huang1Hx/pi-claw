@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from collections.abc import Callable
@@ -47,11 +48,21 @@ class TerminalApprovalBroker:
         self.interactive = sys.stdin.isatty() if interactive is None else interactive
         self.on_state_change = on_state_change
 
-    def __call__(self, call: ToolCall, decision: PolicyDecision) -> bool:
-        return self.request(call, decision) is not ApprovalChoice.DENY
+    def __call__(
+        self,
+        call: ToolCall,
+        decision: PolicyDecision,
+        preview: str | None = None,
+    ) -> bool:
+        return self.request(call, decision, preview) is not ApprovalChoice.DENY
 
-    def request(self, call: ToolCall, decision: PolicyDecision) -> ApprovalChoice:
-        scope = self.scope_for(call)
+    def request(
+        self,
+        call: ToolCall,
+        decision: PolicyDecision,
+        preview: str | None = None,
+    ) -> ApprovalChoice:
+        scope = self.scope_for(call, preview)
         if self.auto_approve:
             return ApprovalChoice.ALLOW_ONCE
         if scope in self.approved_scopes:
@@ -61,10 +72,14 @@ class TerminalApprovalBroker:
         if not self.interactive:
             return ApprovalChoice.DENY
 
-        preview = json.dumps(redact(call.arguments), ensure_ascii=False, indent=2)
+        arguments = self._argument_summary(call)
+        safe_preview = redact(preview) if preview else None
         print(
-            f"\n需要审批：{call.name}\n原因：{decision.reason}\n参数：{preview}", file=self.output
+            f"\n需要审批：{call.name}\n原因：{decision.reason}\n参数摘要：{arguments}",
+            file=self.output,
         )
+        if safe_preview:
+            print(f"变更预览：\n{safe_preview}", file=self.output)
         while True:
             answer = self.input_fn("[y] 允许一次 / [a] 本会话允许同类 / [n] 拒绝：").strip().lower()
             if answer in {"y", "yes", "1"}:
@@ -79,15 +94,52 @@ class TerminalApprovalBroker:
             print("请输入 y、a 或 n。", file=self.output)
 
     @staticmethod
-    def scope_for(call: ToolCall) -> str:
+    def scope_for(call: ToolCall, preview: str | None = None) -> str:
         """把批准限制在可理解的操作类型，而不是放行所有未来动作。"""
 
         if call.name in {"write_or_replace", "apply_patch"}:
             path = str(call.arguments.get("path", ""))
-            return f"{call.name}:{path}"
+            normalized = {
+                "arguments": call.arguments,
+                # 写审批绑定用户本次看到的完整预览；预览含目标文件 preimage hash。
+                # 文件任何位置发生变化后都会形成新 scope，必须重新确认。
+                "preview": preview,
+            }
+            encoded = json.dumps(
+                normalized,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            digest = hashlib.sha256(encoded).hexdigest()[:16]
+            return f"{call.name}:{path}:{digest}"
         if call.name == "run_command":
-            argv = call.arguments.get("argv", [])
-            if isinstance(argv, list):
-                command = ":".join(str(item) for item in argv[:3])
-                return f"run_command:{command}"
+            normalized = {
+                "argv": call.arguments.get("argv", []),
+                "cwd": call.arguments.get("cwd", "."),
+            }
+            encoded = json.dumps(
+                normalized,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            digest = hashlib.sha256(encoded).hexdigest()[:16]
+            return f"run_command:{digest}"
         return call.name
+
+    @staticmethod
+    def _argument_summary(call: ToolCall) -> str:
+        if call.name in {"write_or_replace", "apply_patch"}:
+            summary: dict[str, object] = {"path": call.arguments.get("path", "")}
+            if call.name == "apply_patch":
+                edits = call.arguments.get("edits")
+                summary["edit_count"] = len(edits) if isinstance(edits, list) else "invalid"
+            return json.dumps(redact(summary), ensure_ascii=False)
+        if call.name == "run_command":
+            summary = {
+                "argv": call.arguments.get("argv", []),
+                "cwd": call.arguments.get("cwd", "."),
+            }
+            return json.dumps(redact(summary), ensure_ascii=False)
+        return json.dumps(redact(call.arguments), ensure_ascii=False)

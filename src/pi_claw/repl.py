@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -75,7 +76,18 @@ class CodingRepl:
                 model=self.model,
                 base_url=self.base_url,
             )
-        self.messages = self.store.load_active_messages(self.session.session_id, self.workspace)
+        self.messages, self._session_seq = self.store.load_active_snapshot(
+            self.session.session_id,
+            self.workspace,
+            repair_incomplete=True,
+        )
+        self.store.save_active_messages(
+            self.session.session_id,
+            self.workspace,
+            self.messages,
+            expected_seq=self._session_seq,
+        )
+        self._refresh_recovery_status()
         self._build_runtime()
 
     def _create_session(self) -> SessionInfo:
@@ -122,8 +134,13 @@ class CodingRepl:
         )
 
     def _persist_message(self, message: dict[str, Any]) -> None:
-        self.store.append_message(self.session.session_id, self.workspace, message)
-        self.store.save_active_messages(self.session.session_id, self.workspace, self.messages)
+        self._session_seq = self.store.append_message(
+            self.session.session_id,
+            self.workspace,
+            message,
+            active_messages=self.messages,
+            expected_seq=self._session_seq,
+        )
         self.session = self.store.load(self.session.session_id, self.workspace)
         self._print_runtime_message(message)
 
@@ -201,7 +218,12 @@ class CodingRepl:
     def run_turn(self, text: str) -> int:
         result = self.agent.run(text, messages=self.messages)
         # Provider 在压缩后直接失败时不会产生新消息；此处仍要保存活动窗口。
-        self.store.save_active_messages(self.session.session_id, self.workspace, self.messages)
+        self.store.save_active_messages(
+            self.session.session_id,
+            self.workspace,
+            self.messages,
+            expected_seq=self._session_seq,
+        )
         if result.final_text:
             print(f"\nassistant> {result.final_text}\n", file=self.output)
         if result.status is not RunStatus.COMPLETED:
@@ -223,7 +245,18 @@ class CodingRepl:
             return True
         if command == "/new":
             self.session = self._create_session()
-            self.messages = self.store.load_active_messages(self.session.session_id, self.workspace)
+            self.messages, self._session_seq = self.store.load_active_snapshot(
+                self.session.session_id,
+                self.workspace,
+                repair_incomplete=True,
+            )
+            self.store.save_active_messages(
+                self.session.session_id,
+                self.workspace,
+                self.messages,
+                expected_seq=self._session_seq,
+            )
+            self._refresh_recovery_status()
             self._build_runtime()
             print(f"已创建新会话：{self.session.session_id}", file=self.output)
             return True
@@ -231,8 +264,41 @@ class CodingRepl:
             self._print_sessions()
             return True
         if command == "/resume":
-            self.session = self.store.load(argument, self.workspace)
-            self.messages = self.store.load_active_messages(self.session.session_id, self.workspace)
+            candidate = self.store.load(argument, self.workspace)
+            if (
+                candidate.provider != self.provider_name
+                or candidate.model != self.model
+                or candidate.base_url != self.base_url
+            ):
+                command_parts = [
+                    "uv run pi-claw chat",
+                    f"--workspace {shlex.quote(str(self.workspace))}",
+                    f"--session {shlex.quote(candidate.session_id)}",
+                    f"--provider {shlex.quote(candidate.provider)}",
+                ]
+                if candidate.model:
+                    command_parts.append(f"--model {shlex.quote(candidate.model)}")
+                if candidate.base_url:
+                    command_parts.append(f"--base-url {shlex.quote(candidate.base_url)}")
+                print(
+                    "目标会话使用不同的 Provider 运行时。为避免静默混用模型，"
+                    "请退出后运行：\n" + " ".join(command_parts),
+                    file=self.output,
+                )
+                return True
+            self.session = candidate
+            self.messages, self._session_seq = self.store.load_active_snapshot(
+                self.session.session_id,
+                self.workspace,
+                repair_incomplete=True,
+            )
+            self.store.save_active_messages(
+                self.session.session_id,
+                self.workspace,
+                self.messages,
+                expected_seq=self._session_seq,
+            )
+            self._refresh_recovery_status()
             self._build_runtime()
             print(f"已恢复会话：{self.session.session_id}", file=self.output)
             return True
@@ -243,6 +309,7 @@ class CodingRepl:
                 self.session.session_id,
                 self.workspace,
                 self.messages,
+                expected_seq=self._session_seq,
             )
             print(f"上下文已压缩：{before} -> {len(self.messages)} 条活动消息", file=self.output)
             return True
@@ -277,6 +344,37 @@ class CodingRepl:
             banner,
             file=self.output,
         )
+        if self.recovered_tool_calls:
+            print(
+                f"恢复提示：{self.recovered_tool_calls} 个中断工具调用已标记为失败，未重放副作用。",
+                file=self.output,
+            )
+
+    @staticmethod
+    def _count_synthetic_recoveries(messages: list[dict[str, Any]]) -> int:
+        count = 0
+        for message in messages:
+            if message.get("role") != "tool":
+                continue
+            try:
+                result = json.loads(str(message.get("content", "{}")))
+            except json.JSONDecodeError:
+                continue
+            metadata = result.get("metadata", {}) if isinstance(result, dict) else {}
+            if isinstance(metadata, dict) and metadata.get("synthetic_recovery") is True:
+                count += 1
+        return count
+
+    def _refresh_recovery_status(self) -> None:
+        self.recovered_tool_calls = self._count_synthetic_recoveries(self.messages)
+        if self.recovered_tool_calls:
+            self.trace.record(
+                "session_recovered_incomplete_tools",
+                {
+                    "session_id": self.session.session_id,
+                    "count": self.recovered_tool_calls,
+                },
+            )
 
     def _print_sessions(self) -> None:
         sessions = self.store.list_sessions(self.workspace)
