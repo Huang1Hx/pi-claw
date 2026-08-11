@@ -95,9 +95,7 @@ def _run_demo(args: argparse.Namespace) -> int:
         calculator = workspace / "calculator.py"
         test_calculator = workspace / "test_calculator.py"
         calculator.write_text(
-            "def add(a: int, b: int) -> int:\n"
-            "    \"\"\"返回两个整数之和。\"\"\"\n"
-            "    return a - b\n",
+            'def add(a: int, b: int) -> int:\n    """返回两个整数之和。"""\n    return a - b\n',
             encoding="utf-8",
         )
         test_calculator.write_text(

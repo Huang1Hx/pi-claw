@@ -40,9 +40,7 @@ class WorkspacePolicy:
             if call.name in self.WRITE_TOOLS:
                 self._validate_file_arguments(call.name, call.arguments, write=True)
                 state = (
-                    "已启用写能力，仍需逐次批准"
-                    if self.allow_write
-                    else "默认只读，需要显式批准"
+                    "已启用写能力，仍需逐次批准" if self.allow_write else "默认只读，需要显式批准"
                 )
                 return PolicyDecision(PolicyAction.ASK, state)
             if call.name == "run_command":
@@ -121,9 +119,7 @@ class WorkspacePolicy:
         if not allowed:
             return PolicyDecision(PolicyAction.DENY, "命令不在只读/测试白名单中")
         state = (
-            "已启用命令能力，仍需逐次批准"
-            if self.allow_commands
-            else "命令默认关闭，需要显式批准"
+            "已启用命令能力，仍需逐次批准" if self.allow_commands else "命令默认关闭，需要显式批准"
         )
         return PolicyDecision(
             PolicyAction.ASK,

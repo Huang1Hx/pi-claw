@@ -99,9 +99,7 @@ class Agent:
         self._record("max_steps_reached", {"error": error}, self.max_steps, run_id)
         return RunResult(RunStatus.MAX_STEPS, run_id, self.max_steps, error=error)
 
-    def _record(
-        self, event: str, payload: Any, step: int, run_id: str
-    ) -> None:
+    def _record(self, event: str, payload: Any, step: int, run_id: str) -> None:
         if self.trace is not None:
             self.trace.record(event, payload, step=step, run_id=run_id)
 
