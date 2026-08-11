@@ -54,16 +54,31 @@ class ToolCall:
 
 @dataclass(frozen=True, slots=True)
 class ModelReply:
-    """模型单轮回复：必须且只能是最终文本或一个工具调用。"""
+    """模型单轮回复：最终文本，或同一轮的一组结构化工具调用。
+
+    ``tool_call`` 保留给已有调用方；新代码使用 ``tool_calls``。两者会在
+    ``__post_init__`` 中归一化，避免项目升级后破坏 v0 的测试和示例。
+    """
 
     final_text: str | None = None
     tool_call: ToolCall | None = None
+    tool_calls: tuple[ToolCall, ...] = ()
 
     def __post_init__(self) -> None:
         has_final = self.final_text is not None
-        has_call = self.tool_call is not None
+        if self.tool_call is not None and self.tool_calls:
+            raise ValueError("ModelReply 不能同时设置 tool_call 和 tool_calls")
+        calls = self.tool_calls
+        if self.tool_call is not None:
+            calls = (self.tool_call,)
+            object.__setattr__(self, "tool_calls", calls)
+        elif len(calls) == 1:
+            object.__setattr__(self, "tool_call", calls[0])
+        if not all(isinstance(call, ToolCall) for call in calls):
+            raise TypeError("tool_calls 中每项都必须是 ToolCall")
+        has_call = bool(calls)
         if has_final == has_call:
-            raise ValueError("ModelReply 必须且只能包含 final_text 或 tool_call")
+            raise ValueError("ModelReply 必须且只能包含 final_text 或 tool_calls")
         if has_final and not isinstance(self.final_text, str):
             raise TypeError("final_text 必须是字符串")
 
@@ -75,9 +90,15 @@ class ModelReply:
     def call(cls, call: ToolCall) -> ModelReply:
         return cls(tool_call=call)
 
+    @classmethod
+    def calls(cls, calls: tuple[ToolCall, ...] | list[ToolCall]) -> ModelReply:
+        return cls(tool_calls=tuple(calls))
+
     def to_dict(self) -> dict[str, Any]:
-        if self.tool_call is not None:
-            return {"tool_call": self.tool_call.to_dict()}
+        if self.tool_calls:
+            if len(self.tool_calls) == 1:
+                return {"tool_call": self.tool_calls[0].to_dict()}
+            return {"tool_calls": [call.to_dict() for call in self.tool_calls]}
         return {"final_text": self.final_text}
 
 

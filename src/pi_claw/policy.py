@@ -19,18 +19,22 @@ class WorkspacePolicy:
     """
 
     READ_TOOLS = frozenset({"list_files", "search_text", "read_file"})
-    WRITE_TOOLS = frozenset({"write_or_replace"})
+    WRITE_TOOLS = frozenset({"write_or_replace", "apply_patch"})
 
     def __init__(
         self,
         root: str | Path,
         allow_write: bool = False,
         allow_commands: bool = False,
+        command_profile: str = "minimal",
     ) -> None:
+        if command_profile not in {"minimal", "coding"}:
+            raise ValueError("command_profile 必须是 minimal 或 coding")
         self.workspace = Workspace(root)
         self.root = self.workspace.root
         self.allow_write = allow_write
         self.allow_commands = allow_commands
+        self.command_profile = command_profile
 
     def evaluate(self, call: ToolCall) -> PolicyDecision:
         try:
@@ -62,7 +66,7 @@ class WorkspacePolicy:
         path = arguments.get("path", ".")
         if not isinstance(path, (str, os.PathLike)):
             raise TypeError("path 必须是字符串路径")
-        allow_missing = write and tool_name == "write_or_replace"
+        allow_missing = write and tool_name in self.WRITE_TOOLS
         self.workspace.resolve(path, allow_missing=allow_missing)
 
     def _evaluate_command(self, arguments: dict[str, Any]) -> PolicyDecision:
@@ -95,7 +99,6 @@ class WorkspacePolicy:
             "rm",
             "pip",
             "pip3",
-            "uv",
             "npm",
             "npx",
             "yarn",
@@ -111,6 +114,8 @@ class WorkspacePolicy:
         python_names = {"python", "python3", Path(sys.executable).name.lower()}
         if executable == sys.executable or basename in python_names:
             allowed = self._validate_unittest_argv(argv)
+        elif basename == "uv" and self.command_profile == "coding":
+            allowed = self._validate_uv_argv(argv)
         elif basename == "git":
             if len(argv) >= 2 and argv[1] in {"push", "reset", "clean"}:
                 return PolicyDecision(PolicyAction.DENY, f"危险 git 子命令始终禁止：{argv[1]}")
@@ -126,6 +131,72 @@ class WorkspacePolicy:
             state,
             {"cwd": str(resolved_cwd), "argv": argv},
         )
+
+    def _validate_uv_argv(self, argv: list[str]) -> bool:
+        """允许 Coding Agent 运行少量可复现的 uv 验证命令。
+
+        所有命令仍然返回 ASK。这里仅限制语法，不能替代进程 Sandbox；pytest
+        和 unittest 都会执行工作区代码，只能在可信仓库中批准。
+        """
+
+        if len(argv) < 2:
+            return False
+        if argv[1:] in (["sync", "--locked"], ["sync", "--frozen"], ["lock", "--check"]):
+            return True
+        if argv[1:3] == ["run", "pytest"]:
+            return self._validate_pytest_arguments(argv[3:])
+        if argv[1:4] == ["run", "ruff", "check"]:
+            return self._validate_ruff_arguments(argv[4:], format_check=False)
+        if argv[1:4] == ["run", "ruff", "format"]:
+            return self._validate_ruff_arguments(argv[4:], format_check=True)
+        if argv[1:4] == ["run", "python", "-m"] and len(argv) >= 5:
+            if argv[4] == "unittest":
+                return self._validate_unittest_argv(["python", "-m", *argv[4:]])
+            if argv[4] == "compileall":
+                return self._validate_compileall_arguments(argv[5:])
+        return False
+
+    def _validate_pytest_arguments(self, arguments: list[str]) -> bool:
+        safe_flags = {"-q", "-v", "-x", "--disable-warnings", "--strict-markers"}
+        for argument in arguments:
+            if argument in safe_flags or argument.startswith("--maxfail="):
+                continue
+            if argument.startswith("-") or not self._safe_relative_path(argument):
+                return False
+        return True
+
+    def _validate_ruff_arguments(self, arguments: list[str], *, format_check: bool) -> bool:
+        safe_flags = {"--check"} if format_check else {"--output-format=concise"}
+        saw_check = not format_check
+        for argument in arguments:
+            if argument in safe_flags:
+                saw_check = saw_check or argument == "--check"
+                continue
+            if argument.startswith("-") or not self._safe_relative_path(
+                argument, allow_missing=True
+            ):
+                return False
+        return saw_check
+
+    def _validate_compileall_arguments(self, arguments: list[str]) -> bool:
+        path_count = 0
+        for argument in arguments:
+            if argument == "-q":
+                continue
+            if argument.startswith("-") or not self._safe_relative_path(argument):
+                return False
+            path_count += 1
+        return path_count > 0
+
+    def _safe_relative_path(self, value: str, *, allow_missing: bool = False) -> bool:
+        path = Path(value)
+        if path.is_absolute() or ".." in path.parts:
+            return False
+        try:
+            self.workspace.resolve(path, allow_missing=allow_missing)
+        except (OSError, WorkspaceViolation):
+            return False
+        return True
 
     def _validate_unittest_argv(self, argv: list[str]) -> bool:
         """只允许 unittest 的无路径开关和工作区内测试目标。"""

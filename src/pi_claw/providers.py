@@ -7,6 +7,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Iterable, Sequence
 from typing import Any, Protocol, runtime_checkable
 
@@ -62,6 +63,48 @@ class ScriptedProvider:
         tools: Sequence[dict[str, Any]] | None = None,
     ) -> ModelReply:
         return self.complete(messages, tools)
+
+
+class OfflineCodingProvider:
+    """可连续多轮使用的确定性离线 Provider。
+
+    它只做工作区文件枚举，用于验证 REPL、Session 和 Context；不会把固定脚本
+    冒充真实模型，也不会修改用户仓库。
+    """
+
+    def complete(
+        self,
+        messages: Sequence[dict[str, Any]],
+        tools: Sequence[dict[str, Any]] | None = None,
+    ) -> ModelReply:
+        del tools
+        if not messages:
+            raise ProviderError("离线 Provider 没有收到消息")
+        latest = messages[-1]
+        if latest.get("role") == "tool":
+            try:
+                result = json.loads(str(latest.get("content", "{}")))
+                output = result.get("output", {})
+                files = output.get("files", []) if isinstance(output, dict) else []
+                count = len(files) if isinstance(files, list) else 0
+                truncated = bool(output.get("truncated")) if isinstance(output, dict) else False
+                reason = output.get("reason") if isinstance(output, dict) else None
+            except (json.JSONDecodeError, AttributeError, TypeError):
+                count = 0
+                truncated = False
+                reason = None
+            boundary = f"；结果已截断（{reason}）" if truncated else ""
+            return ModelReply.final(
+                f"离线 Coding Agent 已完成只读检查，共看到 {count} 个文件{boundary}。"
+                "该模式用于验证会话与工具链，不声称理解或修改了代码。"
+            )
+        return ModelReply.call(
+            ToolCall(
+                id=f"offline-{uuid.uuid4().hex[:12]}",
+                name="list_files",
+                arguments={"path": "."},
+            )
+        )
 
 
 class OpenAICompatibleProvider:
@@ -126,21 +169,21 @@ class OpenAICompatibleProvider:
 
         tool_calls = message.get("tool_calls") or []
         if tool_calls:
-            if len(tool_calls) != 1:
-                raise ProviderError("首版每轮只接受一个 tool_call")
-            raw_call = tool_calls[0]
+            parsed_calls: list[ToolCall] = []
             try:
-                function = raw_call["function"]
-                arguments = json.loads(function.get("arguments") or "{}")
-                if not isinstance(arguments, dict):
-                    raise TypeError("arguments 不是对象")
-                return ModelReply.call(
-                    ToolCall(
-                        id=raw_call["id"],
-                        name=function["name"],
-                        arguments=arguments,
+                for raw_call in tool_calls:
+                    function = raw_call["function"]
+                    arguments = json.loads(function.get("arguments") or "{}")
+                    if not isinstance(arguments, dict):
+                        raise TypeError("arguments 不是对象")
+                    parsed_calls.append(
+                        ToolCall(
+                            id=raw_call["id"],
+                            name=function["name"],
+                            arguments=arguments,
+                        )
                     )
-                )
+                return ModelReply.calls(parsed_calls)
             except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
                 raise ProviderError("模型 tool_call 格式无效，arguments 必须是 JSON 对象") from exc
 

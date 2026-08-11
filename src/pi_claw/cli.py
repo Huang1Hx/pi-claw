@@ -13,8 +13,10 @@ from pathlib import Path
 
 from .agent import Agent
 from .policy import WorkspacePolicy
-from .providers import OpenAICompatibleProvider, ScriptedProvider
+from .providers import OfflineCodingProvider, OpenAICompatibleProvider, ScriptedProvider
+from .repl import CodingRepl
 from .schemas import ModelReply, RunStatus, ToolCall
+from .session import SessionStore
 from .tools import ToolExecutor
 from .trace import TraceReplay, TraceWriter
 
@@ -25,6 +27,38 @@ def build_parser() -> argparse.ArgumentParser:
         description="可审计、可回放、默认只读的本地 Coding Agent",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    chat = subparsers.add_parser("chat", help="启动可恢复、多轮交互的 Coding Agent")
+    chat.add_argument("prompt", nargs="?", help="可选的首条任务；省略后进入交互输入")
+    chat.add_argument("--workspace", type=Path, default=Path.cwd(), help="工作区目录")
+    chat.add_argument(
+        "--provider",
+        choices=("scripted", "openai"),
+        default=None,
+        help="新会话默认 scripted；恢复会话默认沿用原 Provider",
+    )
+    chat.add_argument("--model", help="OpenAI-compatible 模型名，也可使用 OPENAI_MODEL")
+    chat.add_argument("--base-url", help="OpenAI-compatible API 根地址")
+    resume_group = chat.add_mutually_exclusive_group()
+    resume_group.add_argument(
+        "--continue",
+        "-c",
+        action="store_true",
+        dest="continue_latest",
+        help="恢复当前工作区最近会话",
+    )
+    resume_group.add_argument("--session", help="恢复指定 session id")
+    chat.add_argument("--data-dir", type=Path, help="覆盖会话数据目录，主要用于测试")
+    chat.add_argument("--print", action="store_true", dest="print_only", help="执行首条任务后退出")
+    chat.add_argument("--yes", action="store_true", help="自动批准策略允许的副作用，仅限可信工作区")
+    chat.add_argument(
+        "--max-steps", type=_positive_int, default=12, help="每个用户回合最大模型轮数"
+    )
+    chat.add_argument("--trace", type=Path, help="可选 JSONL 审计轨迹路径")
+
+    sessions = subparsers.add_parser("sessions", help="列出当前工作区的历史会话")
+    sessions.add_argument("--workspace", type=Path, default=Path.cwd(), help="工作区目录")
+    sessions.add_argument("--data-dir", type=Path, help="覆盖会话数据目录，主要用于测试")
 
     demo = subparsers.add_parser("demo", help="在临时目录运行确定性的离线修复演示")
     demo.add_argument(
@@ -192,6 +226,58 @@ def _run_agent(args: argparse.Namespace) -> int:
     return 0 if result.status is RunStatus.COMPLETED else 1
 
 
+def _run_chat(args: argparse.Namespace) -> int:
+    _warn_yes(args.yes)
+    workspace = args.workspace.expanduser().resolve(strict=True)
+    trace = _trace(args.trace)
+    print(f"审计轨迹：{trace.path}")
+    store = SessionStore(args.data_dir)
+    resumed = None
+    if args.session:
+        resumed = store.load(args.session, workspace)
+    elif args.continue_latest:
+        resumed = store.latest(workspace)
+    provider_name = args.provider or (resumed.provider if resumed is not None else "scripted")
+    model = args.model or (resumed.model if resumed is not None else None)
+    base_url = args.base_url or (resumed.base_url if resumed is not None else None)
+    if resumed is not None and args.provider and args.provider != resumed.provider:
+        print(
+            f"提示：会话 Provider 将从 {resumed.provider} 切换为 {args.provider}。",
+            file=sys.stderr,
+        )
+    provider = (
+        OpenAICompatibleProvider(model=model, base_url=base_url)
+        if provider_name == "openai"
+        else OfflineCodingProvider()
+    )
+    repl = CodingRepl(
+        workspace=workspace,
+        provider=provider,
+        provider_name=provider_name,
+        model=model,
+        base_url=base_url,
+        store=store,
+        trace=trace,
+        max_steps=args.max_steps,
+        session_id=resumed.session_id if resumed is not None else args.session,
+        continue_latest=args.continue_latest and resumed is None,
+        auto_approve=args.yes,
+    )
+    return repl.run(args.prompt, print_only=args.print_only)
+
+
+def _list_sessions(args: argparse.Namespace) -> int:
+    workspace = args.workspace.expanduser().resolve(strict=True)
+    sessions = SessionStore(args.data_dir).list_sessions(workspace)
+    if not sessions:
+        print("当前工作区没有会话。")
+        return 0
+    for info in sessions:
+        model = f"/{info.model}" if info.model else ""
+        print(f"{info.session_id}\t{info.updated_at}\t{info.provider}{model}\t{info.title}")
+    return 0
+
+
 def _run_replay(args: argparse.Namespace) -> int:
     replay = TraceReplay(args.trace)
     for line in replay.format_lines():
@@ -203,6 +289,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "chat":
+            return _run_chat(args)
+        if args.command == "sessions":
+            return _list_sessions(args)
         if args.command == "demo":
             return _run_demo(args)
         if args.command == "run":

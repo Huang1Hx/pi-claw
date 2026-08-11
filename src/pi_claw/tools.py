@@ -59,8 +59,26 @@ _TOOL_DESCRIPTIONS = {
     "search_text": "在工作区文本文件中按字面量搜索",
     "read_file": "读取工作区内 UTF-8 文本文件",
     "write_or_replace": "创建新文件，或执行唯一的精确 old 到 new 替换",
+    "apply_patch": "对一个文件顺序执行一组唯一、精确的 old 到 new 替换",
     "run_command": "以 argv 数组运行白名单测试或只读 git 命令",
 }
+
+_IGNORED_DIRECTORY_NAMES = frozenset(
+    {
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "node_modules",
+        "runs",
+        "tmp",
+    }
+)
+_IGNORED_FILE_NAMES = frozenset({".DS_Store", ".coverage"})
 
 
 class ToolExecutor:
@@ -142,6 +160,32 @@ class ToolExecutor:
                     "new": {"type": "string"},
                 },
                 "required": ["path", "old", "new"],
+                "additionalProperties": False,
+            },
+        )
+        self.registry.register(
+            "apply_patch",
+            self.apply_patch,
+            {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "edits": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 50,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old": {"type": "string"},
+                                "new": {"type": "string"},
+                            },
+                            "required": ["old", "new"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["path", "edits"],
                 "additionalProperties": False,
             },
         )
@@ -364,6 +408,44 @@ class ToolExecutor:
             "replacements": 1,
         }
 
+    def apply_patch(self, path: str, edits: list[dict[str, str]]) -> dict[str, Any]:
+        """先在内存中完成全部精确替换，再一次写回目标文件。
+
+        该协议比让模型提交任意 unified diff 更容易校验。任一 ``old`` 不存在或
+        不唯一时，整个调用失败且文件保持不变。
+        """
+
+        if not isinstance(path, str):
+            raise TypeError("path 必须是字符串")
+        if not isinstance(edits, list) or not 1 <= len(edits) <= 50:
+            raise ValueError("edits 必须包含 1 到 50 个精确替换")
+        target = self.workspace.resolve(path)
+        if not target.is_file():
+            raise ValueError("apply_patch 要求目标文件已存在")
+        if target.stat().st_size > self.max_write_bytes:
+            raise ValueError(f"目标文件超过写入处理上限 {self.max_write_bytes} 字节")
+
+        content = target.read_text(encoding="utf-8")
+        for index, edit in enumerate(edits, start=1):
+            if not isinstance(edit, dict) or set(edit) != {"old", "new"}:
+                raise TypeError(f"第 {index} 个 edit 必须且只能包含 old、new")
+            old = edit["old"]
+            new = edit["new"]
+            if not isinstance(old, str) or not isinstance(new, str) or not old:
+                raise ValueError(f"第 {index} 个 edit 的 old 必须为非空字符串")
+            count = content.count(old)
+            if count != 1:
+                raise ValueError(f"第 {index} 个 edit 的 old 出现 {count} 次，必须唯一")
+            content = content.replace(old, new, 1)
+            if len(content.encode("utf-8")) > self.max_write_bytes:
+                raise ValueError(f"补丁结果超过写入上限 {self.max_write_bytes} 字节")
+
+        target.write_text(content, encoding="utf-8", newline="")
+        return {
+            "path": str(target.relative_to(self.workspace.root)),
+            "edits_applied": len(edits),
+        }
+
     def run_command(
         self,
         argv: list[str],
@@ -408,6 +490,8 @@ class ToolExecutor:
             current_path = Path(current)
             safe_directories: list[str] = []
             for name in sorted(directory_names):
+                if name in _IGNORED_DIRECTORY_NAMES:
+                    continue
                 try:
                     resolved = self.workspace.resolve(current_path / name)
                 except WorkspaceViolation:
@@ -416,6 +500,8 @@ class ToolExecutor:
                     safe_directories.append(name)
             directory_names[:] = safe_directories
             for name in sorted(file_names):
+                if name in _IGNORED_FILE_NAMES:
+                    continue
                 candidate = current_path / name
                 try:
                     resolved = self.workspace.resolve(candidate)
