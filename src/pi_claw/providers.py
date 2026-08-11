@@ -117,6 +117,7 @@ class OpenAICompatibleProvider:
         base_url: str | None = None,
         model: str | None = None,
         timeout: float = 30.0,
+        max_response_bytes: int = 5_000_000,
     ) -> None:
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self.base_url = (
@@ -124,8 +125,9 @@ class OpenAICompatibleProvider:
         ).rstrip("/")
         self.model = model or os.environ.get("OPENAI_MODEL")
         self.timeout = timeout
-        if timeout <= 0:
-            raise ValueError("Provider timeout 必须大于 0")
+        self.max_response_bytes = max_response_bytes
+        if timeout <= 0 or max_response_bytes <= 0:
+            raise ValueError("Provider timeout 与 max_response_bytes 必须大于 0")
 
     def complete(
         self,
@@ -152,9 +154,12 @@ class OpenAICompatibleProvider:
         )
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                body = response.read().decode("utf-8")
+                body = self._read_limited_body(response, "模型响应")
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:1000]
+            try:
+                detail = self._read_limited_body(exc, "模型错误响应")[:1000]
+            except ProviderError as limit_error:
+                raise ProviderError(self._sanitize_error(str(limit_error))) from exc
             raise ProviderError(
                 self._sanitize_error(f"模型服务返回 HTTP {exc.code}：{detail}")
             ) from exc
@@ -203,6 +208,23 @@ class OpenAICompatibleProvider:
         if self.base_url.endswith("/chat/completions"):
             return self.base_url
         return self.base_url + "/chat/completions"
+
+    def _read_limited_body(self, response: Any, label: str) -> str:
+        headers = getattr(response, "headers", None)
+        if headers is not None:
+            content_length = headers.get("Content-Length")
+            try:
+                if content_length is not None and int(content_length) > self.max_response_bytes:
+                    raise ProviderError(f"{label}超过字节上限 {self.max_response_bytes}")
+            except (TypeError, ValueError):
+                pass
+        raw = response.read(self.max_response_bytes + 1)
+        if len(raw) > self.max_response_bytes:
+            raise ProviderError(f"{label}超过字节上限 {self.max_response_bytes}")
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ProviderError(f"{label}不是有效 UTF-8") from exc
 
     def _sanitize_error(self, message: str) -> str:
         if self.api_key:

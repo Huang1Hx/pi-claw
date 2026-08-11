@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import tempfile
 import uuid
@@ -240,6 +241,9 @@ def _run_chat(args: argparse.Namespace) -> int:
     provider_name = args.provider or (resumed.provider if resumed is not None else "scripted")
     model = args.model or (resumed.model if resumed is not None else None)
     base_url = args.base_url or (resumed.base_url if resumed is not None else None)
+    if provider_name == "openai":
+        model = model or os.environ.get("OPENAI_MODEL")
+        base_url = base_url or os.environ.get("OPENAI_BASE_URL")
     if resumed is not None and args.provider and args.provider != resumed.provider:
         print(
             f"提示：会话 Provider 将从 {resumed.provider} 切换为 {args.provider}。",

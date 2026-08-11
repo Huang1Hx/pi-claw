@@ -73,7 +73,7 @@ flowchart LR
 - `schemas.py`：Provider、Agent、Policy 和 Tool 之间的结构化数据。
 - `providers.py`：离线 Provider 与可选 OpenAI-compatible Provider。
 - `agent.py`：持久消息、有最大步数、支持同轮多个 Tool Call 的 Agent 循环。
-- `session.py`：按工作区隔离的原始历史、活动上下文、Provider 元数据和审批状态。
+- `session.py`：按工作区隔离的分段消息 journal、可重放 checkpoint、Provider 元数据和审批状态。
 - `context.py`：确定性、有界的上下文压缩，不覆盖 append-only 原始历史。
 - `prompts.py`：系统约束与工作区根目录项目入口发现。
 - `approval.py`：允许一次、本会话允许同类、拒绝；非 TTY 默认拒绝。
@@ -118,6 +118,9 @@ REPL 支持 `/new`、`/sessions`、`/resume <id>`、`/compact [关注点]`、`/c
 `/history`、`/title <标题>` 和 `/exit`。详细说明见
 [v1 Kimi CLI 路线](docs/KIMI_CLI_V1.md)。
 
+REPL 内的 `/resume` 会核对目标会话记录的 Provider、模型和 Base URL。三者与当前运行时不一致
+时，Pi-Claw 不会静默切换，而会打印一条带原会话参数的重启命令。
+
 ### 2. v0 离线安全内核演示
 
 ```bash
@@ -144,7 +147,9 @@ Prompt 和交互审批；新用法优先选择 `chat`。
 真实模式需要外部 API key，离线演示和测试不需要。获取、配置、验证和故障排查见
 [API Key 配置计划](docs/API_KEY_GUIDE.md)。指南包含 OpenAI、Kimi、Qwen/阿里云百炼和
 DeepSeek。本项目当前适配 OpenAI-compatible `/chat/completions`，并能解析同轮多个标准
-`tool_calls`；供应商、模型和端点必须确实支持这一协议。
+`tool_calls`；供应商、模型和端点必须确实支持这一协议。会话元数据中的 Base URL 必须是
+不含用户名、密码、query 或 fragment 的 HTTP(S) API 根地址；模型成功响应和 HTTP 错误响应
+也都有读取字节上限。
 
 ```bash
 export OPENAI_API_KEY="你的密钥，不要提交到 Git"
@@ -171,9 +176,20 @@ uv run pi-claw chat \
 - v1 Coding Profile 只放行有限 `uv` 验证形态并仍返回 ASK；`uv add`、任意 Python、修复型
   Ruff 参数和路径逃逸仍拒绝。
 - `apply_patch` 只接受一个文件的 1 到 50 个精确替换；任一 `old` 不唯一则整次不写回。
+- 写审批展示有长度上限且经过脱敏的 unified diff 和目标 preimage 哈希；命令审批展示完整 argv 和
+  cwd。“本会话允许”绑定完整参数与已审阅文件版本，而不是泛化成路径或命令前缀；批准后执行前
+  还会复核目标文件哈希。
+- 会话 journal 每行有递增 `seq`，活动上下文是带 `through_seq` 的 checkpoint；大 journal 会分段。
+  恢复时重放 checkpoint 后的尾记录，忽略最后一条未完整落盘的行，并为缺失结果的 Tool Call
+  补失败标记，但不会自动重放工具。
 - 子进程只继承最小环境变量白名单，不会得到 API key、token 或 password。
 - 文件数、扫描字节、读取量、写入量、命令输出、命令时间和 Agent 步数都有上限。
-- 会话目录/文件显式使用 `0700/0600`；恢复会沿用 Provider、模型和 Base URL，但不落盘 API key。
+- 会话目录/文件显式使用 `0700/0600`；同一 Session 的提交由文件锁串行化，旧序号写入会拒绝。
+  会话 append、checkpoint、state 和工具文件写入会 `fsync`。
+  已有文件使用同目录临时文件加 `os.replace`，新文件使用硬链接独占创建；这提高中断恢复能力，
+  不等于数据库事务或跨所有文件系统的绝对断电保证。
+- 恢复会沿用 Provider、模型和 Base URL，但不落盘 API key；REPL 不会静默混用不同运行时。
+- OpenAI-compatible 响应体有字节上限，Base URL 元数据拒绝内嵌凭据、query 和 fragment。
 - Trace 递归脱敏，Replay 没有 ToolExecutor，不能重新执行副作用。
 
 这不是生产级 OS Sandbox。获批的 Python 测试仍会执行仓库代码；不可信代码应放入由用户自行

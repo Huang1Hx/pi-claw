@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import difflib
+import hashlib
 import inspect
+import json
 import os
 import subprocess
+import tempfile
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -215,14 +220,23 @@ class ToolExecutor:
                 error=f"策略拒绝：{decision.reason}",
                 metadata=policy_metadata,
             )
+        prepared_fingerprint = self._write_fingerprint(call)
         if decision.action is PolicyAction.ASK and not approved:
-            approved = self._request_approval(call, decision)
+            approved = self._request_approval(call, decision, self.preview(call))
             if not approved:
                 return ToolResult(
                     call.id,
                     call.name,
                     False,
                     error=f"未获批准：{decision.reason}",
+                    metadata=policy_metadata,
+                )
+            if prepared_fingerprint != self._write_fingerprint(call):
+                return ToolResult(
+                    call.id,
+                    call.name,
+                    False,
+                    error="审批后目标文件发生变化，已拒绝执行；请重新预览并审批",
                     metadata=policy_metadata,
                 )
 
@@ -268,16 +282,132 @@ class ToolExecutor:
                 metadata=policy_metadata,
             )
 
-    def _request_approval(self, call: ToolCall, decision: PolicyDecision) -> bool:
+    def _request_approval(
+        self,
+        call: ToolCall,
+        decision: PolicyDecision,
+        preview: str | None,
+    ) -> bool:
         callback = self.approval_callback
         if callback is None:
             return False
         try:
             parameters = inspect.signature(callback).parameters
-            result = callback(call, decision) if len(parameters) >= 2 else callback(call)
+            if len(parameters) >= 3:
+                result = callback(call, decision, preview)
+            elif len(parameters) >= 2:
+                result = callback(call, decision)
+            else:
+                result = callback(call)
             return result is True
         except (TypeError, ValueError):
             return False
+
+    def preview(self, call: ToolCall, *, max_chars: int = 12_000) -> str | None:
+        """为副作用调用生成有界预览；预览失败不会绕过后续真实校验。"""
+
+        if max_chars <= 0:
+            raise ValueError("preview max_chars 必须大于 0")
+        try:
+            if call.name == "run_command":
+                argv = call.arguments.get("argv", [])
+                cwd = call.arguments.get("cwd", ".")
+                return self._limit_preview(
+                    f"cwd: {cwd}\nargv: {json.dumps(argv, ensure_ascii=False)}",
+                    max_chars,
+                )
+            if call.name not in {"write_or_replace", "apply_patch"}:
+                return None
+            path = call.arguments.get("path")
+            if not isinstance(path, str):
+                return "无法预览：path 不是字符串"
+            target = self.workspace.resolve(path, allow_missing=True)
+            if target.is_file() and target.stat().st_size > self.max_write_bytes:
+                return f"无法预览：目标文件超过上限 {self.max_write_bytes} 字节"
+            before = target.read_text(encoding="utf-8") if target.is_file() else ""
+            after = before
+            if call.name == "write_or_replace":
+                old = call.arguments.get("old")
+                new = call.arguments.get("new")
+                if not isinstance(old, str) or not isinstance(new, str):
+                    return "无法预览：old/new 不是字符串"
+                if max(len(old.encode("utf-8")), len(new.encode("utf-8"))) > self.max_write_bytes:
+                    return f"无法预览：old/new 超过上限 {self.max_write_bytes} 字节"
+                if old == "":
+                    if target.exists():
+                        return "无法预览：创建目标已经存在"
+                    after = new
+                elif before.count(old) != 1:
+                    return f"无法预览：old 出现 {before.count(old)} 次，必须唯一"
+                else:
+                    after = before.replace(old, new, 1)
+            else:
+                edits = call.arguments.get("edits")
+                if not isinstance(edits, list):
+                    return "无法预览：edits 不是数组"
+                for index, edit in enumerate(edits, start=1):
+                    if not isinstance(edit, dict):
+                        return f"无法预览：第 {index} 个 edit 不是对象"
+                    old = edit.get("old")
+                    new = edit.get("new")
+                    if not isinstance(old, str) or not isinstance(new, str) or not old:
+                        return f"无法预览：第 {index} 个 edit 无效"
+                    if (
+                        max(len(old.encode("utf-8")), len(new.encode("utf-8")))
+                        > self.max_write_bytes
+                    ):
+                        return f"无法预览：第 {index} 个 edit 超过字节上限"
+                    if after.count(old) != 1:
+                        return f"无法预览：第 {index} 个 old 出现 {after.count(old)} 次"
+                    after = after.replace(old, new, 1)
+            relative = str(target.relative_to(self.workspace.root))
+            diff = "".join(
+                difflib.unified_diff(
+                    before.splitlines(keepends=True),
+                    after.splitlines(keepends=True),
+                    fromfile=f"a/{relative}" if target.exists() else "/dev/null",
+                    tofile=f"b/{relative}",
+                )
+            )
+            preimage = self._write_fingerprint(call)
+            preview = f"target-preimage-sha256: {preimage}\n" + (diff or "（文件内容没有变化）")
+            return self._limit_preview(preview, max_chars)
+        except (OSError, UnicodeDecodeError, WorkspaceViolation, ValueError) as exc:
+            return f"无法预览：{exc}"
+
+    @staticmethod
+    def _limit_preview(value: str, max_chars: int) -> str:
+        if len(value) <= max_chars:
+            return value
+        marker = "\n...[预览已截断]"
+        return value[: max(0, max_chars - len(marker))] + marker
+
+    def _write_fingerprint(self, call: ToolCall) -> str | None:
+        if call.name not in {"write_or_replace", "apply_patch"}:
+            return None
+        path = call.arguments.get("path")
+        if not isinstance(path, str):
+            return "invalid"
+        try:
+            target = self.workspace.resolve(path, allow_missing=True)
+        except (OSError, WorkspaceViolation):
+            return "invalid"
+        if not target.exists():
+            return "missing"
+        if not target.is_file():
+            return "not-file"
+        try:
+            return self._sha256_file(target)
+        except OSError:
+            return "unreadable"
+
+    @staticmethod
+    def _sha256_file(target: Path) -> str:
+        digest = hashlib.sha256()
+        with target.open("rb") as stream:
+            while block := stream.read(65_536):
+                digest.update(block)
+        return digest.hexdigest()
 
     def list_files(self, path: str = ".") -> dict[str, Any]:
         base = self.workspace.resolve(path)
@@ -383,16 +513,17 @@ class ToolExecutor:
             raise ValueError(f"new 超过写入上限 {self.max_write_bytes} 字节")
         target = self.workspace.resolve(path, allow_missing=True)
         if old == "":
-            # x 模式由操作系统保证“只创建、不覆盖”，避免先检查再写入的竞态。
             target.parent.mkdir(parents=True, exist_ok=True)
-            with target.open("x", encoding="utf-8", newline="") as stream:
-                stream.write(new)
+            self._atomic_create_text(target, new)
             return {"path": str(target.relative_to(self.workspace.root)), "created": True}
         if not target.is_file():
             raise ValueError("精确替换要求目标文件已存在")
         if target.stat().st_size > self.max_write_bytes:
             raise ValueError(f"目标文件超过写入处理上限 {self.max_write_bytes} 字节")
+        original_fingerprint = self._sha256_file(target)
         content = target.read_text(encoding="utf-8")
+        if self._sha256_file(target) != original_fingerprint:
+            raise ValueError("目标文件在读取期间发生变化，拒绝继续")
         count = content.count(old)
         if count == 0:
             raise ValueError("old 文本不存在，未修改文件")
@@ -401,7 +532,9 @@ class ToolExecutor:
         replaced = content.replace(old, new, 1)
         if len(replaced.encode("utf-8")) > self.max_write_bytes:
             raise ValueError(f"替换结果超过写入上限 {self.max_write_bytes} 字节")
-        target.write_text(replaced, encoding="utf-8", newline="")
+        if self._sha256_file(target) != original_fingerprint:
+            raise ValueError("目标文件在读取后发生变化，拒绝覆盖")
+        self._atomic_replace_text(target, replaced)
         return {
             "path": str(target.relative_to(self.workspace.root)),
             "created": False,
@@ -425,7 +558,10 @@ class ToolExecutor:
         if target.stat().st_size > self.max_write_bytes:
             raise ValueError(f"目标文件超过写入处理上限 {self.max_write_bytes} 字节")
 
+        original_fingerprint = self._sha256_file(target)
         content = target.read_text(encoding="utf-8")
+        if self._sha256_file(target) != original_fingerprint:
+            raise ValueError("目标文件在读取期间发生变化，拒绝继续")
         for index, edit in enumerate(edits, start=1):
             if not isinstance(edit, dict) or set(edit) != {"old", "new"}:
                 raise TypeError(f"第 {index} 个 edit 必须且只能包含 old、new")
@@ -440,11 +576,67 @@ class ToolExecutor:
             if len(content.encode("utf-8")) > self.max_write_bytes:
                 raise ValueError(f"补丁结果超过写入上限 {self.max_write_bytes} 字节")
 
-        target.write_text(content, encoding="utf-8", newline="")
+        if self._sha256_file(target) != original_fingerprint:
+            raise ValueError("目标文件在读取后发生变化，拒绝覆盖")
+        self._atomic_replace_text(target, content)
         return {
             "path": str(target.relative_to(self.workspace.root)),
             "edits_applied": len(edits),
         }
+
+    @staticmethod
+    def _write_temporary_text(target: Path, content: str) -> Path:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{target.name}-",
+            suffix=".tmp",
+            dir=target.parent,
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            with suppress(FileNotFoundError):
+                temporary.unlink()
+            raise
+        return temporary
+
+    @classmethod
+    def _atomic_create_text(cls, target: Path, content: str) -> None:
+        """用同目录临时文件 + 硬链接实现不覆盖已有目标的原子创建。"""
+
+        temporary = cls._write_temporary_text(target, content)
+        try:
+            os.link(temporary, target)
+            cls._fsync_directory(target.parent)
+        finally:
+            with suppress(FileNotFoundError):
+                temporary.unlink()
+
+    @classmethod
+    def _atomic_replace_text(cls, target: Path, content: str) -> None:
+        """完整落盘并 fsync 后再替换，避免进程中断留下半个目标文件。"""
+
+        original_mode = target.stat().st_mode & 0o777
+        temporary = cls._write_temporary_text(target, content)
+        try:
+            temporary.chmod(original_mode)
+            os.replace(temporary, target)
+            cls._fsync_directory(target.parent)
+        except BaseException:
+            with suppress(FileNotFoundError):
+                temporary.unlink()
+            raise
+
+    @staticmethod
+    def _fsync_directory(directory: Path) -> None:
+        descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     def run_command(
         self,

@@ -36,11 +36,12 @@ def test_approval_allow_session_persists_and_skips_next_prompt() -> None:
         on_state_change=changes.append,
     )
     call = write_call("target.py")
+    scope = TerminalApprovalBroker.scope_for(call)
 
     assert broker.request(call, DECISION) is ApprovalChoice.ALLOW_SESSION
     assert broker.request(call, DECISION) is ApprovalChoice.ALLOW_SESSION
-    assert broker.approved_scopes == {"write_or_replace:target.py"}
-    assert changes == [{"write_or_replace:target.py"}]
+    assert broker.approved_scopes == {scope}
+    assert changes == [{scope}]
 
 
 def test_approval_explicit_deny() -> None:
@@ -61,13 +62,20 @@ def test_non_tty_denies_without_reading_input() -> None:
     assert broker.request(write_call(), DECISION) is ApprovalChoice.DENY
 
 
-def test_command_scope_is_limited_to_command_prefix() -> None:
+def test_command_scope_binds_full_argv_and_cwd() -> None:
     call = ToolCall(
         "run-1",
         "run_command",
         {"argv": ["uv", "run", "pytest", "tests/test_one.py"]},
     )
-    assert TerminalApprovalBroker.scope_for(call) == "run_command:uv:run:pytest"
+    other = ToolCall(
+        "run-2",
+        "run_command",
+        {"argv": ["uv", "run", "pytest", "tests/test_two.py"]},
+    )
+    scope = TerminalApprovalBroker.scope_for(call)
+    assert scope.startswith("run_command:")
+    assert scope != TerminalApprovalBroker.scope_for(other)
 
 
 def test_apply_patch_scope_is_limited_to_target_path() -> None:
@@ -76,4 +84,24 @@ def test_apply_patch_scope_is_limited_to_target_path() -> None:
         "apply_patch",
         {"path": "src/app.py", "edits": [{"old": "a", "new": "b"}]},
     )
-    assert TerminalApprovalBroker.scope_for(call) == "apply_patch:src/app.py"
+    scope = TerminalApprovalBroker.scope_for(call)
+    assert scope.startswith("apply_patch:src/app.py:")
+
+
+def test_approval_preview_redacts_credentials() -> None:
+    output = io.StringIO()
+    broker = TerminalApprovalBroker(
+        input_fn=lambda _prompt: "n",
+        output=output,
+        interactive=True,
+    )
+
+    choice = broker.request(
+        write_call(),
+        DECISION,
+        "OPENAI_API_KEY=super-secret-value",
+    )
+
+    assert choice is ApprovalChoice.DENY
+    assert "super-secret-value" not in output.getvalue()
+    assert "[REDACTED]" in output.getvalue()

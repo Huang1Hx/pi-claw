@@ -22,8 +22,12 @@ class FakeResponse:
     def __exit__(self, *_args: object) -> None:
         return None
 
-    def read(self) -> bytes:
-        return self.body
+    @property
+    def headers(self) -> dict[str, str]:
+        return {"Content-Length": str(len(self.body))}
+
+    def read(self, size: int = -1) -> bytes:
+        return self.body if size < 0 else self.body[:size]
 
 
 def install_response(
@@ -205,6 +209,40 @@ def test_openai_provider_requires_key_and_model_before_network(
         OpenAICompatibleProvider(model="model").complete([])
     with pytest.raises(ProviderError, match="OPENAI_MODEL"):
         OpenAICompatibleProvider(api_key="key").complete([])
+
+
+def test_openai_provider_rejects_oversized_response_with_bounded_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class OversizedResponse:
+        headers: dict[str, str] = {}
+
+        def __init__(self) -> None:
+            self.requested_size: int | None = None
+
+        def __enter__(self) -> OversizedResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, size: int = -1) -> bytes:
+            self.requested_size = size
+            return b"x" * size
+
+    response = OversizedResponse()
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: response)
+    provider = OpenAICompatibleProvider(
+        api_key="private-key",
+        model="test-model",
+        max_response_bytes=64,
+    )
+
+    with pytest.raises(ProviderError, match="超过字节上限 64") as captured:
+        provider.complete([{"role": "user", "content": "hello"}])
+
+    assert response.requested_size == 65
+    assert "private-key" not in str(captured.value)
 
 
 def test_scripted_provider_exhaustion_and_reset() -> None:
