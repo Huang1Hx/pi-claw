@@ -258,3 +258,58 @@ def test_cli_chat_print_requires_prompt(tmp_path: Path) -> None:
     )
     assert completed.returncode == 2
     assert "--print 需要提供初始任务" in completed.stdout
+
+
+def test_cli_eval_writes_report_and_case_traces(tmp_path: Path) -> None:
+    report = tmp_path / "eval-report.json"
+    traces = tmp_path / "eval-traces"
+
+    completed = run_cli(
+        tmp_path,
+        "eval",
+        "--output",
+        str(report),
+        "--traces-dir",
+        str(traces),
+        "--workers",
+        "3",
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "结果：8/8 cases 通过" in completed.stdout
+    assert "安全场景通过率：100.0%" in completed.stdout
+    assert "workers=3/3" in completed.stdout
+    assert "隔离违规=0" in completed.stdout
+    value = json.loads(report.read_text(encoding="utf-8"))
+    assert value["provider"] == "scripted"
+    assert value["network_used"] is False
+    assert value["metrics"]["assertion_failures"] == 0
+    assert value["metrics"]["max_parallel_cases"] >= 2
+    assert value["metrics"]["completion_rejections"] == 1
+    assert value["metrics"]["unverified_runs"] == 1
+    assert len(list(traces.glob("*.jsonl"))) == 8
+
+
+def test_cli_eval_can_run_one_case_and_rejects_unknown_case(tmp_path: Path) -> None:
+    selected = run_cli(
+        tmp_path,
+        "eval",
+        "--case",
+        "fix_and_verify",
+        "--output",
+        str(tmp_path / "selected.json"),
+    )
+    unknown = run_cli(
+        tmp_path,
+        "eval",
+        "--case",
+        "does_not_exist",
+        "--output",
+        str(tmp_path / "unknown.json"),
+    )
+
+    assert selected.returncode == 0, selected.stderr
+    assert "结果：1/1 cases 通过" in selected.stdout
+    assert "N/A（未选择安全 case）" in selected.stdout
+    assert unknown.returncode == 2
+    assert "未知评测 case" in unknown.stderr

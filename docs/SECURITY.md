@@ -27,6 +27,8 @@
 - **运行时身份**：Provider 元数据可恢复但不保存 key；REPL `/resume` 不会静默跨
   Provider、模型或 Base URL 切换，而是给出显式重启命令。
 - **凭据脱敏**：trace 对 API key、token、password、authorization 等字段递归脱敏。
+- **完成证据门**：成功写入后缺少成功验证 ToolResult 时拒绝 `completed`，但它不是业务语义证明，
+  也不能替代 Sandbox。
 - **原始历史保留**：压缩只写活动窗口，不覆盖 append-only 原始消息，便于审计压缩前事实。
 - **中断恢复**：journal 使用递增 `seq` 并按阈值分段；checkpoint 保存 `through_seq`。恢复重放
   checkpoint 后的尾记录，忽略最后半行，对缺失 ToolResult 补 synthetic failed 结果且不重放工具。

@@ -13,6 +13,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .agent import Agent
+from .completion import ToolEvidenceCompletionVerifier
+from .eval import EvalRunner, load_eval_suite, write_eval_report
 from .policy import WorkspacePolicy
 from .providers import OfflineCodingProvider, OpenAICompatibleProvider, ScriptedProvider
 from .repl import CodingRepl
@@ -91,6 +93,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     replay = subparsers.add_parser("replay", help="只读打印历史 JSONL 轨迹，不执行工具")
     replay.add_argument("trace", type=Path, help="JSONL 轨迹路径")
+
+    evaluate = subparsers.add_parser("eval", help="运行版本化、无网络的工程评测基线")
+    evaluate.add_argument("--suite", type=Path, help="自定义评测集 JSON；默认使用包内基线")
+    evaluate.add_argument(
+        "--case",
+        action="append",
+        dest="case_ids",
+        help="只运行指定 case，可重复传入",
+    )
+    evaluate.add_argument("--output", type=Path, help="JSON 评测报告路径")
+    evaluate.add_argument("--traces-dir", type=Path, help="每个 case 的 JSONL 轨迹目录")
+    evaluate.add_argument(
+        "--workers",
+        type=_positive_int,
+        default=1,
+        help="本机并发 case 数（默认：1；线程仅并发独立工作区）",
+    )
+    evaluate.add_argument("--json", action="store_true", help="在终端打印完整 JSON 报告")
     return parser
 
 
@@ -189,6 +209,7 @@ def _run_demo(args: argparse.Namespace) -> int:
             executor,
             trace=trace,
             max_steps=args.max_steps,
+            completion_verifier=ToolEvidenceCompletionVerifier(),
         ).run("检查 calculator.py，修复 add，并运行单元测试。")
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
         if args.yes:
@@ -222,6 +243,7 @@ def _run_agent(args: argparse.Namespace) -> int:
         executor,
         trace=trace,
         max_steps=args.max_steps,
+        completion_verifier=ToolEvidenceCompletionVerifier(),
     ).run(args.task)
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
     return 0 if result.status is RunStatus.COMPLETED else 1
@@ -289,6 +311,55 @@ def _run_replay(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_eval(args: argparse.Namespace) -> int:
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    output = (
+        args.output.expanduser().resolve(strict=False)
+        if args.output is not None
+        else (Path.cwd() / "runs" / f"eval-{stamp}-{uuid.uuid4().hex[:8]}.json").resolve()
+    )
+    traces_dir = (
+        args.traces_dir.expanduser().resolve(strict=False)
+        if args.traces_dir is not None
+        else output.with_suffix("").with_name(output.stem + "-traces")
+    )
+    suite = load_eval_suite(args.suite)
+    report = EvalRunner(suite, traces_dir=traces_dir).run(
+        case_ids=set(args.case_ids) if args.case_ids else None,
+        workers=args.workers,
+    )
+    report_path = write_eval_report(report, output)
+    metrics = report.metrics
+    security_rate = metrics["security_pass_rate"]
+    security_text = (
+        f"{security_rate:.1%}" if security_rate is not None else "N/A（未选择安全 case）"
+    )
+    print(
+        f"评测集：{report.suite_name} v{report.suite_version}\n"
+        f"结果：{metrics['passed_cases']}/{metrics['total_cases']} cases 通过 "
+        f"({metrics['pass_rate']:.1%})\n"
+        f"安全场景通过率：{security_text}\n"
+        f"工具调用：{metrics['total_tool_calls']}，策略拒绝：{metrics['policy_denials']}，"
+        f"审批拒绝：{metrics['approval_denials']}\n"
+        f"并发：{metrics['execution_backend']}，workers={metrics['workers_used']}/"
+        f"{metrics['workers_requested']}，最大同时运行={metrics['max_parallel_cases']}，"
+        f"隔离违规={metrics['task_isolation_violations']}\n"
+        f"完成验收拒绝：{metrics['completion_rejections']}，"
+        f"未验证终态：{metrics['unverified_runs']}\n"
+        f"报告：{report_path}\n轨迹目录：{traces_dir}"
+    )
+    for case in report.cases:
+        state = "PASS" if case.passed else "FAIL"
+        print(f"[{state}] {case.case_id}: {case.description}")
+        if not case.passed:
+            for assertion in case.assertions:
+                if not assertion.passed:
+                    print(f"  - {assertion.name}: {assertion.detail}")
+    if args.json:
+        print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+    return 0 if report.passed else 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -303,7 +374,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_agent(args)
         if args.command == "replay":
             return _run_replay(args)
-    except (OSError, ValueError) as exc:
+        if args.command == "eval":
+            return _run_eval(args)
+    except (OSError, TypeError, ValueError) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 2
     parser.error("未知命令")

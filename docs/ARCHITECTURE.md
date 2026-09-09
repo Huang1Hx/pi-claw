@@ -21,6 +21,8 @@ flowchart LR
     W --> T
     T --> A
     A --> E["JSONL Trace"]
+    A --> V["Completion Verifier"]
+    V -->|accepted / rejected| A
     A --> R["最终报告"]
     A --> X
 ```
@@ -46,7 +48,9 @@ v1 是 Kimi CLI 路线的学习实现，不是 Kimi Code 的完整复刻，也�
 5. 同轮 ToolCall 先写成一条 assistant 消息，再按顺序经过 Policy、审批和 Tool 执行；首版不并行。
 6. 每个 ToolResult 单独追加到上下文、带递增 `seq` 的 append-only journal 和 JSONL trace。
 7. 活动窗口过大时做确定性压缩；原始 journal 不覆盖，压缩结果保存为带 `through_seq` 的 checkpoint。
-8. 得到最终文本或达到最大步数后停止；会话 ID 可用于后续恢复。
+8. 模型给出 final candidate 后，宿主检查本回合 ToolResult；成功写入后缺少成功验证证据时拒绝
+   完成并把原因反馈到下一轮。
+9. 验收通过、达到最大步数或以 `unverified` 停止；会话 ID 可用于后续恢复。
 
 同轮多个 ToolCall 应彼此独立。有先后依赖的动作必须等待上一轮 ToolResult，不能把顺序执行
 误写成事务或并行执行保证。
@@ -118,9 +122,51 @@ CLI 每次运行都把关键事件按顺序写入 JSONL；嵌入库时由调用�
 审计证据，不是再次执行的脚本；Replay 只读取并展示历史事件，不会重新运行写文件或命令。
 常见 token、API key、password 字段在落盘前会被替换，单事件与 replay 总量都有上限。
 
+## Completion Verifier
+
+CLI、REPL、Demo 和 Eval 使用 `ToolEvidenceCompletionVerifier`。它不执行额外命令，只检查已经经过
+Policy/Approval 的真实 ToolResult：若本回合成功写入文件，最后一次写入后必须至少有一次成功的
+测试、静态检查、编译或锁文件检查。缺少证据时记录 `completion_rejected` 并让模型继续；步数耗尽
+则返回 `unverified`，不记为 `completed`。
+
+这是最低证据门，不是完整任务验真。无写入的自然语言事实、指定测试覆盖范围和业务语义仍需更
+严格的任务级 verifier。端到端源码路径见 [工作流程与数据流](WORKFLOW_AND_DATA_FLOW.md)。
+
+## Eval 数据流
+
+```mermaid
+flowchart LR
+    S["Versioned JSON Suite"] --> F["Temporary Fixture Workspace"]
+    S --> P["Scripted Provider"]
+    F --> A["Real Agent + Policy + Tools"]
+    P --> A
+    A --> T["Per-case JSONL Trace"]
+    A --> X["Status / ToolResult / File Evidence"]
+    X --> G["Assertions + Aggregated Metrics"]
+    G --> R["Atomic JSON Report"]
+```
+
+`eval.py` 不复制一套简化 Agent。它只负责准备临时工作区和确定性 Provider，执行仍进入正式
+Agent、Policy、ToolExecutor 与 TraceWriter。每个 case 同时检查运行状态、ToolResult 顺序、
+关键 Trace 事件及文件证据。预期测试失败或策略拒绝会记录为 `non_ok_tool_results`，是否真正失败
+由断言决定。
+
+默认 suite 随 Python 包一起版本化，运行时不需要网络或 Key。`eval --workers N` 可在本机线程池
+中并发运行独立 case；每个 case 有独立 Workspace、Agent、Provider、Policy、ToolExecutor 和
+Trace。它是本地并发回归，不是分布式 Agent。离线指标和真实模型指标必须分开；前者用于证明
+工程回归稳定，后者才用于评价模型规划效果。
+
+锁也不等于权限：Policy/Approval 决定能否执行，Workspace/Session 决定任务边界，Session 文件
+锁与 `expected_seq` 只保证同一会话的并发一致性。完整消息序列、锁的临界区、任务隔离和未来
+分布式协议见 [消息流、锁与并发](MESSAGE_FLOW_LOCKS_AND_CONCURRENCY.md)。
+
 ## 后续扩展顺序
 
-1. 固定任务评测与失败分类。
-2. 使用固定评测验证上下文压缩质量，而不是只比较消息数量。
-3. Docker Sandbox 适配器（用户自行准备 Docker）。
-4. Reviewer Subagent；只有评测证明有效后，再尝试并行 Agent Team。
+1. 扩展固定任务集，并增加结构化 FinalReport 与证据覆盖评分。
+2. 增加任务级 verifier，把具体测试、允许 diff 与最终声明绑定。
+3. 使用固定评测验证上下文压缩质量，而不是只比较消息数量。
+4. 增加预算化符号 Repository Map，并以检索效果证明价值。
+5. 对真实 Provider 单独记录成功率、步骤、延迟、成本和失败分类。
+6. Docker Sandbox 适配器（用户自行准备 Docker）。
+7. Reviewer Subagent；只有评测证明有效后，再尝试并行 Agent Team。
+8. 跨机器 Coordinator/Worker、租约与 fencing token；完成故障注入前只保留为设计，不对外宣称。

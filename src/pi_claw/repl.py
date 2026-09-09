@@ -11,6 +11,7 @@ from typing import Any, TextIO
 
 from .agent import Agent
 from .approval import TerminalApprovalBroker
+from .completion import ToolEvidenceCompletionVerifier
 from .context import ContextManager
 from .policy import WorkspacePolicy
 from .prompts import build_system_prompt
@@ -131,6 +132,7 @@ class CodingRepl:
             system_prompt=system_prompt,
             context_manager=self.context,
             on_message=self._persist_message,
+            completion_verifier=ToolEvidenceCompletionVerifier(),
         )
 
     def _persist_message(self, message: dict[str, Any]) -> None:
@@ -225,7 +227,8 @@ class CodingRepl:
             expected_seq=self._session_seq,
         )
         if result.final_text:
-            print(f"\nassistant> {result.final_text}\n", file=self.output)
+            label = "assistant" if result.status is RunStatus.COMPLETED else "candidate(unverified)"
+            print(f"\n{label}> {result.final_text}\n", file=self.output)
         if result.status is not RunStatus.COMPLETED:
             print(f"运行未完成：{result.error or result.status.value}", file=self.output)
             return 1

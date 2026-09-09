@@ -11,6 +11,9 @@ Pi-Claw 是一个使用 Python/uv、沿 Kimi CLI 路线学习会话式 Coding Ag
 - **v0 安全内核**：Workspace、Policy、Tool、Trace、Provider 和有最大步数的 Agent Loop。
 - **v1 会话式 Agent**：Session、Active Context、项目 Prompt、三态审批、多 Tool Call、
   `chat --print`、交互 REPL 和 `sessions`。
+- **v1.1 离线评测基线**：版本化离线 case、证据断言、每 case Trace 与机器可读 JSON 指标。
+- **v1.2 本地并发评测与架构说明**：独立 Workspace 并发、隔离指标、消息流/锁/分布式设计边界。
+- **v1.3 可验证完成**：写入后检查真实验证 ToolResult，拒绝无证据的完成声明。
 
 v1 参考 Kimi CLI 类产品的工程路线，但不复刻完整 Kimi Code，不宣称相同模型能力、全部命令、
 远程基础设施、IDE 集成或生产级 Sandbox。
@@ -32,6 +35,10 @@ v1 参考 Kimi CLI 类产品的工程路线，但不复刻完整 Kimi Code，不
 - OpenAI-compatible 响应体有字节上限；会话 Base URL 元数据拒绝内嵌凭据、query 和 fragment。
 - JSONL 轨迹包含步骤、工具、结果和 UTC 时间戳，并对常见凭据字段脱敏。
 - Agent 受最大步数限制，不允许无限循环。
+- `eval` 复用真实 Agent/Policy/Tool/Trace 链路，覆盖修复、失败恢复、安全拒绝和熔断场景。
+- `eval --workers N` 可在本机并行运行相互独立的 case，并量化最大并发、墙钟时间、观察加速比和
+  任务隔离违规；不共享 Agent 可变状态。
+- CLI、REPL、Demo 和 Eval 启用宿主完成验收；写入后没有成功验证证据时不会返回 `completed`。
 
 ## 明确不做
 
@@ -41,6 +48,8 @@ v1 参考 Kimi CLI 类产品的工程路线，但不复刻完整 Kimi Code，不
 - 不自动提交或推送 Git 变更。
 - 不安装 Docker；容器 Sandbox 仅作为后续可选增强。
 - 不为了展示而强行加入 Multi-Agent；先建立可测的单 Agent 基线。
+- 不宣称已实现跨机器分布式调度、分布式锁、远程队列或生产级容错；当前只有本机并发 Eval。
+- 不宣称最低验证证据等于完整业务正确性；无写入自然语言事实和任务级验收仍是后续范围。
 
 ## 权限模型
 
@@ -67,3 +76,6 @@ v1 参考 Kimi CLI 类产品的工程路线，但不复刻完整 Kimi Code，不
 - 每次 CLI 运行默认生成脱敏 JSONL 轨迹；库调用方也可显式传入 TraceWriter。
   回放只读取历史事件，不重新执行工具。
 - README 能让初学者在 15 分钟内理解架构并完成演示。
+- 默认 Eval 可离线运行；篡改期望、未知 case 或非法 fixture 路径时必须报错而不是误报通过。
+- 成功写入后无验证证据的 final candidate 必须进入 `completion_rejected`；步数耗尽返回
+  `unverified`，成功验证后才允许 `completed`。

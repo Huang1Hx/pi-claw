@@ -9,7 +9,8 @@ Pi-Claw 学习 Kimi CLI 类 Coding Agent 的关键工程问题：持久会话、
 
 项目分两层理解：**v0 安全内核**先把 Workspace、Policy、Tool、Trace 和离线测试做稳；
 **v1 会话式 Agent**再叠加 Session、Context、项目 Prompt、三态审批和 `chat` CLI。模型只能提出
-结构化工具调用，Policy 决定允许、询问或拒绝，Tool 才能接触文件与进程。
+结构化工具调用，Policy 决定允许、询问或拒绝，Tool 才能接触文件与进程；发生写入后，宿主还会
+检查实际验证 ToolResult，避免模型仅凭自然语言把未验证修改报告为完成。
 
 ## 先用 5 分钟跑通
 
@@ -35,6 +36,9 @@ uv run pi-claw demo
 
 # 明确批准临时演示目录中的精确替换和 unittest
 uv run pi-claw demo --yes
+
+# 工程评测：版本化离线场景和机器可读报告
+uv run pi-claw eval --workers 4
 ```
 
 `chat` 默认使用确定性的离线 Provider 验证会话和只读工具链，不冒充真实模型。`demo` 会在
@@ -61,8 +65,12 @@ flowchart LR
     T --> W["受限工作区与进程"]
     T --> A
     A --> J["脱敏 JSONL Trace"]
+    A --> V["宿主完成验收"]
+    V --> A
     A --> R["最终报告"]
     A --> S
+    E["Offline Eval Suite"] --> A
+    E --> Q["JSON Metrics + Case Traces"]
 ```
 
 核心公式仍然是 `workflow + loop + tools = agent`，但真正可用的项目还需要：结构化协议、
@@ -82,12 +90,16 @@ flowchart LR
 - `workspace.py`：真实路径解析，阻止目录穿越与符号链接逃逸。
 - `tools.py`：文件枚举、搜索、读取、单点替换、全量校验后一次写回的 `apply_patch` 和受限 argv 命令。
 - `trace.py`：凭据脱敏、JSONL 写入与只读回放。
+- `completion.py`：依据写入后的测试/静态检查 ToolResult 验收模型完成声明。
+- `eval.py`：版本化离线任务、证据断言、聚合指标和 JSON 报告。
 - `cli.py`：命令行参数、用户审批和离线演示。
 
-详细数据流见 [架构文档](docs/ARCHITECTURE.md)，安全边界见
+详细源码路径见 [工作流程与数据流](docs/WORKFLOW_AND_DATA_FLOW.md)，整体设计见
+[架构文档](docs/ARCHITECTURE.md)，消息角色、Session 锁、权限与任务隔离见
+[消息流、锁与并发](docs/MESSAGE_FLOW_LOCKS_AND_CONCURRENCY.md)，安全边界见
 [安全模型](docs/SECURITY.md)。
 
-## 四种运行方式
+## 运行与验收入口
 
 ### 1. v1 可恢复 Coding Agent 会话
 
@@ -121,7 +133,18 @@ REPL 支持 `/new`、`/sessions`、`/resume <id>`、`/compact [关注点]`、`/c
 REPL 内的 `/resume` 会核对目标会话记录的 Provider、模型和 Base URL。三者与当前运行时不一致
 时，Pi-Claw 不会静默切换，而会打印一条带原会话参数的重启命令。
 
-### 2. v0 离线安全内核演示
+### 2. 版本化离线评测
+
+```bash
+uv run pi-claw eval --workers 4
+```
+
+默认评测覆盖最小修复与验证、测试失败后恢复、未审批写入、路径逃逸、最大步数熔断、两个并发
+任务隔离场景和未验证完成拒绝。它使用真实 Agent/Policy/Tool/Trace 链路，但 Provider 动作是确定性的，因此证明
+的是工程闭环，不是真实模型任务成功率。`--workers` 是独立工作区上的本机并发，不是多机分布式
+Agent。指标定义和自定义 case 方法见 [评测设计](docs/EVALUATION.md)。
+
+### 3. v0 离线安全内核演示
 
 ```bash
 uv run pi-claw demo --yes
@@ -130,7 +153,7 @@ uv run pi-claw demo --yes
 这是首选验收方式。Scripted Provider 固定模型动作，用于证明 Agent loop、工具、策略、测试和
 trace 能稳定工作；它不用于宣称真实模型效果。
 
-### 3. 兼容的单轮 `run` 入口
+### 4. 兼容的单轮 `run` 入口
 
 ```bash
 uv run pi-claw run \
@@ -142,7 +165,7 @@ uv run pi-claw run \
 `run` 保留给 v0 调用方式和兼容单轮入口。它只执行一次受限文件枚举，不含完整 Session、项目
 Prompt 和交互审批；新用法优先选择 `chat`。
 
-### 4. 可选真实模型
+### 5. 可选真实模型
 
 真实模式需要外部 API key，离线演示和测试不需要。获取、配置、验证和故障排查见
 [API Key 配置计划](docs/API_KEY_GUIDE.md)。指南包含 OpenAI、Kimi、Qwen/阿里云百炼和
@@ -202,6 +225,7 @@ uv sync --locked
 uv lock --check
 uv run pytest
 uv run ruff check src tests
+uv run pi-claw eval
 ```
 
 测试分为协议/循环、工具集成和安全边界。最终结果应以当前命令输出为准，不在文档中伪造固定
@@ -220,8 +244,11 @@ uv run ruff check src tests
 7. 最后接真实模型，比较离线基线与真实结果。
 
 完整安排见 [7 天学习计划](docs/LEARNING_PLAN.md)。PDF 中的高度简化说法与更严谨定义见
-[概念纠偏](docs/CONCEPT_CORRECTIONS.md)，面试演示见
-[面试指南](docs/INTERVIEW_GUIDE.md)。
+[概念纠偏](docs/CONCEPT_CORRECTIONS.md)，每轮修改见
+[迭代说明书](docs/iterations/README.md)。
+
+与 Kimi CLI、pi-mono、Aider、OpenCode 和 OpenHands 的中性工程对照见
+[开源 Coding Agent 对照](docs/UPSTREAM_CODING_AGENT_COMPARISON.md)。
 
 ## Git 工作流
 

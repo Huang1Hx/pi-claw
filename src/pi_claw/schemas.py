@@ -21,6 +21,7 @@ class RunStatus(StrEnum):
     COMPLETED = "completed"
     MAX_STEPS = "max_steps"
     PROVIDER_ERROR = "provider_error"
+    UNVERIFIED = "unverified"
     FAILED = "failed"
 
 
@@ -145,6 +146,7 @@ class RunResult:
     steps: int
     final_text: str | None = None
     error: str | None = None
+    verification: dict[str, Any] | None = None
 
     @property
     def ok(self) -> bool:
@@ -157,4 +159,5 @@ class RunResult:
             "steps": self.steps,
             "final_text": self.final_text,
             "error": self.error,
+            "verification": self.verification,
         }

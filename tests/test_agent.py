@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from pi_claw.agent import Agent
+from pi_claw.completion import ToolEvidenceCompletionVerifier
 from pi_claw.policy import WorkspacePolicy
 from pi_claw.providers import ProviderError, ScriptedProvider
 from pi_claw.schemas import ModelReply, RunStatus, ToolCall
@@ -217,3 +219,91 @@ def test_agent_validates_task_and_max_steps(workspace: Path) -> None:
         assert "task" in str(exc)
     else:
         raise AssertionError("空任务应被拒绝")
+
+
+def test_agent_rejects_unverified_final_then_accepts_after_test(
+    workspace: Path,
+    tmp_path: Path,
+) -> None:
+    (workspace / "test_alpha.py").write_text(
+        "import unittest\n\n"
+        "class AlphaTest(unittest.TestCase):\n"
+        "    def test_changed(self):\n"
+        "        self.assertTrue(open('alpha.txt').read().startswith('changed'))\n",
+        encoding="utf-8",
+    )
+    trace_path = tmp_path / "completion.jsonl"
+    provider = ScriptedProvider(
+        [
+            ModelReply.call(
+                ToolCall(
+                    "write",
+                    "write_or_replace",
+                    {"path": "alpha.txt", "old": "alpha", "new": "changed"},
+                )
+            ),
+            ModelReply.final("已经修改完成"),
+            ModelReply.call(
+                ToolCall(
+                    "test",
+                    "run_command",
+                    {"argv": [sys.executable, "-m", "unittest", "-v", "test_alpha.py"]},
+                )
+            ),
+            ModelReply.final("修改完成并通过测试"),
+        ]
+    )
+    history: list[dict[str, Any]] = []
+    result = Agent(
+        provider,
+        ToolExecutor(
+            WorkspacePolicy(workspace, allow_write=True, allow_commands=True),
+            approval_callback=lambda *_: True,
+        ),
+        trace=TraceWriter(trace_path),
+        completion_verifier=ToolEvidenceCompletionVerifier(),
+    ).run("修改 alpha", messages=history)
+
+    assert result.status is RunStatus.COMPLETED
+    assert result.verification is not None
+    assert result.verification["accepted"] is True
+    assert result.verification["checks"][0]["kind"] == "test"
+    host_feedback = json.loads(str(history[-4]["content"]))
+    assert host_feedback["type"] == "host_completion_rejected"
+    events = TraceReplay(trace_path).read()
+    assert [event["event"] for event in events].count("completion_rejected") == 1
+    assert any(event["event"] == "completion_verified" for event in events)
+
+
+def test_agent_returns_unverified_when_final_has_no_post_write_check(
+    workspace: Path,
+    tmp_path: Path,
+) -> None:
+    trace_path = tmp_path / "unverified.jsonl"
+    result = Agent(
+        ScriptedProvider(
+            [
+                ModelReply.call(
+                    ToolCall(
+                        "write",
+                        "write_or_replace",
+                        {"path": "alpha.txt", "old": "alpha", "new": "changed"},
+                    )
+                ),
+                ModelReply.final("修改完成"),
+            ]
+        ),
+        ToolExecutor(
+            WorkspacePolicy(workspace, allow_write=True),
+            approval_callback=lambda *_: True,
+        ),
+        trace=TraceWriter(trace_path),
+        max_steps=2,
+        completion_verifier=ToolEvidenceCompletionVerifier(),
+    ).run("修改 alpha")
+
+    assert result.status is RunStatus.UNVERIFIED
+    assert not result.ok
+    assert result.verification is not None
+    assert result.verification["accepted"] is False
+    assert [event["event"] for event in TraceReplay(trace_path).read()][-1] == "run_unverified"

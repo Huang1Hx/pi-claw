@@ -10,6 +10,7 @@ import pytest
 
 from pi_claw.providers import OfflineCodingProvider
 from pi_claw.repl import CodingRepl
+from pi_claw.schemas import RunResult, RunStatus
 from pi_claw.session import SessionStore
 from pi_claw.trace import TraceWriter
 
@@ -474,3 +475,36 @@ def test_repl_resume_rejects_cross_provider_switch(
     assert repl.session.session_id == current.session_id
     assert "使用不同的 Provider" in output.getvalue()
     assert "--provider openai" in output.getvalue()
+
+
+def test_repl_labels_unverified_final_as_candidate(
+    workspace: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = io.StringIO()
+    repl = CodingRepl(
+        workspace=workspace,
+        provider=OfflineCodingProvider(),
+        store=SessionStore(tmp_path / "sessions"),
+        trace=TraceWriter(tmp_path / "trace.jsonl"),
+        output=output,
+        interactive_approvals=False,
+    )
+    monkeypatch.setattr(
+        repl.agent,
+        "run",
+        lambda *_args, **_kwargs: RunResult(
+            RunStatus.UNVERIFIED,
+            "run-id",
+            2,
+            final_text="修改完成",
+            error="缺少修改后的验证证据",
+        ),
+    )
+
+    assert repl.run_turn("修改文件") == 1
+    rendered = output.getvalue()
+    assert "candidate(unverified)> 修改完成" in rendered
+    assert "assistant> 修改完成" not in rendered
+    assert "运行未完成：缺少修改后的验证证据" in rendered
