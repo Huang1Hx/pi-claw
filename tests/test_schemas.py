@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from pi_claw.schemas import (
+from core.schemas import (
     ModelReply,
     PolicyAction,
     PolicyDecision,
@@ -11,6 +11,7 @@ from pi_claw.schemas import (
     ToolCall,
     ToolResult,
 )
+from core.usage import TokenUsage
 
 
 @pytest.mark.parametrize("field", ["id", "name"])
@@ -52,6 +53,20 @@ def test_model_reply_factories_and_serialization() -> None:
     call = ToolCall("call-1", "list_files", {"path": "."})
     assert ModelReply.final("done").to_dict() == {"final_text": "done"}
     assert ModelReply.call(call).to_dict() == {"tool_call": call.to_dict()}
+
+
+def test_model_reply_serializes_actual_usage() -> None:
+    reply = ModelReply(final_text="done", usage=TokenUsage(7, 2, 9))
+
+    assert reply.to_dict() == {
+        "final_text": "done",
+        "usage": {"prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9},
+    }
+
+
+def test_model_reply_rejects_invalid_usage_type() -> None:
+    with pytest.raises(TypeError, match="TokenUsage"):
+        ModelReply(final_text="done", usage={})  # type: ignore[arg-type]
 
 
 def test_model_reply_multiple_calls_are_preserved() -> None:

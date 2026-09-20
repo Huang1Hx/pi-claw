@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from pi_claw.eval import EvalRunner, load_eval_suite, write_eval_report
+from evaluation.runner import EvalRunner, load_eval_suite, write_eval_report
 
 
 def test_default_offline_suite_runs_and_passes(tmp_path: Path) -> None:

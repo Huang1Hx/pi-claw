@@ -3,10 +3,11 @@
 ## 对照范围
 
 本文件只比较公开的架构和功能边界，不复制上游代码，也不宣称 Pi-Claw 与成熟项目功能等价。
-来源检查日期：2026-09-06。
+来源检查日期：2026-09-10。
 
 | 项目 | 官方公开重点 | Pi-Claw 当前对应 | 本轮取舍 |
 |---|---|---|---|
+| Pichu | 事件驱动 Agent、流式 Provider、Token/上下文管理、Hooks、重试、循环检测和 Session | 新增类型化事件、SSE 聚合、实际 usage、工具结果裁剪、有限重试、可信 Hook 与循环熔断；原有 Session/审批继续复用 | 不复制实现；保持现有 Policy、journal/checkpoint 与完成验收边界 |
 | Kimi CLI | Runtime、Agent Loop、Context/Checkpoint、Approval、Toolset、UI/Wire 分层；可配置 Agent/Subagent 和循环控制 | 已有轻量 Agent/Session/Context/Approval/Tool/CLI 分层 | 保持单 Agent，先补完成验收；Subagent 后置 |
 | pi-mono coding-agent | 多 Provider、会话、工具选择、Skills/扩展、事件拦截和运行时切换 | 有 OpenAI-compatible Provider、会话和固定工具注册表 | 不立即做任意扩展加载；先保住 Policy 边界 |
 | Aider | Repo map、ask/code/architect 模式、可配置 lint/test | 只有两层目录和入口文档上下文；有受限测试命令 | 先采用写入后验证思想；符号级 repo map 后置 |
@@ -26,6 +27,21 @@ Pi-Claw 采用与自身架构相容的最小实现：模型仍负责计划，所
 - 最大步数内仍未验证则返回 `unverified`，不会伪装成 `completed`；
 - Trace 记录 `completion_rejected`、`completion_verified` 或 `run_unverified`；
 - 离线 Eval 加入虚假完成防护 case 和对应指标。
+
+## 本轮采用：Pichu 运行时能力的边界化实现
+
+Pichu 的公开文档把 Agent 描述为事件驱动运行时，并分别公开了流式 Client、Token 统计、上下文
+裁剪/压缩、Hooks、重试与循环检测。Pi-Claw 采用这些工程问题作为能力检查表，但沿用自己的
+安全与持久化设计：
+
+- Provider 的 delta 先变成不可执行事件，只有流正常结束、参数 JSON 完整后才产生 ModelReply；
+- Token 只记录服务端实际 usage，缺失值不使用字符估算冒充；
+- 旧工具正文只在活动上下文中裁剪，append-only journal 保留原始事实；
+- Hook 由可信宿主显式注册，只能额外拒绝，不能绕过 Policy/Approval；
+- 暂时性请求错误有限重试，但任意流分片已经发出后不重放；
+- 重复调用按工具、参数和结果检测，命中后返回独立的 loop_detected 终态。
+
+详细协议和限制见 [运行时说明](RUNTIME.md)。
 
 ## 暂不采用及原因
 
@@ -53,6 +69,11 @@ OpenHands 使用 Docker Runtime 隔离任意代码。Pi-Claw 的 Policy、Approv
 
 ## 官方来源
 
+- [Pichu repository](https://github.com/yeabwang/pichu)
+- [Pichu Agent module](https://github.com/yeabwang/pichu/blob/main/docs/agent-module.md)
+- [Pichu Client module](https://github.com/yeabwang/pichu/blob/main/docs/client-module.md)
+- [Pichu Context module](https://github.com/yeabwang/pichu/blob/main/docs/context-module.md)
+- [Pichu Hooks module](https://github.com/yeabwang/pichu/blob/main/docs/hooks-module.md)
 - [Kimi CLI repository architecture](https://github.com/MoonshotAI/kimi-cli/blob/main/AGENTS.md)
 - [Kimi CLI agents and subagents](https://github.com/MoonshotAI/kimi-cli/blob/main/docs/en/customization/agents.md)
 - [pi-mono coding-agent](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent)

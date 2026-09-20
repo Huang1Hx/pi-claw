@@ -1,0 +1,64 @@
+# 中国科大校内平台：公开配置示例；复制为被 Git 忽略的 pi-claw.toml，不写实际 API Key。
+# Key 与 URL 沿用 .env；公开目录中的模型不等于当前 Key 一定获权。
+[connection]
+base_url_env = "OPENAI_BASE_URL"
+api_key_env = "OPENAI_API_KEY"
+
+[routing]
+intent_strategy = "model"
+cheap = "economy"
+strong = "primary"
+max_cheap_requests = 2
+max_requests = 36
+max_output_tokens = 8192
+
+[workflow]
+enabled = true
+planner = "planner"
+coder = "primary"
+reviewer = "reviewer"
+max_planning_requests = 4
+max_review_requests = 4
+# 最多三次审查，即首次审查后最多两轮返工。
+max_review_rounds = 3
+max_context_chars = 120000
+
+[models.economy]
+# 快速模式：仅分类与简单任务。分类输出由宿主另限到 128 Token。
+model = "qwen3.8-chat"
+thinking_mode = "disabled"
+thinking_format = "chat_template_kwargs"
+max_output_tokens = 2048
+timeout_seconds = 60
+
+[models.planner]
+# 保留学校端的默认思考模式；仅可读取，不能写入或运行命令。
+model = "qwen3.7-plus"
+max_output_tokens = 8192
+timeout_seconds = 120
+
+[models.primary]
+# 复杂编码：同模型工具续接保留 reasoning_content，不跨角色传递。
+model = "deepseek-flash"
+thinking_mode = "enabled"
+thinking_format = "thinking"
+max_output_tokens = 8192
+timeout_seconds = 120
+
+[models.reviewer]
+# 独立只读审查；必须重新读取实际改动文件，不能直接批准代码模型的自述。
+model = "glm-5.3-flash"
+max_output_tokens = 8192
+timeout_seconds = 120
+
+[models.reasoner]
+# 可手动 /model reasoner 进行专项分析，不自动加入主流水线。
+model = "qwen3.8-reasoner"
+max_output_tokens = 8192
+timeout_seconds = 120
+
+[models.alternative]
+# 保留你已有的通用模型；可手动切换，不自动增加另一轮模型请求。
+model = "deepseek-v4-flash-ascend1"
+max_output_tokens = 4096
+timeout_seconds = 120

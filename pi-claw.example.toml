@@ -1,0 +1,36 @@
+# 复制为 pi-claw.toml 后配置，通过 --config pi-claw.toml 显式加载。
+# 只引用 .env/环境中的 key 变量，禁止把实际 key 写入 TOML。
+# 同一服务/网关提供多个模型时，只需一个 API Key，通过请求中的 model 字段切换。
+# 在 .env 填好 OPENAI_API_KEY 与 OPENAI_BASE_URL，再替换下面两个模型 ID。
+[connection]
+base_url_env = "OPENAI_BASE_URL"
+api_key_env = "OPENAI_API_KEY"
+# 如需把地址直接写在 TOML，删除 base_url_env 并改为 base_url = "https://你的服务地址/v1"。
+
+[routing]
+cheap = "economy"
+strong = "primary"
+# 轻量模型只判断 simple/complex，宿主据此选择执行模型；不按价格排序。
+intent_strategy = "model"
+# 分类另计；下面限制每回合轻量执行次数、总请求数（含分类）和输出 Token。
+max_cheap_requests = 2
+max_requests = 12
+max_output_tokens = 2048
+
+[models.economy]
+# 你指定的轻量模型，用于分类、简单问答和单步只读任务；不查询或推测它的价格。
+model = "deepseek-v4-flash-ascend1"
+
+[models.primary]
+# 请填写同一服务支持的强模型 ID，用于代码修改、调试、多步骤推理等复杂任务。
+model = "<YOUR_PRIMARY_TOOL_MODEL_ID>"
+
+# 同一网关下可继续添加 profile，只填该网关支持的准确 model ID。
+# [models.another]
+# model = "<YOUR_OTHER_TOOL_MODEL_ID>"
+
+# 若某个模型需要另一家服务，必须同时覆盖 base_url 和 api_key_env，不能只改地址。
+# [models.external]
+# base_url = "<YOUR_OTHER_SERVICE_BASE_URL>"
+# api_key_env = "OTHER_SERVICE_API_KEY"
+# model = "<YOUR_OTHER_SERVICE_MODEL_ID>"

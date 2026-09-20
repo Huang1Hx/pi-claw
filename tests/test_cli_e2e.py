@@ -14,7 +14,7 @@ def run_cli(cwd: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     env.pop("OPENAI_MODEL", None)
     env.pop("OPENAI_BASE_URL", None)
     return subprocess.run(
-        [sys.executable, "-m", "pi_claw", *arguments],
+        [sys.executable, "-m", "interfaces", *arguments],
         cwd=cwd,
         env=env,
         capture_output=True,
@@ -212,7 +212,7 @@ def test_cli_continue_reuses_openai_provider_metadata_without_key(tmp_path: Path
     workspace = tmp_path / "workspace"
     data_dir = tmp_path / "session-data"
     workspace.mkdir()
-    from pi_claw.session import SessionStore
+    from persistence.session_store import SessionStore
 
     session = SessionStore(data_dir).create(
         workspace,

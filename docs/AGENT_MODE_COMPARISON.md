@@ -1,0 +1,108 @@
+# 单 Agent、顺序工作流与主从多 Agent 对照评测
+
+本评测用同一批任务、相同起始文件、相同主提示、相同工具和相同外部评分器比较三种执行架构。
+目标不是用两个小任务给模型下通用排名，而是回答：增加规划/审查或独立子 Agent 后，严格成功率、
+重复可靠性、端到端耗时和完整 Token 消耗发生了什么变化。
+
+## 三种模式与模型分配
+
+| 模式 | 参与者与当前模型 | 执行顺序 | 写权限 |
+|---|---|---|---|
+| `single` | 编码 Agent：`deepseek-flash` | 一个 Agent 自主读取、修改、测试 | 编码 Agent 是唯一写者 |
+| `workflow` | 规划：`qwen3.7-plus`；编码：`deepseek-flash`；审查：`glm-5.3-flash` | 规划 → 编码/验证 → 审查；审查否决后有界返工 | 仅编码阶段的工具候选由外层 Agent 执行 |
+| `team` | 主 Agent：`deepseek-flash`；实现子 Agent：`qwen3.7-plus`；风险子 Agent：`glm-5.3-flash` | 两个独立子 Agent 并行只读分析；屏障汇合后主 Agent 编码/验证 | 只有主 Agent 可写和运行命令 |
+
+`team` 不是分布式系统：当前实现在单宿主线程池中运行，每个参与者拥有独立 Agent、Provider、
+上下文和 Trace。两个子 Agent 结束后主 Agent 才启动，因此不存在多个写者并发修改。子 Agent
+产物按不可信数据交接，单份有字符上限；主 Agent 必须重新核对文件。SessionStore 的文件锁没有
+被用作多 Agent 调度锁，当前也不宣称跨进程/跨机器容错。
+
+## 固定任务集
+
+每个任务均只有 `SPEC.md`、带缺陷的 `solution.py` 和 `test_target.py`。三种模式收到完全相同的主
+提示，只允许修改 `solution.py`，且只能运行：
+
+```bash
+uv run python -m unittest -q test_target.py
+```
+
+### 任务一：批量库存原子预留 `inventory_reservation`
+
+实现 `reserve(stock, orders)`。任务同时要求输入类型校验、bool 与 int 的区分、未知 SKU、重复
+SKU 累计数量、批次原子失败、成功扣减和输入不变性。初始实现会边遍历边扣减，没有完整输入校验，
+也会在后续订单失败时返回已部分扣减的数据。
+
+公开测试覆盖基本成功、未知 SKU 原子失败、重复订单累计和空批次。隐藏评分再覆盖精确清零、
+零数量、bool 数量、非法库存值和非法订单形状，共 9 个行为用例。这要求模型理解事务语义，
+不是只修一条显眼条件。
+
+### 任务二：带容差的时间窗口合并 `window_merge`
+
+实现 `merge_windows(windows, gap=0)`。任务要求完整输入校验、bool 端点排除、排序、重叠/接触/
+gap 范围内合并、tuple 输出和嵌套输入不变性。初始实现只有普通重叠合并，没有 gap 和无效输入处理。
+
+公开测试覆盖乱序重叠、gap 合并、非法零长度窗口和输入不变。隐藏评分再覆盖独立窗口、接触窗口、
+gap 边界、反向窗口、bool 端点、负 gap 和非法形状，共 9 个行为用例。
+
+这两个任务属于中等复杂度的局部代码修复：包含多条相互作用的边界规则和回归要求，但不依赖大型
+仓库知识、外部服务或长时间构建，适合在受控预算下重复比较架构差异。
+
+## 公平性与严格评分
+
+- 每个 trial 都复制全新的工作区；模式之间不共享模型上下文、最终代码或测试结果。
+- 外部评分器先用参考实现和错误初始实现校准，再允许真实模型运行。
+- 候选代码先经过有界 AST 检查，只允许指定函数、精确签名和受限纯函数语法；这不是通用 OS 沙箱。
+- 严格成功要求：Agent 终态为 `completed`、Trace 完整、主 Agent 真实跑过固定公开测试且成功、
+  固定夹具未被修改、无额外文件、最终函数通过全部隐藏用例、所有输入保持不变。
+- 模型的“已经完成”文字和审查者的“approve”都不能替代文件与测试证据。
+- 各模式采用相同 `max_steps`、trial 墙钟期限和底层 LLM 单请求重试次数；顺序工作流自己的有界
+  规划/审查/返工是被比较架构的一部分。
+
+## 指标定义
+
+设一个模式有 `N` 个 trial、严格成功数为 `S`，每个任务独立重复 `k` 次：
+
+| 指标 | 计算与解释 |
+|---|---|
+| 严格成功率 | `S / N`；任何 gate 失败都进入失败分母 |
+| 实测 `pass@k` | 对每个任务，k 次中至少一次成功的任务比例 |
+| 实测 `pass^k` | 对每个任务，k 次全部成功的任务比例；即重复成功率 |
+| 端到端耗时 | 从该 trial 启动到全部参与者结束；`team` 包含并行子 Agent 和主 Agent |
+| 总 Token | 所有已报告的输入+输出 Token；包含规划、编码、审查、全部子 Agent和返工 |
+| 每个严格成功 Token | 该模式全部 trial（含失败、返工）的已知总 Token / `S` |
+| 越权次数 | Policy/审批拒绝的调用；只读阶段/子 Agent 发起副作用候选也计入，按 participant+call_id 去重 |
+| 写冲突次数 | 工具的修改前指纹与执行前指纹不一致，因目标文件已变化而拒绝的次数 |
+| 返工次数 | 宿主拒绝完成，或顺序工作流审查返回 `changes_requested` 的次数 |
+
+服务端没有返回 usage 时，该 trial 标为用量缺口，不把未知 Token 当零。报告仍给已知总量，并将
+“每成功 Token”标成下界。学校平台模型不计算货币费用，但 Token 仍按上述方式统计，以衡量架构
+开销。并行耗时不能用各参与者耗时简单相加，所以使用 trial 实际墙钟时间。
+
+## 运行与产物
+
+先仅校准评分器，不调用模型：
+
+```bash
+uv run --frozen python -m evaluation.compare_modes \
+  --output runs/agent-modes-calibration
+```
+
+运行默认对照：2 个任务 × 2 次重复 × 3 种模式，共 12 个真实 trial：
+
+```bash
+uv run --frozen python -m evaluation.compare_modes \
+  --live --config pi-claw.toml \
+  --trials 2 --workers 2 --deadline 420 --max-steps 24 \
+  --output runs/agent-modes-20260920
+```
+
+输出目录必须不存在。根目录包含 `manifest.json`、`grader-calibration.json` 和 `report.json`；
+每个 trial 保留起始任务、脱敏配置摘要、日志、最终工作区、每个参与者的独立 Trace、运行结果和
+逐项评分。`runs/` 被 Git 忽略；API Key、Base URL 和价格不会写入产物。
+
+## 本轮实测结果
+
+结果将在整库验证通过并冻结本轮源码后，用上面的 12-trial 命令生成。应优先阅读
+`report.json.by_mode`，再对失败 trial 查看 `failure_checks`、`progress.log`、最终 `solution.py` 和
+对应参与者 Trace。样本量只有每任务 2 次，结论只作为当前配置的初步工程观察，不外推为稳定排名。
+

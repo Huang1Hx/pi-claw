@@ -6,13 +6,13 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from pi_claw.agent import Agent
-from pi_claw.completion import ToolEvidenceCompletionVerifier
-from pi_claw.policy import WorkspacePolicy
-from pi_claw.providers import ProviderError, ScriptedProvider
-from pi_claw.schemas import ModelReply, RunStatus, ToolCall
-from pi_claw.tools import ToolExecutor
-from pi_claw.trace import TraceReplay, TraceWriter
+from core.agent import Agent
+from core.completion import ToolEvidenceCompletionVerifier
+from core.schemas import ModelReply, RunStatus, ToolCall
+from persistence.trace import TraceReplay, TraceWriter
+from providers import ProviderError, ScriptedProvider
+from security.policy import WorkspacePolicy
+from tools import ToolExecutor
 
 
 def test_agent_happy_path_records_tool_and_final(workspace: Path, tmp_path: Path) -> None:
@@ -35,9 +35,11 @@ def test_agent_happy_path_records_tool_and_final(workspace: Path, tmp_path: Path
     events = TraceReplay(trace_path).read()
     assert [event["event"] for event in events] == [
         "run_started",
+        "usage_updated",
         "model_reply",
         "tool_call",
         "tool_result",
+        "usage_updated",
         "model_reply",
         "run_completed",
     ]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pi_claw.prompts import build_system_prompt, discover_project_context
+from core.prompts import build_system_prompt, discover_project_context
 
 
 def test_project_context_reads_only_named_root_entries(tmp_path: Path) -> None:
@@ -18,6 +18,16 @@ def test_project_context_reads_only_named_root_entries(tmp_path: Path) -> None:
     assert "### 来源：README.md" in context
     assert "project readme" in context
     assert "nested secret" not in context
+
+
+def test_project_context_reads_uppercase_readme_once(tmp_path: Path) -> None:
+    """大写扩展名在大小写敏感系统可读，在 macOS 不重复注入。"""
+    (tmp_path / "README.MD").write_text("unique uppercase readme content", encoding="utf-8")
+
+    context = discover_project_context(tmp_path)
+
+    assert context.count("unique uppercase readme content") == 1
+    assert context.count("### 来源：README.") == 1
 
 
 def test_project_context_marks_truncation(tmp_path: Path) -> None:

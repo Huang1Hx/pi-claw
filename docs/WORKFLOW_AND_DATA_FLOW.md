@@ -3,9 +3,10 @@
 ## 1. 从命令行到 Agent Runtime
 
 ```text
-src/pi_claw/__main__.py
-  -> cli.main()
-  -> cli._run_chat()
+pi-claw 命令 / src/interfaces/__main__.py
+  -> interfaces/cli.main()
+  -> config.load_settings()：启动目录 .env + 显式 TOML + 进程环境
+  -> interfaces/cli._run_chat()
   -> SessionStore.load/create()
   -> CodingRepl.__init__()
   -> CodingRepl._build_runtime()
@@ -17,7 +18,37 @@ src/pi_claw/__main__.py
 但不直接执行文件或命令；它在 `_build_runtime()` 中组合 Policy、Approval、ToolExecutor、Agent、
 ContextManager 和 CompletionVerifier。
 
+以 `/` 开头的交互输入先进入 `commands.CommandRegistry`，如 `/status`、`/model`、`/sessions`；
+这些命令不会触发模型。普通任务才进入 `Agent.run()`。启用路由时调用链为
+`Agent → RoutedProvider → 所选 OpenAICompatibleProvider`，每个 profile 的端点、模型和 key
+成套绑定，升级发生在真实工具执行前或下一模型请求前。
+多个 profile 可以从 TOML 的 `[connection]` 继承同一端点与 Key；`config/connections.py`
+负责解析，路由后通过各自的 `model` ID 选择服务端模型，而非改变本机全局模型变量。
+
+### 复杂度分类与执行分流
+
+使用新模板的 `intent_strategy = "model"` 时：
+
+```text
+当前任务 → economy（固定提示 + 本次任务，无工具，无完整历史）
+        → 严格 JSON 标签校验 + 宿主保守检查
+        → simple：economy 执行 / complex 或分类失败：primary 执行
+        → Agent → ToolExecutor → Policy / Approval → ToolResult → 同一执行分支
+```
+
+`src/routing/classifier.py` 定义两分支协议；`src/routing/router.py` 执行分类、选模和失败升级。
+分类只决定模型分支，不直接执行用户任务。它的输出不成为 assistant 消息或工具调用；
+`usage_observed` 把分类 Token 交 Agent，`intent_classified` 把结构化决策写 Trace。
+执行请求才接收完整活动上下文及可用工具。轻量执行越界、工具失败或配额用尽后转主力，
+保留已有工具反馈，不重新分类。固定 `--route primary` 跳过分类。
+主力能力和轻量角色由配置指定，价格未知不影响分流。
+
 ## 2. 一个用户回合的消息路径
+
+下面展示通用 Agent 工具回路；启用 `[workflow]` 后复杂任务的 Provider 内部增加顺序状态机：
+规划 JSON → 编码/真实验证 → 只读审查 → 通过或携带问题返工。每阶段使用私有消息列表，
+工具仍走下方同一执行和持久化链。阶段之间传递显式产物和历史预览，不跨模型续接原始思考。
+完整字段、角色权限、Token 流和断点恢复边界见 [多模型工作流](WORKFLOW_PIPELINE.md)。
 
 ```mermaid
 sequenceDiagram
@@ -38,11 +69,11 @@ sequenceDiagram
     A->>M: messages + tool schemas
     M-->>A: ModelReply(tool_calls)
     A->>S: on_message(assistant tool_calls)
-    A->>P: evaluate(ToolCall)
-    P-->>A: allow / ask / deny
-    A->>B: ask 时展示 diff 或 argv
-    B-->>A: once / session / deny
-    A->>T: execute(allowed call)
+    A->>T: execute(ToolCall)
+    T->>P: evaluate(ToolCall)
+    P-->>T: allow / ask / deny
+    T->>B: ask 时展示 diff 或 argv
+    B-->>T: once / session / deny
     T-->>A: ToolResult
     A->>S: on_message(tool result)
     A->>J: tool_call + tool_result
@@ -125,12 +156,14 @@ Pi-Claw 不再把所有 `final_text` 自动视为完成。CLI、REPL 和 Eval �
       context-<start_seq>.jsonl
       active_context.json
       .session.lock
+      usage.json
 ```
 
 - `state.json`：Session 元数据、Provider/模型/Base URL、持久审批 scope；不保存 API Key。
 - `context*.jsonl`：带递增 `seq` 的 append-only 原始消息分段。
 - `active_context.json`：下一轮发送给模型的有界 checkpoint。
 - `.session.lock`：本机跨进程排他锁；与 `expected_seq` 一起阻止 stale writer。
+- `usage.json`：以 run_id 为键的幂等用量账本；服务端未返回 usage 的请求单独统计。
 - `runs/*.jsonl`：脱敏 Trace，记录模型回复、Policy/工具结果及完成验收事件。
 - `runs/*.json`：离线 Eval 聚合报告。
 
@@ -155,7 +188,7 @@ Agent.run()
 ## 7. Eval 数据路径
 
 ```text
-eval_cases.json
+evaluation/cases.json
   -> EvalRunner
   -> 每 case 独立 TemporaryDirectory/Workspace
   -> 独立 Agent/Provider/Policy/ToolExecutor/Trace
@@ -165,3 +198,30 @@ eval_cases.json
 
 `--workers N` 只并发独立 case，报告顺序保持稳定。离线 Eval 验证工程执行链，不代表真实模型
 规划能力；真实 Kimi/Qwen/DeepSeek/OpenAI 需要单独、重复运行并记录成功率、成本和延迟。
+
+## 8. 新运行时事件路径
+
+Provider.events/stream → text_delta / tool_call_delta / llm_retry → AgentEvent → REPL 实时显示。
+只有 message_complete 才生成可执行 ModelReply；不执行尚未收齐的工具参数。
+每轮请求之前先裁剪旧回合的大工具正文，再按需压缩；原始 journal 始终保留。
+before_tool Hook 通过后仍由 ToolExecutor 做 Policy/Approval。近期相同参数和结果重复到阈值，
+Agent 返回 loop_detected，并为已声明但尚未执行的同批工具补失败结果，保持消息配对。
+
+具体文件路径见 [架构说明](ARCHITECTURE.md)，配置与边界见 [运行时说明](RUNTIME.md)。
+
+## 9. 主 Agent＋独立子 Agent 路径
+
+`ReadOnlySubagentTeam` 用于可并行拆分的只读分析，不替换默认 REPL 工作流：
+
+```text
+同一任务
+  ├─ 实现子 Agent（独立 Provider / Context / Trace，只读） ─┐
+  └─ 风险子 Agent（独立 Provider / Context / Trace，只读） ─┤
+                                                          屏障
+                                                            ↓
+                  有界、不可信发现 → 主 Agent → 唯一写入/命令 → 完成验收
+```
+
+子 Agent 不能运行命令或写文件；即使模型提出副作用调用，Policy 仍会拒绝并留下 Trace。主 Agent
+不会与子 Agent 同时写工作区，因此锁不被误用作任务协调机制。主从全部模型响应和返工都进入合并
+Token 统计。三种架构的同题评测、任务与指标见 [Agent 模式对照](AGENT_MODE_COMPARISON.md)。

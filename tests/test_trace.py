@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from pi_claw.trace import REDACTED, TRUNCATED, TraceReplay, TraceWriter, redact
+from persistence.trace import REDACTED, TRUNCATED, TraceReplay, TraceWriter, redact
 
 
 def test_redact_recurses_and_sanitizes_embedded_text() -> None:

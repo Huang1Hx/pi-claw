@@ -8,11 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from pi_claw.providers import OfflineCodingProvider
-from pi_claw.repl import CodingRepl
-from pi_claw.schemas import RunResult, RunStatus
-from pi_claw.session import SessionStore
-from pi_claw.trace import TraceWriter
+from core.schemas import RunResult, RunStatus
+from interfaces.repl import CodingRepl
+from persistence.session_store import SessionStore
+from persistence.trace import TraceWriter
+from providers import OfflineCodingProvider
 
 
 def test_session_store_uses_pi_claw_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

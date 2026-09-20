@@ -4,8 +4,8 @@ import sys
 
 import pytest
 
-from pi_claw.completion import ToolEvidenceCompletionVerifier, ToolObservation
-from pi_claw.schemas import ToolCall, ToolResult
+from core.completion import ToolEvidenceCompletionVerifier, ToolObservation
+from core.schemas import ToolCall, ToolResult
 
 
 def observation(
