@@ -29,8 +29,9 @@ model = "<YOUR_PRIMARY_TOOL_MODEL_ID>"
 # [models.another]
 # model = "<YOUR_OTHER_TOOL_MODEL_ID>"
 
-# 若某个模型需要另一家服务，必须同时覆盖 base_url 和 api_key_env，不能只改地址。
+# 若某个模型需要另一家服务，必须同时覆盖完整 URL 来源和 api_key_env，不能只改一半。
 # [models.external]
-# base_url = "<YOUR_OTHER_SERVICE_BASE_URL>"
+# base_url_env = "OTHER_SERVICE_BASE_URL"
 # api_key_env = "OTHER_SERVICE_API_KEY"
 # model = "<YOUR_OTHER_SERVICE_MODEL_ID>"
+# max_attempts = 1

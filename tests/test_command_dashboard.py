@@ -13,6 +13,7 @@ from prompt_toolkit.document import Document
 
 from commands.model import model_options, resolve_model_selection
 from config import ModelProfile, Settings, WorkflowSettings
+from core.events import AgentEvent
 from core.schemas import RunResult, RunStatus
 from core.usage import TokenUsage, UsageTracker
 from interfaces.repl import CodingRepl
@@ -113,6 +114,52 @@ def test_auto_menu_explains_real_workflow_models(tmp_path):
     text = repl.output.getvalue()
     assert "自动路由" in text and "规划：qwen3.8-chat [economy]" in text
     assert "编码：deepseek-flash [primary]" in text and "不是可用性测试" in text
+
+
+def test_auto_menu_and_events_show_premium_reviewer_without_connection_details(tmp_path):
+    """高级审查显示实际 Kimi ID 和阶段，但不展示 URL 或密钥。"""
+    repl = make_repl(tmp_path)
+    profiles = {
+        name: ModelProfile(name, "https://school.invalid", "deepseek-flash", "school-secret")
+        for name in ("economy", "planner", "primary", "reviewer")
+    }
+    profiles["premium_reviewer"] = ModelProfile(
+        "premium_reviewer", "https://moonshot.invalid", "kimi-k3", "moonshot-secret"
+    )
+    repl.settings = replace(
+        repl.settings,
+        profiles=profiles,
+        workflow=WorkflowSettings(
+            enabled=True,
+            premium_reviewer="premium_reviewer",
+            premium_review_policy="risk",
+        ),
+    )
+    repl._handle_command("/model")
+    repl._on_event(
+        AgentEvent(
+            "workflow_stage",
+            "run",
+            1,
+            1,
+            {"phase": "premium_reviewing", "profile": "premium_reviewer"},
+        )
+    )
+    repl._on_event(
+        AgentEvent(
+            "workflow_stage",
+            "run",
+            1,
+            2,
+            {"phase": "premium_review_approved", "profile": "premium_reviewer"},
+        )
+    )
+    text = repl.output.getvalue()
+    assert "高级审查：kimi-k3 [premium_reviewer]" in text
+    assert text.count("Kimi 高级审查（只读）") == 1
+    assert text.count("高级审查通过，等待宿主验收") == 1
+    for hidden in ("school-secret", "moonshot-secret", "school.invalid", "moonshot.invalid"):
+        assert hidden not in text
 
 
 def test_no_configuration_has_no_fake_model_choices(tmp_path):

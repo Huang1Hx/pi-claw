@@ -11,11 +11,12 @@ from core.schemas import ModelReply, RunResult, ToolCall, ToolResult
 from providers import WorkflowStopped
 from providers.events import ProviderEvent
 from routing.intent import READ_TOOLS
+from routing.premium_review import premium_review_reason
 from routing.workflow_protocol import MAX_ARTIFACT_CHARS, parse_artifact, phase_messages
 
 
 class WorkflowCoordinator:
-    """规划只读→编码/验证→独立只读审查；不持有文件锁，不自行执行任何工具。"""
+    """规划→编码/验证→常规审查→可选高级审查；工具始终由外层 Agent 执行。"""
 
     def __init__(self, settings: WorkflowSettings, task: str, request: Callable) -> None:
         """建立本回合阶段状态；request 复用 Router 的全局请求上限、重试和用量入口。"""
@@ -23,6 +24,8 @@ class WorkflowCoordinator:
         self.phase = "pending"
         self.plan: dict | None = None
         self.review: dict | None = None
+        self.premium_review: dict | None = None
+        self.premium_review_reason: str | None = None
         self.candidate = ""
         self.feedback: Any = None
         self.phase_history: list[dict] = []
@@ -32,6 +35,7 @@ class WorkflowCoordinator:
         self.observations: list[ToolObservation] = []
         self.changed_files: set[str] = set()
         self.reviewed_files: set[str] = set()
+        self.premium_reviewed_files: set[str] = set()
         self.verification: dict | None = None
         self.verifier = ToolEvidenceCompletionVerifier()
         self.terminal_status: str | None = None
@@ -39,7 +43,7 @@ class WorkflowCoordinator:
     def finish_run(self, result: RunResult) -> None:
         """只有宿主接受最后候选，才将审查批准升级为工作流完成。"""
         self.terminal_status = result.status.value
-        if result.ok and self.phase == "review_approved":
+        if result.ok and self.phase in {"review_approved", "premium_review_approved"}:
             self.phase = "completed"
 
     def summary(self) -> dict:
@@ -50,8 +54,12 @@ class WorkflowCoordinator:
             "review_rounds": self.review_rounds,
             "plan": self.plan,
             "review": self.review,
+            "premium_review_triggered": self.premium_review_reason is not None,
+            "premium_review_reason": self.premium_review_reason,
+            "premium_review": self.premium_review,
             "changed_files": sorted(self.changed_files),
             "reviewed_files": sorted(self.reviewed_files),
+            "premium_reviewed_files": sorted(self.premium_reviewed_files),
             "verification": self.verification,
         }
 
@@ -74,12 +82,11 @@ class WorkflowCoordinator:
         if result.ok and isinstance(path, str):
             if call.name in self.verifier.WRITE_TOOLS:
                 self.changed_files.add(path)
-            elif (
-                self.phase == "reviewing"
-                and call.name == "read_file"
-                and output.get("truncated") is False
-            ):
-                self.reviewed_files.add(path)
+            elif call.name == "read_file" and output.get("truncated") is False:
+                if self.phase == "reviewing":
+                    self.reviewed_files.add(path)
+                elif self.phase == "premium_reviewing":
+                    self.premium_reviewed_files.add(path)
 
     def _start(self, phase: str, history: Sequence[dict]) -> ProviderEvent:
         """切换时新建私有模型对话，保留显式交接产物但不继承上一模型推理状态。"""
@@ -87,6 +94,8 @@ class WorkflowCoordinator:
         if phase == "reviewing":
             self.review_rounds += 1
             self.reviewed_files.clear()
+        elif phase == "premium_reviewing":
+            self.premium_reviewed_files.clear()
         self.phase_history = phase_messages(
             phase,
             history,
@@ -95,6 +104,8 @@ class WorkflowCoordinator:
                 "plan": self.plan,
                 "coding_candidate": self.candidate,
                 "feedback": self.feedback,
+                "normal_review": self.review,
+                "premium_review_reason": self.premium_review_reason,
                 "changed_files": sorted(self.changed_files),
                 "host_verification": self.verification,
             },
@@ -111,6 +122,7 @@ class WorkflowCoordinator:
             "planning": self.settings.planner,
             "coding": self.settings.coder,
             "reviewing": self.settings.reviewer,
+            "premium_reviewing": self.settings.premium_reviewer,
         }[self.phase]
 
     def _artifact(self, kind: str, data: dict) -> ProviderEvent:
@@ -143,6 +155,8 @@ class WorkflowCoordinator:
             raise WorkflowStopped("工作流仍缺少工具结果，拒绝继续请求")
         if self.phase == "pending":
             yield self._start("planning", history)
+        elif self.phase == "premium_review_approved":
+            raise WorkflowStopped("高级审查已通过但宿主最终验收拒绝，工作流未通过")
         elif self.phase == "review_approved":
             # 外层自定义完成验收仍有最终否决权，不能重复返回已经拒绝的候选。
             if self.review_rounds >= self.settings.max_review_rounds:
@@ -153,6 +167,7 @@ class WorkflowCoordinator:
             cap = {
                 "planning": self.settings.max_planning_requests,
                 "reviewing": self.settings.max_review_requests,
+                "premium_reviewing": self.settings.max_premium_review_requests,
             }.get(self.phase)
             if cap is not None and self.phase_requests >= cap:
                 raise WorkflowStopped(f"{self.phase} 阶段请求上限已达，工作流未通过")
@@ -218,6 +233,42 @@ class WorkflowCoordinator:
                 yield self._artifact("plan", artifact)
                 yield self._start("coding", history)
                 continue
+            if self.phase == "premium_reviewing":
+                self.premium_review = artifact
+                if artifact["verdict"] != "approve":
+                    yield self._usage(reply)
+                    yield self._artifact("premium_review", artifact)
+                    raise WorkflowStopped("Kimi 高级审查要求修改，工作流未通过")
+                missing = sorted(self.changed_files - self.premium_reviewed_files)
+                if missing:
+                    yield self._usage(reply)
+                    self._feedback("高级审查尚未完整读取这些改动文件：" + ", ".join(missing))
+                    yield self._artifact(
+                        "premium_review_evidence_rejected", {"unread_files": missing}
+                    )
+                    continue
+                yield self._artifact("premium_review", artifact)
+                self.phase = "premium_review_approved"
+                yield ProviderEvent(
+                    "workflow_stage",
+                    {
+                        "phase": "premium_review_approved",
+                        "profile": self.settings.premium_reviewer,
+                        "review_round": self.review_rounds,
+                    },
+                )
+                yield ProviderEvent(
+                    "message_complete",
+                    reply=replace(
+                        reply,
+                        final_text=(
+                            f"{self.candidate}\n\n常规审查：{self.review['summary']}"
+                            f"\n高级审查：{artifact['summary']}"
+                        ),
+                        reasoning_content=None,
+                    ),
+                )
+                return
             self.review = artifact
             if artifact["verdict"] == "approve":
                 missing = sorted(self.changed_files - self.reviewed_files)
@@ -227,6 +278,18 @@ class WorkflowCoordinator:
                     yield self._artifact("review_evidence_rejected", {"unread_files": missing})
                     continue
                 yield self._artifact("review", artifact)
+                reason = premium_review_reason(
+                    self.task,
+                    self.changed_files,
+                    self.review_rounds,
+                    self.settings.premium_review_policy,
+                )
+                if reason is not None:
+                    self.premium_review_reason = reason
+                    # 常规审查不再作为最终回复交付，必须在切换前单独记录其 usage。
+                    yield self._usage(reply)
+                    yield self._start("premium_reviewing", history)
+                    continue
                 self.phase = "review_approved"
                 yield ProviderEvent(
                     "workflow_stage",

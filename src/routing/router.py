@@ -42,15 +42,12 @@ class RoutedProvider:
             for name in (settings.routing.cheap, settings.routing.strong)
         ):
             raise ValueError("自动路由引用的模型 profile 不存在")
-        if (
-            mode == "auto"
-            and settings.workflow.enabled
-            and any(
-                getattr(settings.workflow, key) not in settings.profiles
-                for key in ("planner", "coder", "reviewer")
-            )
-        ):
-            raise ValueError("工作流角色引用的模型 profile 不存在")
+        if mode == "auto" and settings.workflow.enabled:
+            roles = [settings.workflow.planner, settings.workflow.coder, settings.workflow.reviewer]
+            if settings.workflow.premium_review_policy != "off":
+                roles.append(settings.workflow.premium_reviewer)
+            if any(name not in settings.profiles for name in roles):
+                raise ValueError("工作流角色引用的模型 profile 不存在")
         self.settings, self.mode = settings, mode
         self.factory, self.max_attempts = factory, max_attempts
         self.begin_run("")
@@ -173,7 +170,7 @@ class RoutedProvider:
             and profile_name == rules.cheap
             and profile_name != rules.strong
         )
-        if purpose in {"planning", "coding", "reviewing"}:
+        if purpose in {"planning", "coding", "reviewing", "premium_reviewing"}:
             self.current = profile_name
         yield ProviderEvent(
             "model_routed",
@@ -188,7 +185,7 @@ class RoutedProvider:
         events = None
         reply = None
         try:
-            # 连接来自已解析的 profile；共享 Key/URL 不变，仅 model 随角色切换。
+            # 连接来自已解析的 profile；普通角色可共享连接，高级审查可使用独立供应商。
             provider = (
                 self.factory(profile)
                 if self.factory is not None
@@ -196,7 +193,7 @@ class RoutedProvider:
                     api_key=profile.api_key,
                     base_url=profile.base_url,
                     model=profile.model,
-                    max_attempts=self.max_attempts,
+                    max_attempts=profile.max_attempts or self.max_attempts,
                     max_output_tokens=min(128, profile.max_output_tokens or rules.max_output_tokens)
                     if is_classification
                     else profile.max_output_tokens or rules.max_output_tokens,
@@ -219,7 +216,12 @@ class RoutedProvider:
                             raise ProviderError("失败请求费用未知，已阻止预算模式下的自动重试")
                         self.cost.unknown_requests += 1
                         yield event
-                    elif purpose not in {"classification", "planning", "reviewing"}:
+                    elif purpose not in {
+                        "classification",
+                        "planning",
+                        "reviewing",
+                        "premium_reviewing",
+                    }:
                         yield event
             else:
                 reply = provider.complete(messages, tools)

@@ -12,7 +12,7 @@ from core.agent import Agent
 from core.completion import CompletionCheck, ToolEvidenceCompletionVerifier
 from core.schemas import ModelReply, RunStatus, ToolCall
 from core.usage import TokenUsage
-from providers import ScriptedProvider
+from providers import ProviderError, ScriptedProvider
 from routing import RoutedProvider
 from routing.intent import READ_TOOLS
 from routing.workflow_protocol import parse_artifact
@@ -32,13 +32,13 @@ def plan():
     )
 
 
-def review(approve=True):
+def review(approve=True, summary=None):
     """独立审查结果，否决必须带可执行的问题清单。"""
     return answer(
         json.dumps(
             {
                 "verdict": "approve" if approve else "changes_requested",
-                "summary": "符合要求" if approve else "需要修正",
+                "summary": summary or ("符合要求" if approve else "需要修正"),
                 "issues": [] if approve else ["alpha.txt 应使用大写 ALPHA"],
             }
         )
@@ -59,9 +59,19 @@ def read(id="read", **args):
     return call("read_file", {"path": "alpha.txt", **args}, id)
 
 
+def read_path(path, id):
+    """读取指定改动文件，用于验证多文件高级审查。"""
+    return call("read_file", {"path": path}, id)
+
+
 def write(old="alpha", new="Alpha", id="write"):
     """由真实 ToolExecutor 在临时工作区执行的精确替换。"""
     return call("write_or_replace", {"path": "alpha.txt", "old": old, "new": new}, id)
+
+
+def create(path, id):
+    """通过真实写工具创建新文件。"""
+    return call("write_or_replace", {"path": path, "old": "", "new": "content\n"}, id)
 
 
 def check(id="check"):
@@ -74,10 +84,19 @@ def settings(**workflow):
     return Settings(
         {
             n: ModelProfile(n, "https://gateway.invalid/v1", n, "fake-key")
-            for n in ("economy", "planner", "primary", "reviewer")
+            for n in ("economy", "planner", "primary", "reviewer", "premium_reviewer")
         },
         RoutingSettings(intent_strategy="model", max_requests=36),
         workflow=WorkflowSettings(enabled=True, **workflow),
+    )
+
+
+def premium_settings(**workflow):
+    """开启风险型高级审查，其余预算沿用工作流默认值。"""
+    return settings(
+        premium_reviewer="premium_reviewer",
+        premium_review_policy="risk",
+        **workflow,
     )
 
 
@@ -97,7 +116,8 @@ def execute(
     requests, events, journal = [], [], []
     pool = {}
     for name, replies in scripts.items():
-        scripted = ScriptedProvider(replies)
+        # 异常替身用于验证供应商失败边界；普通列表仍走既有脚本 Provider。
+        scripted = replies if isinstance(replies, BaseException) else ScriptedProvider(replies)
 
         class Recording:
             """绑定各角色的脚本和请求捕获，不使用网络。"""
@@ -109,6 +129,8 @@ def execute(
             def complete(self, messages, tools):
                 """记录请求快照，避免后续历史追加改变断言证据。"""
                 requests.append((self.name, deepcopy(messages), deepcopy(tools)))
+                if isinstance(self.scripted, BaseException):
+                    raise self.scripted
                 return self.scripted.complete(messages, tools)
 
         pool[name] = Recording(name, scripted)
@@ -184,6 +206,177 @@ def test_plan_code_review_real_tools_and_accounting(workspace):
         if m["role"] == "user" and '"type": "workflow_artifact"' in m["content"]
     ]
     assert artifacts == ["plan", "coding_candidate", "review"]
+
+
+def test_low_risk_change_does_not_call_premium_reviewer(workspace):
+    """普通单文件修改仍停在常规审查，不能因为配置了 Kimi 就产生付费请求。"""
+    result, _, requests, _, _ = execute(
+        workspace,
+        {
+            "planner": [plan()],
+            "primary": [write(), check(), answer()],
+            "reviewer": [read("normal-read"), review(summary="常规审查通过")],
+        },
+        cfg=premium_settings(),
+    )
+    assert result.ok, result.error
+    assert not any(name == "premium_reviewer" for name, _, _ in requests)
+    assert result.routing["workflow"]["premium_review_triggered"] is False
+
+
+@pytest.mark.parametrize("task", ["修改 alpha.txt 并进行 Kimi 审查", "修改认证和权限并验证"])
+def test_explicit_or_high_risk_change_enters_premium_review_once(workspace, task):
+    """显式要求和高风险任务都会在常规批准后进入一次独立只读审查。"""
+    result, _, requests, events, journal = execute(
+        workspace,
+        {
+            "planner": [plan()],
+            "primary": [write(), check(), answer()],
+            "reviewer": [read("normal-read"), review(summary="常规审查通过")],
+            "premium_reviewer": [
+                read("premium-read"),
+                review(summary="Kimi 高级审查通过"),
+            ],
+        },
+        cfg=premium_settings(),
+        task=task,
+    )
+    assert result.ok, result.error
+    assert [name for name, _, _ in requests].count("premium_reviewer") == 2
+    assert result.routing["requests_by_purpose"]["premium_reviewing"] == 2
+    assert result.usage["total_tokens"] == 900
+    state = result.routing["workflow"]
+    assert state["phase"] == state["terminal_status"] == "completed"
+    assert state["premium_review_triggered"] is True
+    assert state["premium_reviewed_files"] == ["alpha.txt"]
+    assert state["premium_review"]["summary"] == "Kimi 高级审查通过"
+    stages = [event.data["phase"] for event in events if event.type == "workflow_stage"]
+    assert stages[-2:] == ["premium_reviewing", "premium_review_approved"]
+    premium_tools = [tools for name, _, tools in requests if name == "premium_reviewer"]
+    assert all(
+        {tool["function"]["name"] for tool in tools} <= READ_TOOLS for tools in premium_tools
+    )
+    artifacts = [
+        json.loads(message["content"])["kind"]
+        for message in journal
+        if message["role"] == "user" and '"type": "workflow_artifact"' in message["content"]
+    ]
+    assert artifacts[-2:] == ["review", "premium_review"]
+
+
+def test_second_normal_review_round_triggers_premium_review(workspace):
+    """常规审查返工后才批准时，即使任务和路径普通也升级 Kimi。"""
+    result, _, requests, _, _ = execute(
+        workspace,
+        {
+            "planner": [plan()],
+            "primary": [write(), check(), answer(), answer("按常规意见重新确认")],
+            "reviewer": [read("r1"), review(False), read("r2"), review()],
+            "premium_reviewer": [read("premium"), review()],
+        },
+        cfg=premium_settings(),
+    )
+    assert result.ok, result.error
+    assert result.routing["workflow"]["premium_review_reason"] == "常规审查经历多轮返工"
+    assert [name for name, _, _ in requests].count("premium_reviewer") == 2
+
+
+def test_five_changed_files_trigger_one_premium_review(workspace):
+    """达到文件数量阈值时升级一次，两个审查阶段都必须重新读取五个文件。"""
+    paths = [f"part_{index}.txt" for index in range(5)]
+    result, _, requests, _, _ = execute(
+        workspace,
+        {
+            "planner": [plan()],
+            "primary": [
+                *[create(path, f"write-{index}") for index, path in enumerate(paths)],
+                check(),
+                answer(),
+            ],
+            "reviewer": [
+                *[read_path(path, f"review-{index}") for index, path in enumerate(paths)],
+                review(),
+            ],
+            "premium_reviewer": [
+                *[read_path(path, f"premium-{index}") for index, path in enumerate(paths)],
+                review(),
+            ],
+        },
+        cfg=premium_settings(max_review_requests=8, max_premium_review_requests=8),
+        task="创建五个普通模块并验证",
+    )
+    assert result.ok, result.error
+    state = result.routing["workflow"]
+    assert state["premium_review_reason"] == "改动文件数量达到高级审查阈值"
+    assert state["premium_reviewed_files"] == paths
+    assert [name for name, _, _ in requests].count("premium_reviewer") == 6
+
+
+@pytest.mark.parametrize("failure", ["reject", "write", "request_cap"])
+def test_premium_review_failure_never_completes(workspace, failure):
+    """Kimi 否决、越权或耗尽预算都必须保持未验证状态。"""
+    premium = {
+        "reject": [read("premium"), review(False)],
+        "write": [write(id="premium-write")],
+        "request_cap": [read("premium")],
+    }[failure]
+    limits = {"max_premium_review_requests": 1} if failure == "request_cap" else {}
+    result, _, _, _, _ = execute(
+        workspace,
+        {
+            "planner": [plan()],
+            "primary": [write(), check(), answer()],
+            "reviewer": [read("normal"), review()],
+            "premium_reviewer": premium,
+        },
+        cfg=premium_settings(**limits),
+        task="修改 alpha.txt 并进行 Kimi 审查",
+    )
+    assert result.status is RunStatus.UNVERIFIED
+    assert result.routing["workflow"]["phase"] == "premium_reviewing"
+
+
+def test_premium_provider_failure_never_completes(workspace):
+    """Kimi 网络或鉴权失败必须保留 provider_error，不能沿用普通审查的批准。"""
+    result, _, _, _, _ = execute(
+        workspace,
+        {
+            "planner": [plan()],
+            "primary": [write(), check(), answer()],
+            "reviewer": [read("normal"), review()],
+            "premium_reviewer": ProviderError("temporary premium failure"),
+        },
+        cfg=premium_settings(),
+        task="修改 alpha.txt 并进行 Kimi 审查",
+    )
+    assert result.status is RunStatus.PROVIDER_ERROR
+    state = result.routing["workflow"]
+    assert state["phase"] == "premium_reviewing"
+    assert state["terminal_status"] == "provider_error"
+
+
+def test_outer_verifier_can_reject_premium_approval(workspace):
+    """Kimi approve 仍不能覆盖宿主最终验收。"""
+
+    class Reject:
+        def verify(self, **kwargs):
+            return CompletionCheck(False, "额外业务验证未满足")
+
+    result, _, _, _, _ = execute(
+        workspace,
+        {
+            "planner": [plan()],
+            "primary": [write(), check(), answer()],
+            "reviewer": [read("normal"), review()],
+            "premium_reviewer": [read("premium"), review()],
+        },
+        cfg=premium_settings(),
+        task="修改 alpha.txt 并进行 Kimi 审查",
+        verifier=Reject(),
+    )
+    assert result.status is RunStatus.UNVERIFIED
+    assert result.routing["workflow"]["phase"] == "premium_review_approved"
+    assert result.routing["workflow"]["terminal_status"] == "unverified"
 
 
 def test_reviewer_feedback_drives_repair_and_fresh_verification(workspace):

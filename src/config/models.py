@@ -9,7 +9,7 @@ from pathlib import Path
 class ModelProfile:
     """一个已解析模型的端点、模型 ID、密钥和可选报价。
 
-    多个 profile 可从共享 connection 获得相同 base_url/api_key，仅 model 不同。
+    多个 profile 可继承共享 connection，也可成对覆盖 base_url/api_key 使用独立供应商。
     路由选择 profile 后把 model 作为请求字段发送，不在本机加载模型权重。
     """
 
@@ -23,6 +23,8 @@ class ModelProfile:
     thinking_format: str = "thinking"
     max_output_tokens: int | None = None
     timeout_seconds: int = 30
+    # None 表示沿用 CLI 的全局重试上限；付费模型可单独收紧为 1。
+    max_attempts: int | None = None
 
 
 @dataclass(frozen=True)
@@ -33,8 +35,11 @@ class WorkflowSettings:
     planner: str = "planner"
     coder: str = "primary"
     reviewer: str = "reviewer"
+    premium_reviewer: str | None = None
+    premium_review_policy: str = "off"
     max_planning_requests: int = 4
     max_review_requests: int = 4
+    max_premium_review_requests: int = 4
     max_review_rounds: int = 2
     max_context_chars: int = 120_000
 

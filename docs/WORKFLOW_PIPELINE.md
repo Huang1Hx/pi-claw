@@ -1,4 +1,4 @@
-# 多模型工作流：规划 → 编码 → 审查
+# 多模型工作流：规划 → 编码 → 常规审查 → 可选高级审查
 
 该功能在单个 Agent 宿主中按顺序协调多个模型，不是分布式 Multi-Agent，也不启动并行子代理。
 阶段之间自动切换，写文件和运行命令仍需原有审批。默认旧配置关闭工作流，学校模板显式开启。
@@ -7,21 +7,23 @@
 
 | 职责 | profile | 学校网关 model ID | 权限 |
 |---|---|---|---|
-| 复杂度分类、简单任务 | economy | `qwen3.8-chat` | 分类无工具；简单执行只读 |
-| 规划 | planner | `qwen3.7-plus` | 读取、枚举、搜索 |
+| 复杂度分类、简单任务 | economy | `deepseek-flash`（学校） | 分类无工具；简单执行只读 |
+| 规划 | planner | `deepseek-flash`（学校） | 读取、枚举、搜索 |
 | 编码和验证 | primary | `deepseek-flash` | 原工具集合；副作用仍须审批 |
-| 独立审查 | reviewer | `glm-5.3-flash` | 读取、枚举、搜索 |
-| 手动备选推理 | reasoner | `qwen3.8-reasoner` | 固定模型模式的常规权限 |
-| 手动备选编码 | alternative | `deepseek-v4-flash-ascend1` | 固定模型模式的常规权限 |
+| 常规独立审查 | reviewer | `deepseek-flash`（学校） | 读取、枚举、搜索 |
+| 高级独立审查 | premium_reviewer | `kimi-k3`（Moonshot） | 仅命中风险规则；读取、枚举、搜索 |
 
-这是初始职责分配，不是能力排行榜，也不代表已经确认当前 Key 的各模型权限。
+普通自动角色全部使用学校免费的 `deepseek-flash`；多个 profile 映射同一个 model ID，但仍保留
+阶段权限、输出上限和调用统计。用户自费 `kimi-k3` 只做必要的第二次只读审查，不参与分类、规划
+或编码。该分配不是通用能力排行榜，也不根据价格自动排序。
 模型 ID 依据 2026-09-14 查询的[学校公开模型目录](https://llm.ustc.edu.cn/api/models/public)，
 接入约定见[学校 API 指南](https://llm.ustc.edu.cn/guide/api-usage/)和
 [协议说明](https://llm.ustc.edu.cn/guide/protocol/)。服务目录与能力可能变化；真实兼容性仍需联调。
 
 新克隆可将根目录 `pi-claw.ustc.example.toml` 复制为 `pi-claw.toml`。
-**已经填写本机配置的用户不要覆盖现有文件。** `.env` 只保留你的
-`OPENAI_API_KEY` 和 `OPENAI_BASE_URL`；不需要给每个角色重复配置 Key，也不需要价格。
+**已经填写本机配置的用户不要覆盖现有文件。** `.env` 中学校连接使用
+`OPENAI_API_KEY`/`OPENAI_BASE_URL`，Kimi 使用 `MOONSHOT_API_KEY`/`MOONSHOT_BASE_URL`；
+不需要给学校的四个角色重复配置 Key，也不需要价格。
 模型 ID 由 TOML 加载，此模式不使用 `.env` 的 `OPENAI_MODEL`。
 
 从项目根目录启动（会产生真实模型调用）：
@@ -53,7 +55,13 @@ uv run --frozen pi-claw chat --config pi-claw.toml --route auto --max-steps 24
                                       ↓                         │
                                 reviewer 只读审查 ── 要求修改 ──┘
                                       ↓ 批准且读过所有改动文件
-                                外层宿主最终验收 → completed
+                              宿主风险规则 ── 不触发 ───────────┐
+                                      ↓ 触发                   │
+                           premium_reviewer 重新只读审查        │
+                                      ↓ 批准                   │
+                                外层宿主最终验收 ←──────────────┘
+                                      ↓
+                                  completed
 ```
 
 1. `RoutedProvider.begin_run()` 为每个新用户回合重置分类、预算和工作流状态。
@@ -70,11 +78,15 @@ uv run --frozen pi-claw chat --config pi-claw.toml --route auto --max-steps 24
    在**本次审查轮**完整重读所有成功改动的文件。缺失、失败或截断读取都不能批准。
 7. 审查必须返回 `{"verdict":"approve","summary":"...","issues":[]}`，或
    `changes_requested` 并提供非空问题清单。否决带反馈回编码；再次改动须重新验证和审查。
-8. 审查通过只产生 `review_approved`。Agent 的最终 CompletionVerifier 仍有否决权，
-   `finish_run()` 仅在宿主接受后标记 `completed`。最终文本包含编码说明和审查摘要。
+8. 常规审查通过后，宿主仅按显式要求、高风险任务/路径、至少两轮常规审查或至少五个改动文件
+   决定是否升级；没有成功改动文件时不调用 Kimi，不额外花模型调用做分类。
+9. 高级审查建立新的私有对话，必须重新读取所有改动文件。Kimi 否决、越权、超时或预算耗尽
+   均停止为未验证，不自动回退成常规审查通过，也不自动花费第二轮高级返工。
+10. 最终审查通过只产生 `review_approved` 或 `premium_review_approved`。Agent 的最终
+    CompletionVerifier 仍有否决权，`finish_run()` 仅在宿主接受后标记 `completed`。
 
-规划/审查发送的工具 Schema 只含只读工具，宿主还复核返回调用名称；即使用户曾批准写入，
-这两个阶段返回写入、命令或未知工具也会被拦截，整组不执行。它们的 JSON 不能选择 profile，
+规划、常规审查和高级审查发送的工具 Schema 只含只读工具，宿主还复核返回调用名称；即使用户
+曾批准写入，这些阶段返回写入、命令或未知工具也会被拦截，整组不执行。它们的 JSON 不能选 profile，
 模型和阶段映射只能来自配置。
 
 ## 消息、推理内容与持久化
@@ -96,41 +108,45 @@ uv run --frozen pi-claw chat --config pi-claw.toml --route auto --max-steps 24
 
 ## 参数与资源上限
 
-学校模板中 `[workflow]` 为 `enabled=true`，三个角色映射如上表。
+学校模板中 `[workflow]` 为 `enabled=true`，普通阶段和可选高级审查映射如上表。
 
 | 参数 | 学校模板值 | 含义 |
 |---|---:|---|
 | `routing.max_requests` | 36 | 每回合全部逻辑模型请求，含分类、产物纠错、失败和返工 |
 | `max_planning_requests` | 4 | 规划阶段模型请求上限，工具请求也占用 |
 | `max_review_requests` | 4 | 每轮审查请求上限，读取请求和协议纠错也占用 |
+| `max_premium_review_requests` | 4 | 唯一一次高级审查阶段的请求上限，不是四轮复审 |
 | `max_review_rounds` | 3 | 最多三轮审查，即首次审查加最多两次审查返工 |
 | `max_context_chars` | 120000 | 当前阶段私有消息 JSON 字符上限，超限停止 |
 | `--max-steps` | 建议 24 | 外层 Agent 回合上限，与逻辑请求上限独立 |
 | `--max-attempts` | 默认 3 | 单个逻辑请求包含首次在内的 HTTP 尝试上限 |
 
 规划/审查限额不是独立赠送的调用额度；全部还受总请求上限约束。外层一步可能在内部消费
-计划、编码完成说明及审查产物，所以 `steps` 不等于模型请求数。36 × 3 = 108 是默认配置下
-HTTP 尝试的理论上限，不是预期调用量；流中断后不重试，尤其不会重放工具。
+计划、编码完成说明及审查产物，所以 `steps` 不等于模型请求数。学校 profile 默认最多三次 HTTP
+尝试；Kimi profile 固定一次，不能用 `36 × 3` 推算实际付费次数。流中断后不重试或重放工具。
 
 每个 `[models.*]` 可覆盖 `max_output_tokens`（1–32768）和 `timeout_seconds`（1–300）。
-学校模板为 economy 2048 / 60 秒，规划/编码/审查 8192 / 120 秒；分类另收紧为最多 128 Token。
+学校模板为 economy 2048 / 120 秒，规划/编码/常规审查 8192 / 120 秒，Kimi 4096 / 120 秒；
+分类另收紧为最多 128 Token。
 这是服务端 `max_tokens` 和客户端 HTTP 读取/连接超时配置，不是整个回合的墙钟时限，
 也不是模型上下文窗口的保证值。
 
 推理开关支持 `thinking_mode="default|enabled|disabled"`；default 不发送额外字段。
 `thinking_format` 只允许 `thinking`、`chat_template_kwargs`、`enable_thinking` 三种受控形式。
-学校模板给 qwen3.8-chat 发送 `chat_template_kwargs.enable_thinking=false`，给 deepseek-flash
-发送 `thinking.type=enabled`，其他自动角色保持服务默认值。参数处理已用替身测试，学校网关
+学校模板只给 `primary` profile 发送 `thinking.type=enabled`；同为 DeepSeek 的其他普通角色保持
+服务默认值，Kimi 也不附加学校网关专用推理字段。
+参数处理已用替身测试，学校网关
 是否接受、忽略或转换这些字段尚未实测；遇到相关 400 错误应核对平台协议，不盲目重试。
 
 ## 指标与边界
 
-`RunResult.routing.requests_by_purpose` 按 classification/execution/planning/coding/reviewing
+`RunResult.routing.requests_by_purpose` 按 classification/execution/planning/coding/reviewing/
+premium_reviewing
 区分逻辑调用，`models` 按 profile 聚合服务端 Token。中间响应和被拒绝的产物也计入 usage，
 最后的审查响应只计一次；失败请求的未知 Token 不猜测为零，不推算未知费用。
 
-`RunResult.routing.workflow` 包含 phase、terminal_status、review_rounds、plan、review、
-changed_files、reviewed_files 和 verification。阶段协议、权限、证据或审查上限失败为
+`RunResult.routing.workflow` 还记录 premium_review_triggered、premium_review_reason、
+premium_review 和 premium_reviewed_files。阶段协议、权限、证据或审查上限失败为
 `unverified`；网络/模型全局预算错误仍为 `provider_error`；重复工具或外层步数耗尽沿用原终态。
 重复检测按阶段重建，允许不同职责各自读取相同文件；同阶段循环仍停止，跨阶段返工由预算约束。
 

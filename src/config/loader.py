@@ -47,7 +47,7 @@ def load_settings(
     cwd 仅决定默认 .env 的位置；显式 env_file 必须存在，no_env 只禁用文件读取。
     environ 可注入测试环境；未提供则读取 os.environ，且其值覆盖 .env 同名变量。
     config_path 显式指定模型 profile 的 TOML；可通过 connection 共用地址和密钥，
-    每个 profile 只写不同的 model。密钥始终通过 api_key_env 引用环境值。
+    也可在 profile 中成对覆盖连接。密钥始终通过 api_key_env 引用环境值。
     无效结构和预算在请求模型之前抛出 ValueError；错误不得回显密钥原文。
     """
     environment = (
@@ -83,6 +83,7 @@ def load_settings(
             raise ValueError("profile 名称无效或占用保留名称")
         allowed = {
             "base_url",
+            "base_url_env",
             "model",
             "api_key_env",
             "input_per_million",
@@ -91,10 +92,13 @@ def load_settings(
             "thinking_format",
             "max_output_tokens",
             "timeout_seconds",
+            "max_attempts",
         }
         if not isinstance(model, dict) or set(model) - allowed:
             raise ValueError(f"profile {name} 包含未知配置项")
-        overrides = {key: model[key] for key in ("base_url", "api_key_env") if key in model}
+        overrides = {
+            key: model[key] for key in ("base_url", "base_url_env", "api_key_env") if key in model
+        }
         # 两个字段都省略才继承共享连接；部分覆盖直接校验失败，不能把共享 Key 发往新地址。
         url, api_key = (
             resolve_connection(overrides, environment, label=f"models.{name}")
@@ -117,10 +121,15 @@ def load_settings(
             raise ValueError(f"{name}.thinking_format 不受支持")
         max_output = model.get("max_output_tokens")
         timeout = model.get("timeout_seconds", 30)
+        max_attempts = model.get("max_attempts")
         if type(timeout) is not int or not 1 <= timeout <= 300:
             raise ValueError(f"{name}.timeout_seconds 必须是 1–300 的整数")
         if max_output is not None and (type(max_output) is not int or not 1 <= max_output <= 32768):
             raise ValueError(f"{name}.max_output_tokens 必须是 1–32768 的整数")
+        if max_attempts is not None and (
+            type(max_attempts) is not int or not 1 <= max_attempts <= 10
+        ):
+            raise ValueError(f"{name}.max_attempts 必须是 1–10 的整数")
         profiles[name] = ModelProfile(
             name,
             url,
@@ -132,6 +141,7 @@ def load_settings(
             thinking_format,
             max_output,
             timeout,
+            max_attempts,
         )
     routing_data = data.get("routing", {})
     allowed = set(RoutingSettings.__dataclass_fields__)
@@ -169,6 +179,7 @@ def load_settings(
     for key, lower, upper in (
         ("max_planning_requests", 1, 12),
         ("max_review_requests", 1, 12),
+        ("max_premium_review_requests", 1, 12),
         ("max_review_rounds", 1, 5),
         ("max_context_chars", 4000, 500_000),
     ):
@@ -179,4 +190,12 @@ def load_settings(
         name = _string(getattr(workflow, key), f"workflow.{key}")
         if workflow.enabled and name not in profiles:
             raise ValueError(f"workflow.{key} 必须引用已定义的 profile")
+    if workflow.premium_review_policy not in {"off", "explicit", "risk"}:
+        raise ValueError("workflow.premium_review_policy 必须是 off、explicit 或 risk")
+    if workflow.premium_reviewer is not None:
+        premium_name = _string(workflow.premium_reviewer, "workflow.premium_reviewer")
+        if premium_name not in profiles:
+            raise ValueError("workflow.premium_reviewer 必须引用已定义的 profile")
+    if workflow.premium_review_policy != "off" and workflow.premium_reviewer is None:
+        raise ValueError("启用高级审查时必须配置 workflow.premium_reviewer")
     return Settings(profiles, routing, environment, config_path.resolve(), source_env, workflow)

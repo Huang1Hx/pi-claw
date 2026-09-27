@@ -73,6 +73,8 @@ def model(repl, argument: str) -> bool:
             roles = [("轻量/分类", rules.cheap), ("主力", rules.strong)]
             if flow.enabled:
                 roles += [("规划", flow.planner), ("编码", flow.coder), ("审查", flow.reviewer)]
+                if flow.premium_review_policy != "off" and flow.premium_reviewer:
+                    roles.append(("高级审查", flow.premium_reviewer))
             print("auto 的配置分工（不是可用性测试结果）：", file=repl.output)
             for label, name in roles:
                 profile = repl.settings.profiles.get(name)
@@ -80,7 +82,10 @@ def model(repl, argument: str) -> bool:
                     f"  {label}：{profile.model if profile else '未配置'} [{name}]",
                     file=repl.output,
                 )
-            print("/model auto 启用自动路由；固定模型会跳过独立规划/审查。", file=repl.output)
+            print(
+                "/model auto 启用自动路由；固定模型会跳过规划和独立审查工作流。",
+                file=repl.output,
+            )
         else:
             print("未加载模型列表，请通过 --config 指定配置。", file=repl.output)
         print("/model scripted 使用离线演示。切换会创建新会话，旧会话保留。", file=repl.output)

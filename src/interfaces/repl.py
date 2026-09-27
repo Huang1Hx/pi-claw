@@ -178,6 +178,8 @@ class CodingRepl:
                 "coding": "编码与验证",
                 "reviewing": "独立审查（只读）",
                 "review_approved": "审查通过，等待宿主验收",
+                "premium_reviewing": "Kimi 高级审查（只读）",
+                "premium_review_approved": "高级审查通过，等待宿主验收",
             }
             phase = labels.get(event.data["phase"], event.data["phase"])
             print(f"workflow> {phase}：{event.data['profile']}", file=self.output)

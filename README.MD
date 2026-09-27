@@ -75,7 +75,7 @@ model = "<YOUR_PRIMARY_TOOL_MODEL_ID>"
 
 路由时复用 API 地址和 Key，改变请求 JSON 中的 `model`；不会在本机加载模型权重。
 路由模式不使用单模型入口的 `OPENAI_MODEL`。若某个 profile 连接另一家服务，须同时显式
-配置它的 `base_url` 和 `api_key_env`，原有独立连接配置仍兼容。通过显式配置启用路由：
+配置它的 `base_url`/`base_url_env` 和 `api_key_env`，不能继承半套共享连接。通过显式配置启用路由：
 
 ```bash
 uv run --frozen pi-claw chat --config pi-claw.toml --route auto
@@ -95,9 +95,10 @@ uv run --frozen pi-claw eval-routing --output runs/routing-eval.json
 
 ## 自动规划、编码与审查
 
-`pi-claw.ustc.example.toml` 提供学校网关的初始分工：`qwen3.8-chat` 轻量分类，
-`qwen3.7-plus` 规划 → `deepseek-flash` 编码/验证 → `glm-5.3-flash` 独立审查。
-新克隆可复制为本机 `pi-claw.toml`；已经配置好的文件不要覆盖。继续共用 `.env` 的 Key/URL：
+`pi-claw.ustc.example.toml` 中分类、规划、编码和常规审查都使用学校免费的
+`deepseek-flash`；只有命中确定性高风险规则时，才通过独立 Moonshot 连接调用用户自费
+`kimi-k3` 做第二次只读审查。新克隆可复制为本机 `pi-claw.toml`；已经配置好的文件不要覆盖。
+学校连接使用 `.env` 的 `OPENAI_*`，Kimi 使用独立的 `MOONSHOT_*`：
 
 ```bash
 uv run --frozen pi-claw chat --config pi-claw.toml --route auto --max-steps 24
@@ -105,7 +106,9 @@ uv run --frozen pi-claw chat --config pi-claw.toml --route auto --max-steps 24
 
 简单问答保留轻量路径，复杂任务进入完整工作流；审查不通过会带问题清单返回编码。
 规划和审查被宿主限制为只读，写入与命令仍需审批。审查必须重读改动文件，宿主仍检查写后
-验证证据。学校模板最多三轮审查、全回合 36 次逻辑请求，不需要价格。
+验证证据。显式要求、高风险能力、两轮以上常规审查或至少五个改动文件才升级 Kimi；没有成功
+改动文件时不调用。Kimi 每个逻辑请求只尝试一次，否决或失败不会伪装成通过。
+学校模板最多三轮常规审查、一次高级审查阶段、全回合 36 次逻辑请求，不需要模型价格。
 这不是并行子代理，也不自动提交或回滚。准确配置、数据流、预算、恢复边界及待实测项见
 [多模型工作流](docs/WORKFLOW_PIPELINE.md)。
 
@@ -124,7 +127,7 @@ uv run --frozen pi-claw chat --config pi-claw.toml --route auto --max-steps 24
 | 完成验收 | 修改后缺少认可验证证据时拒绝完成声明，返回 unverified 或继续验证 |
 | 离线评测 | 真实工具链、独立工作区并发、机器可读报告和脱敏 Trace |
 | 模型路由 | 轻量模型分类、按复杂度分流、失败升级、固定 profile、分模型 Token 与请求上限 |
-| 多模型工作流 | 显式开启规划/编码/审查、只读角色隔离、审查返工上限和结构化产物持久化 |
+| 多模型工作流 | DeepSeek 规划/编码/常规审查、按风险升级 Kimi、高级只读隔离和结构化产物持久化 |
 
 完成验收是最低证据检查，不保证任务业务正确。应用层权限检查不等于 OS 沙箱；
 获批测试会执行仓库代码。详细边界见 [安全说明](docs/SECURITY.md)。

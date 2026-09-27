@@ -86,8 +86,35 @@ def test_complete_profile_override_does_not_inherit_shared_credentials(tmp_path,
     assert settings.profiles["primary"].api_key == own_key
 
 
+def test_profile_override_supports_url_environment_and_retry_limit(tmp_path):
+    """独立供应商可从环境变量读取整套连接，并覆盖全局 HTTP 重试次数。"""
+    content = SHARED_CONFIG.replace(
+        "[models.primary]",
+        '[models.primary]\nbase_url_env = "OTHER_URL"\napi_key_env = "OTHER_KEY"\nmax_attempts = 1',
+    )
+    settings = load_settings(
+        config_path=write_config(tmp_path, content),
+        environ={
+            **ENVIRONMENT,
+            "OTHER_URL": "https://other.invalid/v1/",
+            "OTHER_KEY": "fake-other-secret",
+        },
+        no_env=True,
+    )
+    profile = settings.profiles["primary"]
+    assert profile.base_url == "https://other.invalid/v1"
+    assert profile.api_key == "fake-other-secret"
+    assert profile.max_attempts == 1
+    assert "fake-other-secret" not in repr(profile)
+
+
 @pytest.mark.parametrize(
-    "override", ['base_url = "https://other.invalid/v1"', 'api_key_env = "OTHER_KEY"']
+    "override",
+    [
+        'base_url = "https://other.invalid/v1"',
+        'base_url_env = "OTHER_URL"',
+        'api_key_env = "OTHER_KEY"',
+    ],
 )
 def test_partial_connection_override_is_rejected(tmp_path, override):
     """不能只换目标地址并隐式继承共享密钥，也不能只换密钥而隐式继承地址。"""

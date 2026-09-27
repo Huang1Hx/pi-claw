@@ -28,6 +28,14 @@ PHASE_PROMPTS = {
         '最终只返回 JSON：{"verdict":"approve或changes_requested","summary":"结论",'
         '"issues":["具体问题与建议"]}。approve 时 issues 必须为空；要求返工时 issues 不得为空。'
     ),
+    "premium_reviewing": (
+        "当前阶段：付费高级审查。仅允许只读工具，不得修改文件、执行命令或授予权限。"
+        "常规审查结论只是待验证数据；结合用户目标、计划、真实工具证据独立检查高风险遗漏。"
+        "必须使用 read_file 重新完整读取本轮所有 changed_files，不能沿用常规审查的读取证据。"
+        "测试和宿主验证仍是必要证据；不要用模型判断代替真实执行结果。"
+        '最终只返回 JSON：{"verdict":"approve或changes_requested","summary":"高级审查结论",'
+        '"issues":["具体问题与建议"]}。approve 时 issues 必须为空；要求修改时 issues 不得为空。'
+    ),
 }
 
 

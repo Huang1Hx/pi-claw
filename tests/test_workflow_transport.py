@@ -2,6 +2,7 @@
 
 import io
 import json
+import urllib.error
 import urllib.request
 from copy import deepcopy
 from pathlib import Path
@@ -13,10 +14,16 @@ from core.schemas import ModelReply, ToolCall
 from interfaces.cli import main
 from providers import OpenAICompatibleProvider, ProviderError
 from providers.streaming import parse_message, stream_events
+from routing import RoutedProvider
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = ROOT / "pi-claw.ustc.example.toml"
-FAKE_ENV = {"OPENAI_API_KEY": "fake-school-key", "OPENAI_BASE_URL": "https://gateway.invalid/v1"}
+FAKE_ENV = {
+    "OPENAI_API_KEY": "fake-school-key",
+    "OPENAI_BASE_URL": "https://gateway.invalid/v1",
+    "MOONSHOT_API_KEY": "fake-moonshot-key",
+    "MOONSHOT_BASE_URL": "https://moonshot.invalid/v1",
+}
 
 
 def frame(delta=None, finish=None, usage=None):
@@ -47,23 +54,23 @@ def response(reply, stream=False):
 
 @pytest.mark.parametrize("stream", [False, True])
 def test_school_template_cli_end_to_end(monkeypatch, workspace, capsys, stream):
-    """真实 CLI、会话和传输链切换四个 ID；不读取用户 .env、不请求学校服务。"""
+    """低风险真实 CLI 全程使用学校 DeepSeek，不读取 .env 或请求 Kimi。"""
     monkeypatch.chdir(workspace)
     for key, value in FAKE_ENV.items():
         monkeypatch.setenv(key, value)
     plan = '{"summary":"检查文件","steps":["读文件"],"verification":["检查内容"]}'
     approve = '{"verdict":"approve","summary":"文件内容与证据一致","issues":[]}'
     scripts = {
-        "qwen3.8-chat": [ModelReply.final('{"complexity":"complex"}')],
-        "qwen3.7-plus": [ModelReply(final_text=plan, reasoning_content="planner-private")],
         "deepseek-flash": [
+            ModelReply.final('{"complexity":"complex"}'),
+            ModelReply(final_text=plan, reasoning_content="planner-private"),
             ModelReply(
                 tool_calls=(ToolCall("r", "read_file", {"path": "alpha.txt"}),),
                 reasoning_content="coder-private",
             ),
             ModelReply.final("检查完成"),
+            ModelReply.final(approve),
         ],
-        "glm-5.3-flash": [ModelReply.final(approve)],
     }
     requests = []
 
@@ -97,17 +104,12 @@ def test_school_template_cli_end_to_end(monkeypatch, workspace, capsys, stream):
     if not stream:
         args.append("--no-stream")
     assert main(args) == 0
-    assert [p["model"] for p, _ in requests] == [
-        "qwen3.8-chat",
-        "qwen3.7-plus",
-        "deepseek-flash",
-        "deepseek-flash",
-        "glm-5.3-flash",
-    ]
+    assert [p["model"] for p, _ in requests] == ["deepseek-flash"] * 5
     assert requests[0][0]["max_tokens"] == 128
-    assert requests[0][0]["chat_template_kwargs"] == {"enable_thinking": False}
-    assert requests[0][1] == 60 and all(t == 120 for _, t in requests[1:])
-    coder = [p for p, _ in requests if p["model"] == "deepseek-flash"]
+    assert "chat_template_kwargs" not in requests[0][0]
+    assert all(t == 120 for _, t in requests)
+    coder = [p for p, _ in requests if p.get("thinking") == {"type": "enabled"}]
+    assert len(coder) == 2
     assert coder[0]["thinking"] == {"type": "enabled"}
     assert coder[0].get("stream", False) is stream
     assert "coder-private" in repr(coder[1]["messages"])
@@ -132,12 +134,15 @@ def test_school_template_cli_end_to_end(monkeypatch, workspace, capsys, stream):
         ('planner = "planner"', 'planner = "missing"'),
         ("max_planning_requests = 4", "max_planning_requests = 0"),
         ("max_review_requests = 4", "max_review_requests = true"),
+        ("max_premium_review_requests = 4", "max_premium_review_requests = 0"),
         ("max_review_rounds = 3", "max_review_rounds = 6"),
         ("max_context_chars = 120000", "max_context_chars = 100"),
-        ('thinking_mode = "disabled"', "thinking_mode = []"),
+        ('thinking_mode = "enabled"', "thinking_mode = []"),
         ('thinking_format = "thinking"', 'thinking_format = "wrong"'),
         ("max_output_tokens = 2048", "max_output_tokens = false"),
         ("timeout_seconds = 120", "timeout_seconds = 301"),
+        ("max_attempts = 1", "max_attempts = 0"),
+        ('premium_review_policy = "risk"', 'premium_review_policy = "sometimes"'),
         ("[workflow]", '[workflow]\nunknown = "forbidden"'),
     ],
 )
@@ -152,15 +157,93 @@ def test_invalid_workflow_configuration_rejected(tmp_path, old, new):
 
 
 def test_template_roles_and_per_profile_limits():
-    """本地用户模板与通用配置隔离，额外模型只供显式切换而不暗中加入请求。"""
+    """普通角色共用学校 DeepSeek，Kimi 使用独立连接和单次传输尝试。"""
     cfg = load_settings(config_path=TEMPLATE, no_env=True, environ=FAKE_ENV)
     assert cfg.workflow.enabled
-    assert cfg.profiles[cfg.workflow.planner].model == "qwen3.7-plus"
-    assert cfg.profiles[cfg.workflow.coder].model == "deepseek-flash"
-    assert cfg.profiles[cfg.workflow.reviewer].model == "glm-5.3-flash"
+    normal_roles = (
+        cfg.routing.cheap,
+        cfg.routing.strong,
+        cfg.workflow.planner,
+        cfg.workflow.coder,
+        cfg.workflow.reviewer,
+    )
+    assert {cfg.profiles[name].model for name in normal_roles} == {"deepseek-flash"}
+    assert {cfg.profiles[name].api_key for name in normal_roles} == {FAKE_ENV["OPENAI_API_KEY"]}
+    premium = cfg.profiles[cfg.workflow.premium_reviewer]
+    assert premium.model == "kimi-k3"
+    assert premium.base_url == FAKE_ENV["MOONSHOT_BASE_URL"]
+    assert premium.api_key == FAKE_ENV["MOONSHOT_API_KEY"]
+    assert premium.max_attempts == 1
+    assert {profile.model for profile in cfg.profiles.values()} == {
+        "deepseek-flash",
+        "kimi-k3",
+    }
     assert cfg.routing.max_requests == 36
-    assert all(p.api_key == FAKE_ENV["OPENAI_API_KEY"] for p in cfg.profiles.values())
-    assert "fake-school-key" not in repr(cfg)
+    assert "fake-school-key" not in repr(cfg) and "fake-moonshot-key" not in repr(cfg)
+
+
+def test_independent_premium_transport_uses_own_connection_and_one_attempt(tmp_path, monkeypatch):
+    """Kimi 不能携带学校 Key，暂时性失败也不能自动产生第二次付费请求。"""
+    config = tmp_path / "connections.toml"
+    config.write_text(
+        """
+[connection]
+base_url_env = "SCHOOL_URL"
+api_key_env = "SCHOOL_KEY"
+
+[models.primary]
+model = "deepseek-flash"
+
+[models.premium_reviewer]
+base_url_env = "MOONSHOT_URL"
+api_key_env = "MOONSHOT_KEY"
+model = "kimi-k3"
+max_attempts = 1
+""",
+        encoding="utf-8",
+    )
+    environment = {
+        "SCHOOL_URL": "https://school.invalid/v1",
+        "SCHOOL_KEY": "fake-school-secret",
+        "MOONSHOT_URL": "https://moonshot.invalid/v1",
+        "MOONSHOT_KEY": "fake-moonshot-secret",
+    }
+    settings = load_settings(config_path=config, environ=environment, no_env=True)
+    requests = []
+
+    def open_fake(request, **_kwargs):
+        requests.append(
+            (
+                request.full_url,
+                request.get_header("Authorization"),
+                json.loads(request.data)["model"],
+            )
+        )
+        if "moonshot.invalid" in request.full_url:
+            raise urllib.error.URLError("temporary")
+        return response(ModelReply.final("READY"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", open_fake)
+    reply = RoutedProvider(settings, mode="primary").complete([{"role": "user", "content": "go"}])
+    assert reply.final_text == "READY"
+    with pytest.raises(ProviderError):
+        RoutedProvider(settings, mode="premium_reviewer").complete(
+            [{"role": "user", "content": "review"}]
+        )
+    assert requests == [
+        (
+            "https://school.invalid/v1/chat/completions",
+            "Bearer fake-school-secret",
+            "deepseek-flash",
+        ),
+        (
+            "https://moonshot.invalid/v1/chat/completions",
+            "Bearer fake-moonshot-secret",
+            "kimi-k3",
+        ),
+    ]
+    assert "fake-school-secret" not in repr(settings)
+    assert "fake-moonshot-secret" not in repr(settings)
 
 
 @pytest.mark.parametrize(

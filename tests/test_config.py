@@ -83,6 +83,9 @@ def test_invalid_env_does_not_echo_values(tmp_path, value):
         ('cheap = "small"', 'cheap = "small"\nmax_requests = true'),
         ('cheap = "small"', 'cheap = "small"\nmax_requests = 0'),
         ('cheap = "small"', 'cheap = "small"\nunknown = 10'),
+        ('model = "small-tool-model"', 'model = "small-tool-model"\nmax_attempts = 0'),
+        ('model = "small-tool-model"', 'model = "small-tool-model"\nmax_attempts = 11'),
+        ('model = "small-tool-model"', 'model = "small-tool-model"\nmax_attempts = true'),
     ],
 )
 def test_invalid_config_rejected(tmp_path, old, new):

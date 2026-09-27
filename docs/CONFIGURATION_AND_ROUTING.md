@@ -100,11 +100,13 @@ model = "<YOUR_PRIMARY_TOOL_MODEL_ID>"
 
 ```toml
 [models.external]
-base_url = "<YOUR_OTHER_SERVICE_BASE_URL>"
+base_url_env = "OTHER_SERVICE_BASE_URL"
 api_key_env = "OTHER_SERVICE_API_KEY"
 model = "<YOUR_OTHER_SERVICE_MODEL_ID>"
+max_attempts = 1
 ```
 
+profile 的地址可直接写 `base_url`，也可通过 `base_url_env` 引用环境变量，二者只能选一个。
 只覆盖地址或只覆盖 Key 变量均拒绝加载，避免更换服务时无意携带共享凭据。
 完整覆盖中的 Key 缺失也不会退回共享 Key。所有占位符必须替换。
 不需要填写价格；不会因为 Key 相同就把两个不同模型的 Token 合并为同一模型。
@@ -124,11 +126,12 @@ uv run --frozen pi-claw run "列出项目文件" --config pi-claw.toml --route a
 
 ## 工具与终端命令
 
-学校多模型工作流通过 `[workflow] enabled=true` 加入自动路由：复杂分支不再只执行 primary，
-而是进入 planner → primary → reviewer；简单任务保留轻量路径。模型 ID、profile 推理参数、
+学校多模型工作流通过 `[workflow] enabled=true` 加入自动路由：复杂分支进入
+planner → primary → reviewer，命中风险规则后再进入 premium_reviewer；简单任务保留轻量路径。
+普通角色使用学校 DeepSeek，高级审查使用独立 Kimi 连接。模型 ID、profile 推理参数、
 请求预算和精确启动方式见 [多模型工作流](WORKFLOW_PIPELINE.md)。旧配置默认不启用，
 固定 `--route <profile>` 绕过工作流。每个模型的 `max_output_tokens` 覆盖 routing 默认值，
-`timeout_seconds` 设置该模型单次 HTTP 超时；分类仍被收紧为最多 128 Token。
+`timeout_seconds` 设置单次 HTTP 超时，`max_attempts` 可单独收紧付费模型重试；分类仍最多 128 Token。
 
 | 源文件 | 模型工具名/用户命令 | 行为 |
 |---|---|---|
