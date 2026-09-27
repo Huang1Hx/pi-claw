@@ -8,8 +8,10 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -33,6 +35,8 @@ from tools import ToolExecutor
 
 MODES = ("single", "workflow", "team")
 VERIFY_ARGV = ["uv", "run", "python", "-m", "unittest", "-q", "test_target.py"]
+_PROCESS_LOCK = threading.Lock()
+_ACTIVE_PROCESSES: set[subprocess.Popen] = set()
 
 
 def save_json(path: Path, data) -> None:
@@ -237,9 +241,7 @@ def _events(folder: Path, mode: str) -> tuple[list[dict], list[dict]]:
     """读取所有参与者 Trace，给每条事件补 participant；损坏项不阻断其他 Trace。"""
     events, issues = [], []
     paths = sorted(folder.glob("trace-*.jsonl"))
-    expected = {"leader"}
-    if mode == "team":
-        expected |= {"subagent-implementation", "subagent-risks"}
+    expected = _expected_participants(mode)
     found = {path.stem.removeprefix("trace-") for path in paths}
     for participant in sorted(expected - found):
         issues.append({"participant": participant, "line": None, "error": "trace missing"})
@@ -255,6 +257,65 @@ def _events(folder: Path, mode: str) -> tuple[list[dict], list[dict]]:
             {**error, "participant": participant, "trace": str(path.resolve())} for error in errors
         )
     return events, issues
+
+
+def _expected_participants(mode: str) -> set[str]:
+    """顺序工作流仍是一个 Agent；主从模式有一个 leader 和两个独立子 Agent。"""
+    expected = {"leader"}
+    if mode == "team":
+        expected |= {"subagent-implementation", "subagent-risks"}
+    return expected
+
+
+def _partial_usage(events: list[dict], mode: str) -> dict:
+    """worker 被期限/中断终止时，从每个 Trace 最后一次累计值恢复已知 Token。"""
+    latest = {}
+    for event in events:
+        if event["event"] == "usage_updated" and isinstance(event["payload"], dict):
+            latest[event["participant"]] = event["payload"]
+    keys = (
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "requests",
+        "requests_with_usage",
+        "requests_without_usage",
+        "retries",
+    )
+    total = {key: sum(int(row.get(key, 0)) for row in latest.values()) for key in keys}
+    # 没有完整 run-result 就无法确认被终止瞬间的在途请求；未知量绝不按已知零处理。
+    total["unknown_participants"] = len(_expected_participants(mode))
+    return total
+
+
+def _attempted_requests(result: dict, usage: dict) -> int:
+    """汇总主从路由已发起的逻辑请求；超时请求没有 ModelReply，但仍属于总消耗缺口。"""
+    participants = [result.get("leader", {})]
+    participants.extend(
+        item.get("result", {}) for item in result.get("subagents", []) if isinstance(item, dict)
+    )
+    attempted = 0
+    for participant in participants:
+        routing = participant.get("routing") if isinstance(participant, dict) else None
+        participant_usage = participant.get("usage") if isinstance(participant, dict) else None
+        if isinstance(routing, dict) and type(routing.get("requests")) is int:
+            attempted += routing["requests"]
+        elif isinstance(participant_usage, dict):
+            attempted += int(participant_usage.get("requests", 0))
+    return max(attempted, int(usage.get("requests", 0)))
+
+
+def _reconcile_usage(result: dict, usage: dict) -> dict:
+    """把已知 Token 与无 usage 的已发起请求分开；未知请求绝不虚构 Token。"""
+    reconciled = dict(usage)
+    attempted = _attempted_requests(result, reconciled)
+    with_usage = int(reconciled.get("requests_with_usage", 0))
+    reconciled["attempted_requests"] = attempted
+    reconciled["requests"] = attempted
+    reconciled["requests_without_usage"] = max(
+        int(reconciled.get("requests_without_usage", 0)), attempted - with_usage
+    )
+    return reconciled
 
 
 def _public_test_passed(events: list[dict]) -> bool:
@@ -338,6 +399,12 @@ def build_trial_report(folder: Path, metadata: dict) -> dict:
     )
     passed = all(item["passed"] is True for item in checks)
     usage = result.get("usage")
+    usage_source = "run_result"
+    if usage is None:
+        usage = _partial_usage(events, metadata["mode"])
+        usage_source = "partial_trace"
+    else:
+        usage = _reconcile_usage(result, usage)
     models = sorted(
         {
             event["payload"]["model"]
@@ -354,12 +421,13 @@ def build_trial_report(folder: Path, metadata: dict) -> dict:
         "passed_checks": sum(item["passed"] is True for item in checks),
         "total_checks": len(checks),
         "usage": usage,
-        "usage_may_be_incomplete": usage is None
+        "usage_source": usage_source,
+        "usage_may_be_incomplete": usage_source == "partial_trace"
         or bool(usage.get("unknown_participants"))
         or bool(usage.get("requests_without_usage")),
         "duration_seconds": result.get("duration_seconds", metadata["duration_seconds"]),
         "models_used": models,
-        "participants": 1 + len(result.get("subagents", [])),
+        "participants": len(_expected_participants(metadata["mode"])),
         "max_parallel_subagents": result.get("max_parallel_subagents", 0),
         "tool_calls": len(tool_results),
         "unauthorized_attempts": len(unauthorized),
@@ -447,12 +515,18 @@ def run_trial(mode: str, task_id: str, number: int, args) -> dict:
     timed_out = False
     with (folder / "progress.log").open("w") as stream:
         process = subprocess.Popen(command, stdout=stream, stderr=stream, start_new_session=True)
+        with _PROCESS_LOCK:
+            _ACTIVE_PROCESSES.add(process)
         try:
-            process.wait(timeout=args.deadline)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
+            try:
+                process.wait(timeout=args.deadline)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+        finally:
+            with _PROCESS_LOCK:
+                _ACTIVE_PROCESSES.discard(process)
     progress = folder / "progress.log"
     progress.write_text(redact(progress.read_text(errors="replace")))
     result_path = folder / "run-result.json"
@@ -488,6 +562,16 @@ def run_trial(mode: str, task_id: str, number: int, args) -> dict:
         flush=True,
     )
     return report
+
+
+def stop_active_trials() -> None:
+    """批次被用户中断时终止所有独立进程组，避免模型请求成为孤儿进程。"""
+    with _PROCESS_LOCK:
+        processes = list(_ACTIVE_PROCESSES)
+    for process in processes:
+        if process.poll() is None:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGTERM)
 
 
 def main() -> int:
@@ -566,11 +650,21 @@ def main() -> int:
         f"每 trial 期限={args.deadline}s。",
         flush=True,
     )
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = [
-            pool.submit(run_trial, mode, task_id, number, args) for mode, task_id, number in jobs
-        ]
+    pool = ThreadPoolExecutor(max_workers=args.workers)
+    futures = [
+        pool.submit(run_trial, mode, task_id, number, args) for mode, task_id, number in jobs
+    ]
+    try:
         reports = [future.result() for future in futures]
+    except KeyboardInterrupt:
+        for future in futures:
+            future.cancel()
+        stop_active_trials()
+        pool.shutdown(wait=True, cancel_futures=True)
+        print("[中断] 已终止运行中的 trial 进程组；未生成汇总报告。", flush=True)
+        return 130
+    else:
+        pool.shutdown()
     summary = {
         **manifest,
         "by_mode": {

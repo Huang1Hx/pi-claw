@@ -183,7 +183,10 @@ def _prompt(title: str) -> str:
         f"修复 {title}。先阅读 SPEC.md、solution.py 和 test_target.py，只修改 solution.py。"
         "实现完整规则，不能修改公开测试或新增文件。运行且仅运行 "
         "uv run python -m unittest -q test_target.py 验证，并依据真实结果报告。"
-        "外部评分还会覆盖未公开的边界输入。"
+        "外部评分还会覆盖未公开的边界输入。为安全评分，代码不得导入模块、递归、使用推导式或"
+        "执行顶层语句；可使用不超过三个纯辅助函数、if/for/赋值/return、基础比较运算、"
+        "isinstance/len/sorted/dict/list/tuple/max/min，以及 copy/get/items/append/sort。"
+        "sort/sorted 的 key 仅可使用单参数 lambda。"
     )
 
 

@@ -8,9 +8,9 @@ from pathlib import Path
 
 from evaluation.mode_tasks import TASKS
 
-GRADER_VERSION = "agent-modes-1.0"
+GRADER_VERSION = "agent-modes-1.2"
 ALLOWED_CALLS = {"isinstance", "len", "sorted", "dict", "list", "tuple", "max", "min"}
-ALLOWED_METHODS = {"copy", "get", "items", "append"}
+ALLOWED_METHODS = {"copy", "get", "items", "append", "sort"}
 EXPECTED_SIGNATURES = {
     "reserve": (("stock", "orders"), ()),
     "merge_windows": (("windows", "gap"), (0,)),
@@ -23,7 +23,7 @@ def check(name: str, passed: bool | None, layer: str, detail: str = "") -> dict:
 
 
 def safe_functions(source: str, expected_name: str) -> dict:
-    """解析并执行有界纯函数子集；它是评测约束，不是通用 Python 或 OS 沙箱。"""
+    """解析并执行有界纯函数子集；允许少量无递归辅助函数，但不是通用 OS 沙箱。"""
     if len(source) > 12_000:
         raise ValueError("候选文件过大")
     tree = ast.parse(source)
@@ -69,62 +69,131 @@ def safe_functions(source: str, expected_name: str) -> dict:
         ast.Tuple,
         ast.List,
         ast.Dict,
+        ast.Lambda,
+        ast.keyword,
     }
     if len(nodes) > 500 or any(type(node) not in allowed for node in nodes):
         raise ValueError("超出受限纯函数语法")
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
-    if len(functions) != 1 or functions[0].name != expected_name:
-        raise ValueError("必须恰好定义指定函数")
-    function = functions[0]
-    arguments = function.args
+    nested_functions = [node for node in nodes if isinstance(node, ast.FunctionDef)]
+    function_names = {function.name for function in functions}
     if (
-        function.decorator_list
-        or function.returns
-        or function.type_comment
-        or arguments.vararg
-        or arguments.kwarg
-        or arguments.posonlyargs
-        or arguments.kwonlyargs
-        or arguments.kw_defaults
-        or any(argument.annotation for argument in arguments.args)
+        not 1 <= len(functions) <= 4
+        or len(nested_functions) != len(functions)
+        or len(function_names) != len(functions)
+        or expected_name not in function_names
     ):
-        raise ValueError("不允许装饰器、注解或可变参数")
-    names = tuple(argument.arg for argument in arguments.args)
-    defaults = tuple(
-        default.value if isinstance(default, ast.Constant) else object()
-        for default in arguments.defaults
-    )
-    if (names, defaults) != EXPECTED_SIGNATURES[expected_name]:
-        raise ValueError("函数签名与任务契约不一致")
-    if any(not isinstance(node, (ast.FunctionDef, ast.Expr)) for node in tree.body):
+        raise ValueError("必须定义指定函数，且最多包含三个顶层辅助函数")
+    if any(
+        not isinstance(node, ast.FunctionDef)
+        and not (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        )
+        for node in tree.body
+    ):
         raise ValueError("不允许顶层执行语句")
-    local_names = {arg.arg for arg in arguments.args}
-    for node in nodes:
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    local_names.add(target.id)
-        if isinstance(node, ast.For):
-            targets = [item for item in ast.walk(node.target) if isinstance(item, ast.Name)]
-            local_names.update(item.id for item in targets)
-        if isinstance(node, ast.Constant):
-            if isinstance(node.value, int) and abs(node.value) > 1_000_000:
-                raise ValueError("整数常量超过限制")
-            if isinstance(node.value, str) and len(node.value) > 2000:
-                raise ValueError("文本常量超过限制")
-        if isinstance(node, ast.Attribute) and node.attr not in ALLOWED_METHODS:
-            raise ValueError("不允许的属性访问")
-        if isinstance(node, ast.Call):
-            valid = isinstance(node.func, ast.Name) and node.func.id in ALLOWED_CALLS
-            valid |= isinstance(node.func, ast.Attribute) and node.func.attr in ALLOWED_METHODS
-            if not valid or node.keywords:
-                raise ValueError("不允许的函数调用")
+
+    graph = {name: set() for name in function_names}
+    for function in functions:
+        arguments = function.args
         if (
-            isinstance(node, ast.Name)
-            and isinstance(node.ctx, ast.Load)
-            and node.id not in local_names | ALLOWED_CALLS | {"str", "int", "bool"}
+            function.decorator_list
+            or function.returns
+            or function.type_comment
+            or arguments.vararg
+            or arguments.kwarg
+            or arguments.posonlyargs
+            or arguments.kwonlyargs
+            or arguments.kw_defaults
+            or any(argument.annotation for argument in arguments.args)
         ):
-            raise ValueError(f"不允许的名称：{node.id}")
+            raise ValueError("不允许装饰器、注解或可变参数")
+        names = tuple(argument.arg for argument in arguments.args)
+        defaults = tuple(
+            default.value if isinstance(default, ast.Constant) else object()
+            for default in arguments.defaults
+        )
+        if function.name == expected_name:
+            if (names, defaults) != EXPECTED_SIGNATURES[expected_name]:
+                raise ValueError("函数签名与任务契约不一致")
+        elif (
+            function.name in ALLOWED_CALLS
+            or function.name.startswith("__")
+            or not 1 <= len(names) <= 4
+            or defaults
+        ):
+            raise ValueError("辅助函数名称或签名不受支持")
+
+        function_nodes = list(ast.walk(function))
+        local_names = set(names)
+        local_names.update(node.arg for node in function_nodes if isinstance(node, ast.arg))
+        local_names.update(
+            node.id
+            for node in function_nodes
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+        )
+        for node in function_nodes:
+            if isinstance(node, ast.Constant):
+                if isinstance(node.value, int) and abs(node.value) > 1_000_000:
+                    raise ValueError("整数常量超过限制")
+                if isinstance(node.value, str) and len(node.value) > 2000:
+                    raise ValueError("文本常量超过限制")
+            if isinstance(node, ast.Attribute) and node.attr not in ALLOWED_METHODS:
+                raise ValueError("不允许的属性访问")
+            if isinstance(node, ast.Call):
+                named = isinstance(node.func, ast.Name) and node.func.id in (
+                    ALLOWED_CALLS | function_names
+                )
+                method = isinstance(node.func, ast.Attribute) and node.func.attr in ALLOWED_METHODS
+                keywords_ok = not node.keywords
+                is_sort = (isinstance(node.func, ast.Name) and node.func.id == "sorted") or (
+                    isinstance(node.func, ast.Attribute) and node.func.attr == "sort"
+                )
+                if is_sort and len(node.keywords) == 1:
+                    keyword = node.keywords[0]
+                    value = keyword.value
+                    lambda_args = value.args if isinstance(value, ast.Lambda) else None
+                    keywords_ok = bool(
+                        keyword.arg == "key"
+                        and lambda_args is not None
+                        and len(lambda_args.args) == 1
+                        and not lambda_args.posonlyargs
+                        and not lambda_args.kwonlyargs
+                        and lambda_args.vararg is None
+                        and lambda_args.kwarg is None
+                        and not lambda_args.defaults
+                        and not lambda_args.kw_defaults
+                    )
+                if not (named or method) or not keywords_ok:
+                    raise ValueError("不允许的函数调用")
+                if isinstance(node.func, ast.Name) and node.func.id in function_names:
+                    graph[function.name].add(node.func.id)
+            if (
+                isinstance(node, ast.Name)
+                and isinstance(node.ctx, ast.Load)
+                and node.id
+                not in local_names | ALLOWED_CALLS | function_names | {"str", "int", "bool"}
+            ):
+                raise ValueError(f"不允许的名称：{node.id}")
+
+    def has_cycle(name: str, visiting: set[str], visited: set[str]) -> bool:
+        """辅助函数调用图不能递归，避免候选在评分进程中无限调用。"""
+        if name in visiting:
+            return True
+        if name in visited:
+            return False
+        visiting.add(name)
+        if any(has_cycle(child, visiting, visited) for child in graph[name]):
+            return True
+        visiting.remove(name)
+        visited.add(name)
+        return False
+
+    visited: set[str] = set()
+    if any(has_cycle(name, set(), visited) for name in function_names):
+        raise ValueError("不允许递归或循环辅助函数调用")
     builtins = {
         "isinstance": isinstance,
         "len": len,
@@ -171,6 +240,9 @@ def _behavior_cases(task_id: str):
             ("bool_quantity", "fail_to_pass", ({"a": 3}, [("a", True)]), (False, {"a": 3})),
             ("invalid_stock_value", "fail_to_pass", ({"a": -1}, []), (False, {"a": -1})),
             ("invalid_order_shape", "fail_to_pass", ({"a": 3}, [("a", 1, 2)]), (False, {"a": 3})),
+            ("orders_must_be_list", "fail_to_pass", ({"a": 3}, (("a", 1),)), (False, {"a": 3})),
+            ("order_must_be_tuple", "fail_to_pass", ({"a": 3}, [["a", 1]]), (False, {"a": 3})),
+            ("invalid_stock_key", "fail_to_pass", ({"": 3}, []), (False, {"": 3})),
         ]
     return [
         ("unsorted_overlap", "pass_to_pass", ([(5, 8), (1, 3), (2, 6)], 0), [(1, 8)]),
@@ -181,7 +253,9 @@ def _behavior_cases(task_id: str):
         ("invalid_reverse", "fail_to_pass", ([(3, 2)], 0), []),
         ("invalid_bool_endpoint", "fail_to_pass", ([(True, 2)], 0), []),
         ("invalid_gap", "fail_to_pass", ([(1, 2)], -1), []),
+        ("bool_gap", "fail_to_pass", ([(1, 2)], True), []),
         ("invalid_shape", "fail_to_pass", ([(1, 2, 3)], 0), []),
+        ("windows_must_be_list", "fail_to_pass", (((1, 2),), 0), []),
     ]
 
 

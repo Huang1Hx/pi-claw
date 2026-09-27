@@ -4,7 +4,14 @@ import json
 
 import pytest
 
-from evaluation.compare_modes import VERIFY_ARGV, build_trial_report, reliability, summarize
+from core.schemas import ToolCall
+from evaluation.compare_modes import (
+    VERIFY_ARGV,
+    approval_for,
+    build_trial_report,
+    reliability,
+    summarize,
+)
 from evaluation.mode_grading import calibrate, safe_functions
 from evaluation.mode_tasks import TASKS
 from persistence.trace import TraceWriter
@@ -66,6 +73,67 @@ def test_grader_calibration_and_exact_signatures():
     assert calibrate()["passed"] is True
     with pytest.raises(ValueError, match="函数签名"):
         safe_functions("def reserve(stock, orders=None):\n    return False, {}\n", "reserve")
+
+
+def test_bounded_candidate_allows_safe_non_recursive_helper(tmp_path):
+    """本地纯辅助函数不能再导致公开测试审批被误拒，递归辅助函数仍拒绝。"""
+    task = TASKS["inventory_reservation"]
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for name, content in task.files.items():
+        (workspace / name).write_text(content)
+    helper_source = (
+        task.reference.replace(
+            "def reserve(stock, orders):",
+            "def _valid_int(value):\n"
+            "    return isinstance(value, int) and not isinstance(value, bool)\n\n\n"
+            "def reserve(stock, orders):",
+        )
+        .replace(
+            "not isinstance(quantity, int)\n                or isinstance(quantity, bool)",
+            "not _valid_int(quantity)",
+        )
+        .replace(
+            "not isinstance(quantity, int)\n                or isinstance(quantity, bool)",
+            "not _valid_int(quantity)",
+        )
+    )
+    (workspace / "solution.py").write_text(helper_source)
+    assert safe_functions(helper_source, "reserve")["reserve"]({"a": 2}, [("a", 1)]) == (
+        True,
+        {"a": 1},
+    )
+    approve = approval_for("inventory_reservation", workspace)
+    assert approve(ToolCall("verify", "run_command", {"argv": VERIFY_ARGV}), None)
+    recursive = """def helper(value):
+    return helper(value)
+
+def reserve(stock, orders):
+    return helper(stock)
+"""
+    with pytest.raises(ValueError, match="递归"):
+        safe_functions(recursive, "reserve")
+
+
+def test_bounded_candidate_allows_safe_sort_key_but_not_reverse_keyword(tmp_path):
+    """常见局部排序写法可验证；仍拒绝评分协议没有开放的其他关键字参数。"""
+    task = TASKS["window_merge"]
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for name, content in task.files.items():
+        (workspace / name).write_text(content)
+    source = task.reference.replace(
+        "for start, end in sorted(cleaned):",
+        "cleaned.sort(key=lambda item: (item[0], item[1]))\n    for start, end in cleaned:",
+    )
+    (workspace / "solution.py").write_text(source)
+    assert safe_functions(source, "merge_windows")["merge_windows"]([(2, 4), (1, 3)]) == [(1, 4)]
+    approve = approval_for("window_merge", workspace)
+    assert approve(ToolCall("verify", "run_command", {"argv": VERIFY_ARGV}), None)
+    with pytest.raises(ValueError, match="函数调用"):
+        safe_functions(
+            source.replace("key=lambda item: (item[0], item[1])", "reverse=True"), "merge_windows"
+        )
 
 
 @pytest.mark.parametrize("mode", ["single", "workflow", "team"])
@@ -143,3 +211,51 @@ def test_reliability_and_token_per_success_include_failed_trials():
     assert summary["known_total_tokens"] == 400
     assert summary["known_tokens_per_strict_success"] == 400
     assert summary["median_duration_seconds"] == 2
+
+
+def test_deadline_recovers_known_partial_usage_from_all_traces(tmp_path):
+    """无完整结果时保留已完成请求 Token，同时显式标成不完整而不是填成零。"""
+    folder = _trial(tmp_path, mode="team")
+    result = json.loads((folder / "run-result.json").read_text())
+    result["leader"] = {"status": "deadline"}
+    result["usage"] = None
+    (folder / "run-result.json").write_text(json.dumps(result))
+    for index, name in enumerate(("leader", "subagent-implementation", "subagent-risks"), 1):
+        TraceWriter(folder / f"trace-{name}.jsonl").record(
+            "usage_updated",
+            {
+                "prompt_tokens": index * 10,
+                "completion_tokens": index,
+                "total_tokens": index * 11,
+                "requests": 1,
+                "requests_with_usage": 1,
+                "requests_without_usage": 0,
+                "retries": 0,
+            },
+        )
+    report = build_trial_report(
+        folder,
+        {"mode": "team", "task": "inventory_reservation", "trial": 1, "duration_seconds": 420},
+    )
+    assert report["usage_source"] == "partial_trace"
+    assert report["usage"]["total_tokens"] == 66
+    assert report["usage_may_be_incomplete"] is True
+    assert report["participants"] == 3
+
+
+def test_timed_out_logical_request_is_an_explicit_usage_gap(tmp_path):
+    """路由已发起但没有完整响应的请求不能因为缺少 usage 被当成零消耗。"""
+    folder = _trial(tmp_path)
+    result = json.loads((folder / "run-result.json").read_text())
+    result["leader"]["routing"] = {"requests": 3}
+    result["leader"]["usage"] = dict(result["usage"])
+    result["usage"]["requests"] = 2
+    result["usage"]["requests_with_usage"] = 2
+    (folder / "run-result.json").write_text(json.dumps(result))
+    report = build_trial_report(
+        folder,
+        {"mode": "single", "task": "inventory_reservation", "trial": 1, "duration_seconds": 9},
+    )
+    assert report["usage"]["attempted_requests"] == 3
+    assert report["usage"]["requests_without_usage"] == 1
+    assert report["usage_may_be_incomplete"] is True
