@@ -53,6 +53,7 @@ PUBLIC_SUMMARY_FIELDS = (
     "models",
     "premium_model",
     "accounting",
+    "continuation",
     "by_mode",
     "by_mode_and_task",
 )
@@ -68,6 +69,63 @@ def save_json(path: Path, data) -> None:
 def build_public_summary(report: dict) -> dict:
     """用字段白名单生成可提交摘要；逐 trial 路径、Trace 和连接信息一律不复制。"""
     return {name: report[name] for name in PUBLIC_SUMMARY_FIELDS if name in report}
+
+
+def _trial_identity(row: dict) -> tuple[str, str, int]:
+    """用稳定三元组关联原 trial 与恢复结果，避免依赖目录遍历顺序。"""
+    mode, task, trial = row.get("mode"), row.get("task"), row.get("trial")
+    if mode not in MODES or task not in TASKS or type(trial) is not int or not 1 <= trial <= 5:
+        raise ValueError("无效的 trial 身份")
+    return mode, task, trial
+
+
+def select_resume_jobs(report: dict) -> list[tuple[str, str, int]]:
+    """只选择模型传输失败项；语义失败、循环和未验证结果不得通过续跑洗掉。"""
+    rows = report.get("trials")
+    if not isinstance(rows, list):
+        raise ValueError("续跑来源缺少 trials")
+    identities = [_trial_identity(row) for row in rows]
+    if len(identities) != len(set(identities)):
+        raise ValueError("续跑来源包含重复 trial 身份")
+    return [
+        identity
+        for row, identity in zip(rows, identities, strict=True)
+        if row.get("leader_status") == "provider_error"
+    ]
+
+
+def combine_resumed_reports(source_report: dict, replacements: list[dict]) -> list[dict]:
+    """替换传输失败项，并用当前评分器离线重评其余 trial；原目录和 Trace 保持不变。"""
+    source_rows = source_report.get("trials")
+    if not isinstance(source_rows, list):
+        raise ValueError("续跑来源缺少 trials")
+    expected = set(select_resume_jobs(source_report))
+    replacement_map = {_trial_identity(row): row for row in replacements}
+    if len(replacement_map) != len(replacements) or set(replacement_map) != expected:
+        raise ValueError("恢复结果与 provider_error trial 清单不一致")
+
+    combined = []
+    for row in source_rows:
+        identity = _trial_identity(row)
+        if identity in replacement_map:
+            combined.append(replacement_map[identity])
+            continue
+        workspace = Path(row["workspace"])
+        folder = workspace.parent
+        if not workspace.is_dir() or not (folder / "run-result.json").is_file():
+            raise ValueError(f"无法离线重评原 trial：{identity}")
+        combined.append(
+            build_trial_report(
+                folder,
+                {
+                    "mode": row["mode"],
+                    "task": row["task"],
+                    "trial": row["trial"],
+                    "duration_seconds": row["duration_seconds"],
+                },
+            )
+        )
+    return combined
 
 
 def approval_for(task_id: str, workspace: Path):
@@ -718,11 +776,16 @@ def stop_active_trials() -> None:
 
 
 def main() -> int:
-    """默认只校准；--live 才运行真实模型，输出目录必须不存在。"""
+    """默认只校准；--live 才运行真实模型，恢复批次写入新目录而不覆盖原证据。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--config", type=Path, default=Path("pi-claw.toml"))
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--resume-from",
+        type=Path,
+        help="从已有 report.json 仅续跑 provider_error，并重新生成完整合并报告",
+    )
     parser.add_argument("--trials", type=int, default=2)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--deadline", type=int, default=420)
@@ -739,8 +802,29 @@ def main() -> int:
         parser.error("trials 为 1–5；workers 为 1–3")
     if not 30 <= args.deadline <= 900 or not 4 <= args.max_steps <= 40:
         parser.error("deadline 为 30–900 秒；max-steps 为 4–40")
-    modes = list(dict.fromkeys(args.mode or MODES))
-    tasks = list(dict.fromkeys(args.task or TASKS))
+    source_report = None
+    resume_jobs = None
+    if args.resume_from:
+        if not args.live:
+            parser.error("--resume-from 必须与 --live 一起使用")
+        if args.mode or args.task:
+            parser.error("续跑模式从来源报告恢复，不能同时指定 --mode 或 --task")
+        resume_root = args.resume_from.resolve()
+        try:
+            source_report = json.loads((resume_root / "report.json").read_text())
+            resume_jobs = select_resume_jobs(source_report)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError) as error:
+            parser.error(f"无法读取续跑来源：{error}")
+        if not resume_jobs:
+            parser.error("续跑来源没有 provider_error trial")
+        modes = list(source_report["modes"])
+        tasks = list(source_report["tasks"])
+        args.trials = int(source_report["trials_per_task"])
+        args.deadline = int(source_report["deadline_seconds"])
+        args.max_steps = int(source_report["max_steps"])
+    else:
+        modes = list(dict.fromkeys(args.mode or MODES))
+        tasks = list(dict.fromkeys(args.task or TASKS))
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=False)
     calibration = calibrate()
@@ -764,6 +848,14 @@ def main() -> int:
     ).hexdigest()
     premium_profile = settings.workflow.premium_reviewer
     premium_model = settings.profiles[premium_profile].model if premium_profile else None
+    models = {
+        role: settings.profiles[getattr(settings.workflow, role)].model
+        for role in ("planner", "coder", "reviewer")
+    }
+    if source_report and (
+        source_report.get("models") != models or source_report.get("premium_model") != premium_model
+    ):
+        parser.error("续跑必须沿用来源报告中的 DeepSeek/Kimi 模型分配")
     manifest = {
         "schema_version": 3,
         "grader_version": GRADER_VERSION,
@@ -777,22 +869,30 @@ def main() -> int:
         "workers": args.workers,
         "deadline_seconds": args.deadline,
         "max_steps": args.max_steps,
-        "models": {
-            role: settings.profiles[getattr(settings.workflow, role)].model
-            for role in ("planner", "coder", "reviewer")
-        },
+        "models": models,
         "premium_model": premium_model,
         "accounting": "Token 统计包含主 Agent、全部子 Agent、工作流阶段与返工；不计算货币费用",
     }
+    if source_report:
+        manifest["continuation"] = {
+            "selected_status": "provider_error",
+            "requested_trials": len(resume_jobs),
+            "source_grader_version": source_report.get("grader_version"),
+            "source_sha256": source_report.get("source_sha256"),
+            "initial_workers": source_report.get("workers"),
+            "continuation_workers": args.workers,
+            "retained_trials_regraded": len(source_report["trials"]) - len(resume_jobs),
+        }
     save_json(args.output / "manifest.json", manifest)
-    jobs = [
+    jobs = resume_jobs or [
         (mode, task_id, number)
         for task_id in tasks
         for number in range(1, args.trials + 1)
         for mode in modes
     ]
     print(
-        f"[批次] {len(jobs)} trials；modes={modes}；tasks={tasks}；并发={args.workers}；"
+        f"[{'续跑' if source_report else '批次'}] {len(jobs)} trials；modes={modes}；"
+        f"tasks={tasks}；并发={args.workers}；"
         f"每 trial 期限={args.deadline}s。",
         flush=True,
     )
@@ -811,6 +911,11 @@ def main() -> int:
         return 130
     else:
         pool.shutdown()
+    if source_report:
+        reports = combine_resumed_reports(source_report, reports)
+        manifest["continuation"]["remaining_provider_errors"] = sum(
+            row["leader_status"] == "provider_error" for row in reports
+        )
     by_mode = {
         mode: summarize(
             [row for row in reports if row["mode"] == mode], premium_model=premium_model

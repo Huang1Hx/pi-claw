@@ -12,7 +12,9 @@ from evaluation.compare_modes import (
     approval_for,
     build_public_summary,
     build_trial_report,
+    combine_resumed_reports,
     reliability,
+    select_resume_jobs,
     summarize,
 )
 from evaluation.mode_grading import calibrate, safe_functions
@@ -392,6 +394,84 @@ def test_public_summary_excludes_trial_paths_traces_and_connection_data():
     assert "trace.jsonl" not in text
     assert "secret-value" not in text
     assert "private.invalid" not in text
+
+
+def test_resume_jobs_select_only_provider_errors_and_preserve_trial_identity():
+    """恢复批次只能选择传输失败项，不能把语义失败偷偷重跑成更好结果。"""
+    report = {
+        "trials": [
+            {
+                "mode": "single",
+                "task": "worker_assignment",
+                "trial": 2,
+                "leader_status": "provider_error",
+            },
+            {
+                "mode": "workflow",
+                "task": "worker_assignment",
+                "trial": 2,
+                "leader_status": "completed",
+            },
+            {
+                "mode": "team",
+                "task": "versioned_update",
+                "trial": 3,
+                "leader_status": "loop_detected",
+            },
+        ]
+    }
+    assert select_resume_jobs(report) == [("single", "worker_assignment", 2)]
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"mode": "../../escape", "task": "worker_assignment", "trial": 1},
+        {"mode": "single", "task": "unknown", "trial": 1},
+        {"mode": "single", "task": "worker_assignment", "trial": "1"},
+    ],
+)
+def test_resume_rejects_untrusted_trial_identity(row):
+    """损坏或伪造的来源报告不能借 mode/task 字段把恢复工作区写到输出目录之外。"""
+    with pytest.raises(ValueError, match="trial 身份"):
+        select_resume_jobs({"trials": [{**row, "leader_status": "provider_error"}]})
+
+
+def test_resume_replaces_provider_error_and_regrades_retained_trial(tmp_path):
+    """合并报告使用新结果替换传输失败，同时将旧有效 trial 提升到当前评分器口径。"""
+    retained_folder = _trial(tmp_path / "retained")
+    failed_folder = _trial(tmp_path / "failed")
+    retained = build_trial_report(
+        retained_folder,
+        {
+            "mode": "single",
+            "task": "inventory_reservation",
+            "trial": 1,
+            "duration_seconds": 1,
+        },
+    )
+    failed = build_trial_report(
+        failed_folder,
+        {
+            "mode": "single",
+            "task": "inventory_reservation",
+            "trial": 2,
+            "duration_seconds": 1,
+        },
+    )
+    failed["leader_status"] = "provider_error"
+    replacement = {**failed, "leader_status": "completed", "passed": True}
+
+    combined = combine_resumed_reports(
+        {"trials": [retained, failed]},
+        [replacement],
+    )
+
+    assert [(row["trial"], row["leader_status"]) for row in combined] == [
+        (1, "completed"),
+        (2, "completed"),
+    ]
+    assert all(row["grader_version"] == "agent-modes-2.1" for row in combined)
 
 
 def test_deadline_recovers_known_partial_usage_from_all_traces(tmp_path):

@@ -156,3 +156,9 @@ Kimi 只在工作流触发：
 结果不能外推为通用架构排名：工作流在必要时使用 Kimi，三种模式并非相同模型调用图；任务只有
 十个受限纯函数；后两项被外部 Provider 故障污染。阶段 3 应先处理共享请求节流、429 Retry-After、
 DNS/读取超时分类、取消传播和重复循环，再用同一任务做修改前后对照，而不是立即增加更多 Agent。
+
+## 后续恢复
+
+本文件保留首次 90-trial 批次的历史事实，不事后覆盖。2026-09-28 已用 grader 2.1 只续跑其中
+22 个 `provider_error`，最终得到 0 个 Provider 错误、1 个 deadline 和严格成功 `41/90`；详见
+[Iteration 018](ITERATION_018_PROVIDER_RECOVERY.md)。

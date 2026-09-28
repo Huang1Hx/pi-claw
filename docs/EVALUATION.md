@@ -17,10 +17,24 @@ uv run --frozen python -m evaluation.compare_modes \
 主 Agent、子 Agent、工作流阶段和必要 Kimi 审查的分模型 Token。报告同时写逐 trial
 `report.json` 和可提交的字段白名单 `public-summary.json`；usage 缺口绝不按零计算。
 
-grader 2.0 的当前历史基线为严格成功 `33/90`，但含 22 个 Provider 错误/用量缺口 trial，且
-配置覆盖任务存在已记录的文字歧义；它是端到端可靠性结果，
-不能当作剔除接口故障后的模型能力排名。完整口径见
-[Iteration 017](iterations/ITERATION_017_CURRENT_MODEL_BASELINE.md)。
+grader 2.0 的原始历史基线为严格成功 `33/90`，含 22 个 Provider 错误；原始证据见
+[Iteration 017](iterations/ITERATION_017_CURRENT_MODEL_BASELINE.md)。使用 grader 2.1 只续跑这些
+Provider 失败后，最终结果为 `41/90`，0 个 Provider 错误、1 个 deadline；恢复方法、最终指标和
+包含全部失败尝试的实际 Token 成本见
+[Iteration 018](iterations/ITERATION_018_PROVIDER_RECOVERY.md)。
+
+从已有报告继续执行传输失败项：
+
+```bash
+uv run --frozen python -m evaluation.compare_modes \
+  --live --config pi-claw.toml \
+  --resume-from runs/agent-modes-current \
+  --workers 1 --output runs/agent-modes-resumed
+```
+
+续跑只选择 `provider_error`，保持原模式、任务和 trial 编号，要求模型分配与来源报告一致，并把
+结果写入新目录。语义失败、循环、未验证和 deadline 不会被续跑。最终 90 条指标使用替换后的结果；
+实际资源核算还必须累加所有被替换的失败尝试，不能只看最终 `report.json`。
 
 受限真实能力评测入口为 `uv run --frozen python -m evaluation.live --output <新目录>`。
 默认仅校准评分器；显式增加 `--live --config pi-claw.toml --route primary` 才调用真实模型。
