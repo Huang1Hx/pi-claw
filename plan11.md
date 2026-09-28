@@ -120,8 +120,8 @@ DeepSeek 配置比较：
 - [x] 提交 `feat(eval): establish ten-task model baseline`。
 - [x] 推送 `origin/optimize`。
 - [x] 在 `main` 上使用 `--no-commit` 合并，重新验证后提交。
-- [ ] 推送新的 `origin/main`。
-- [ ] 让 `optimize` 快进到新 `main` 并推送，作为下一阶段起点。
+- [x] 推送新的 `origin/main`。
+- [x] 让 `optimize` 快进到新 `main` 并推送，作为下一阶段起点。
 
 ## 阶段 3：稳定性修复
 
