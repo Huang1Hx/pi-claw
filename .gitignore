@@ -8,8 +8,13 @@ __pycache__/
 .coverage
 htmlcov/
 .env
+.env.*
+!.env.example
+pi-claw.toml
 runs/*
 !runs/.gitkeep
+projects/*
+!projects/.gitkeep
 tmp/
 dist/
 build/

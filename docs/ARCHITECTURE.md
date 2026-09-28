@@ -1,126 +1,90 @@
-# 架构与数据流
+# Pi-Claw 架构
 
-## 先看整体，而不是先看代码
+## 依赖方向
 
-Pi-Claw 使用 Python 和 uv，沿 Kimi CLI 路线把 Coding Agent 拆成可单独验证的层。v1 在 v0
-安全内核上增加会话和上下文，不会让模型绕过原有 Policy 直接接触文件系统或进程。
-
-```mermaid
-flowchart LR
-    U["用户任务 / REPL"] --> C["CLI / Session"]
-    C <--> X["Raw History / Active Context"]
-    C --> A["Agent Loop"]
-    A --> M["Model Provider"]
-    M --> A
-    A --> P["Policy 策略"]
-    P -->|ask| B["Approval Broker"]
-    B -->|once / session| T["Tool Registry"]
-    P -->|allow| T
-    P -->|deny| A
-    T --> W["Workspace / Process"]
-    W --> T
-    T --> A
-    A --> E["JSONL Trace"]
-    A --> R["最终报告"]
-    A --> X
+```text
+interfaces → commands / config
+           → core → providers / routing → providers
+                  → tools → security
+                  → persistence
+evaluation → 正式 core / routing / tools / security / persistence
 ```
 
-最重要的边界是：模型只能提出 `ToolCall`，不能直接读写文件或执行命令。每个调用必须先经过
-Policy，再由 Tool Registry 执行，结果以 `ToolResult` 返回。这样可以单独测试模型、策略和工具。
+core.schemas、core.events、core.usage 是低层数据协议。providers 和 security 可以依赖这些
+数据类型，不反向依赖 Agent。Runtime 不导入 evaluation，评测命令按需加载 evaluation。
+上述模块直接对应 `src/core/`、`src/interfaces/` 等目录；`src/` 是源码根，不是 Python 包。
 
-## v0 到 v1 的职责边界
+## 模块职责
 
-- **v0 安全内核**：Schemas、Workspace、Policy、Tool、Trace、Provider 与有界 Agent Loop。
-- **v1 会话式 Agent**：在 v0 之上增加系统/项目 Prompt、SessionStore、Active Context、
-  ContextManager、TerminalApprovalBroker、REPL 和 `chat/sessions` CLI。
+| 模块 | 核心文件 | 职责 |
+|---|---|---|
+| core | agent.py、team.py | 单 Agent 循环；只读子 Agent 并行、交接和唯一写者协调 |
+| core | context.py、completion.py | 活动窗口控制、最低验证证据检查 |
+| core | events.py、usage.py、loop_detection.py、hooks.py | 事件协议、实际用量、重复检测、扩展回调 |
+| tools | executor.py | 唯一模型工具执行入口，策略、审批、指纹复核、结果归一化 |
+| tools | registry.py、builtins.py | 工具注册与 Schema |
+| tools | read.py、write.py、edit.py、grep.py、shell.py | 读取、创建/替换、多段编辑、字面量搜索/枚举、受控子进程 |
+| tools | files.py、preview.py | 耐久写入、文件版本指纹与审批预览 |
+| commands | registry.py、help.py、status.py、model.py、exit.py、sessions.py、context.py | 用户交互命令，直接派发，不进入模型上下文 |
+| config | models.py、env.py、connections.py、loader.py | 类型化配置、.env、共享/独立连接解析、显式 TOML 加载 |
+| config | workspace.py | 启动目录/projects 默认工作区、显式覆盖、符号链接拒绝 |
+| routing | classifier.py、intent.py、router.py、cost.py | 轻量分类、复杂度分流、升级与请求上限、分模型用量 |
+| routing | workflow.py、workflow_protocol.py | 规划/编码/审查状态机、结构化产物、阶段私有对话与有界返工 |
+| security | policy.py、approval.py、workspace.py | 权限规则、人工授权和路径边界 |
+| providers | base.py、scripted.py | 模型协议与确定性离线实现 |
+| providers | openai_compatible.py、streaming.py、events.py | HTTP 重试、SSE 分片聚合和传输事件 |
+| persistence | session_store.py、models.py | 会话门面和元数据 |
+| persistence | journal.py、checkpoint.py、locking.py、storage.py | 原始日志、活动窗口、并发控制、耐久写入 |
+| persistence | trace.py、usage.py | 审计轨迹与按 run_id 幂等的用量账本 |
+| evaluation | runner.py、cases.json、routing.py | 独立工作区离线验收、复杂度分流与调用分布对照 |
+| evaluation | compare_modes.py、mode_tasks.py、mode_task_catalog.py、mode_cases.py、mode_grading.py | 十任务、三种 Agent 架构、重复真实模型评测与分模型核算 |
+| interfaces | cli.py、repl.py | 参数解析、终端显示和会话交互 |
+| interfaces | terminal_input.py、rendering.py | 注册表驱动斜杠菜单、TTY 降级、流式和最终显示去重 |
 
-v1 是 Kimi CLI 路线的学习实现，不是 Kimi Code 的完整复刻，也不声称具有相同模型效果、
-全部命令、IDE 集成、远程服务或生产可靠性。
+tools 的工具类由 ToolExecutor 组合，共用 Workspace 和预算。persistence 的内部 Mixin
+由 SessionStore 组合，共用路径、锁和预算；它们不是独立公共存储服务。调用方通过门面使用，
+避免分别获取锁而破坏 journal/state/checkpoint 的原有一致性边界。
 
-## 一个会话回合的数据流
+## 运行协议
 
-1. `chat` 按真实工作区加载或创建 Session，并读取活动上下文；不存在活动窗口时退回原始历史。
-2. 新会话生成系统提示词，并只读取根目录约定入口文件作为带来源的项目数据。
-3. Agent 把持久消息和新用户任务交给 Model Provider。
-4. Provider 返回最终文本，或返回一个/多个结构化 ToolCall。
-5. 同轮 ToolCall 先写成一条 assistant 消息，再按顺序经过 Policy、审批和 Tool 执行；首版不并行。
-6. 每个 ToolResult 单独追加到上下文、带递增 `seq` 的 append-only journal 和 JSONL trace。
-7. 活动窗口过大时做确定性压缩；原始 journal 不覆盖，压缩结果保存为带 `through_seq` 的 checkpoint。
-8. 得到最终文本或达到最大步数后停止；会话 ID 可用于后续恢复。
+1. REPL 追加用户任务，Agent 将完整消息写入 SessionStore。
+2. Agent 裁剪旧回合的大工具结果，必要时再压缩活动窗口。
+3. Provider 发出 text_delta/tool_call_delta；界面可显示候选文本，工具尚未执行。
+4. 正常 finish_reason、完整参数 JSON 和流结束标记全部满足后，生成 ModelReply。
+5. Agent 执行 before_tool Hook；继续的操作仍通过 Policy 和 Approval。
+6. 标准 ToolResult 写入上下文与原始日志，再反馈给模型。
+7. 重复参数和结果达到阈值时停止；模型 final 候选须经过完成验收。
+8. RunResult 返回本回合 usage，REPL 幂等保存到会话用量账本。
 
-同轮多个 ToolCall 应彼此独立。有先后依赖的动作必须等待上一轮 ToolResult，不能把顺序执行
-误写成事务或并行执行保证。
+配置路由时，Agent 在回合开始调用 `RoutedProvider.begin_run(task)`，此时不发请求。
+新模板的 `intent_strategy="model"` 在首次请求前由 economy 只分类 `simple/complex`，
+宿主选择轻量/主力执行。分类无工具，不展示原文、不进入 Session 消息，但计入 usage。
+分类失败转主力；轻量执行仅暴露只读工具，完整响应中的副作用候选仍被拦截并升级。
+`model_routed` 的 purpose 区分分类与执行，`intent_classified/route_escalated/routing_summary`
+记录决策与请求/Token。默认不需要价格；旧配置未设置策略时保留本地规则。
+`config.connections.resolve_connection()` 将共享 API 地址/Key 解析到各 ModelProfile，
+Router 按 profile.model 填写请求；共享连接时不更换 Key，独立连接则必须显式配对覆盖。
+`/model` 显式切换时新建 Session，旧会话可恢复。
 
-## 为什么保留两种 Model Provider
+## 并发边界
 
-- `ScriptedProvider` / `OfflineCodingProvider`：确定性离线路径。它们不是“假装智能”，而是隔离
-  变量，让工具、安全、会话、trace 和 Agent loop 在无网络、无 API key 时仍可重复验收。
-- OpenAI-compatible Provider：用于真实模型实验。它只负责协议转换，不改变 Agent、Policy 或 Tool。
+显式启用 `[workflow]` 后，复杂分支由 `WorkflowCoordinator` 顺序调用规划、编码和审查模型。
+阶段数据经固定 JSON 交接，原始推理只用于同阶段工具续接；协调器只发工具候选，实际执行仍
+由 Agent/ToolExecutor 完成。`observe_tool()` 回灌真实证据，`finish_run()` 以宿主终态确认完成。
+规划/审查只读，审查须重读变更文件，否决有界返工。详见 [多模型工作流](WORKFLOW_PIPELINE.md)。
 
-真实 Provider 由同一个 OpenAI-compatible `/chat/completions` 适配器连接 OpenAI、Kimi、
-Qwen/百炼、DeepSeek 或其他兼容服务。先让离线基线稳定，再比较真实模型的成功率、步骤数、
-延迟和失败类型。
+同一个 Agent 不支持重入；并发任务创建独立实例。同轮工具按顺序执行。
+`ReadOnlySubagentTeam` 可让多个独立子 Agent 在单宿主线程池中并行只读探索，等待屏障后把有界、
+不可信的公开结论交给唯一可写主 Agent。子 Agent 禁止命令和写入；各自使用独立 Provider、上下文
+和 Trace，总 Token 汇总主从及返工。该能力不是跨机器分布式调度。
+Eval 使用本机线程并发独立 case。SessionStore 文件锁只覆盖本地存储临界区，
+不在等待模型时持有。当前没有分布式调度或 OS 沙箱。
 
-## Session Journal、Raw History 与 Active Context
+## 稳定性与兼容
 
-- `context.jsonl` 和超过阈值后创建的 `context-<start_seq>.jsonl` 是分段 append-only journal；
-  新格式每行包含严格递增的 `seq` 与 `message`，用于审计和恢复，不因压缩而覆盖。
-- `active_context.json` 是 `{version, through_seq, messages}` checkpoint，其中 messages 是下一轮
-  实际加载的有界活动窗口，可以包含确定性摘要。
-- `state.json` 保存标题、时间、Provider/模型/Base URL 和本会话已批准的工具 scope，不保存 key。
-- 会话按工作区真实路径哈希隔离，拒绝用其他工作区加载同一 Session ID。
-- 默认数据目录为 `~/.pi-claw/sessions`，可用 `PI_CLAW_HOME` 或 CLI `--data-dir` 覆盖。
-
-Context 压缩保留第一条系统消息和最近消息，把历史工具输出明确标成不可信数据。事件数和读取
-字节都有上限；checkpoint 与待重放 journal 尾部共用同一读取预算，防止损坏或恶意会话文件
-造成无界加载。极端结构若无法在不破坏 system 或
-tool-call/result 原子组的前提下缩小，会明确失败，不会构造发给 Provider 的非法上下文。
-
-恢复顺序是“checkpoint messages -> journal 中 `seq > through_seq` 的尾记录”。末尾无换行的半写
-记录会忽略；带换行的损坏记录会报错。如果中断点落在 assistant Tool Call 与 ToolResult 之间，
-系统补一个 synthetic failed ToolResult，明确不重放工具，也不假定副作用是否已经发生。
-
-journal append、checkpoint 和 state 都在写入时 `fsync`；JSON 状态先写同目录临时文件，再用
-`os.replace` 替换并同步父目录。会话目录/文件使用 `0700/0600`。这些设计提高恢复确定性，但
-不能替代数据库事务、备份或生产级文件系统故障方案。
-
-同一 Session 的读改写提交由 `.session.lock` 跨进程串行化。REPL 同时携带已加载的 journal
-序号；若另一进程已经推进序号，旧实例会拒绝保存并要求重新加载，避免重复 `seq` 或 stale
-checkpoint 覆盖新消息。
-
-## Tool 与审批
-
-读取工具由 Policy 直接允许。写入和命令即使语法安全仍返回 ASK，由终端审批器选择允许一次、
-本会话允许同类或拒绝；非 TTY 默认拒绝，不会在 CI 中等待输入。硬拒绝不能被 `--yes` 绕过。
-
-审批预览对写入使用有界、脱敏 unified diff 和完整文件 preimage 哈希，对命令展示完整 argv 和
-cwd。会话 scope 对写入绑定完整参数与已审阅的 preimage，对命令绑定完整 argv/cwd；参数或文件
-版本改变即不复用旧批准。写入批准后、真正执行前
-再次计算目标文件哈希，若与预览时不同则拒绝，避免 TOCTOU 窗口内把批准应用到另一个内容版本。
-
-`write_or_replace` 用于单处精确替换；`apply_patch` 对同一文件执行 1 到 50 个顺序精确替换，
-先在内存验证全部 edit，通过后一次写回；任一 `old` 不唯一则零写入。它不是抗崩溃的 OS 级
-原子替换。内容通过同目录临时文件写入并 `fsync`；已有目标用 `os.replace`，新目标用硬链接独占
-创建，父目录同步。Agent 单轮最多接受 16 个 Tool Call，超过上限会在执行前安全失败。
-
-## Provider 运行时边界
-
-REPL `/resume` 会比较会话保存的 Provider、模型和 Base URL。不同则拒绝在当前进程内静默切换，
-并打印包含原会话运行时参数的 `uv run pi-claw chat ...` 重启命令；API key 仍只来自环境变量。
-
-OpenAI-compatible Provider 对成功体和 HTTP 错误体都设置字节上限，避免一次读取无界响应。
-写入 Session 的 Base URL 必须是有主机名的 HTTP(S) 地址，并拒绝内嵌用户名/密码、query 和
-fragment。这是协议输入校验，不是第三方服务信任证明，也不是网络 Sandbox。
-
-## Trace 与 Replay
-
-CLI 每次运行都把关键事件按顺序写入 JSONL；嵌入库时由调用方显式传入 TraceWriter。Trace 是
-审计证据，不是再次执行的脚本；Replay 只读取并展示历史事件，不会重新运行写文件或命令。
-常见 token、API key、password 字段在落盘前会被替换，单事件与 replay 总量都有上限。
-
-## 后续扩展顺序
-
-1. 固定任务评测与失败分类。
-2. 使用固定评测验证上下文压缩质量，而不是只比较消息数量。
-3. Docker Sandbox 适配器（用户自行准备 Docker）。
-4. Reviewer Subagent；只有评测证明有效后，再尝试并行 Agent Team。
+- 命令行入口为 `interfaces.cli:main`；`uv run --frozen pi-claw` 保持不变。
+- 模块启动使用 `python -m interfaces`；旧 `python -m pi_claw` 不再提供。
+- 模块直接导入，例如 `from core.agent import Agent`；移除旧 `pi_claw` 根包转导出。
+- 原始会话 journal/checkpoint 格式不变；旧会话没有 usage.json 时按空账本读取。
+- 内置 Eval 数据位于 `src/evaluation/cases.json`，wheel/sdist 必须包含它。
+- 旧迭代文档记录历史实现；当前路径以本文件和工作流程文档为准。

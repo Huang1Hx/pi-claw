@@ -1,0 +1,62 @@
+# 中国科大校内平台：公开配置示例；复制为被 Git 忽略的 pi-claw.toml，不写实际 API Key。
+# Key 与 URL 沿用 .env；公开目录中的模型不等于当前 Key 一定获权。
+[connection]
+base_url_env = "OPENAI_BASE_URL"
+api_key_env = "OPENAI_API_KEY"
+
+[routing]
+intent_strategy = "model"
+cheap = "economy"
+strong = "primary"
+max_cheap_requests = 2
+max_requests = 36
+max_output_tokens = 8192
+
+[workflow]
+enabled = true
+planner = "planner"
+coder = "primary"
+reviewer = "reviewer"
+premium_reviewer = "premium_reviewer"
+premium_review_policy = "risk"
+max_planning_requests = 4
+max_review_requests = 4
+max_premium_review_requests = 4
+# 最多三次审查，即首次审查后最多两轮返工。
+max_review_rounds = 3
+max_context_chars = 120000
+
+[models.economy]
+# 分类与简单任务使用学校免费的 DeepSeek；分类输出另限到 128 Token。
+model = "deepseek-flash"
+max_output_tokens = 2048
+timeout_seconds = 120
+
+[models.planner]
+# 规划使用学校 DeepSeek；阶段权限仅允许读取、枚举和搜索。
+model = "deepseek-flash"
+max_output_tokens = 8192
+timeout_seconds = 120
+
+[models.primary]
+# 复杂编码：同模型工具续接保留 reasoning_content，不跨角色传递。
+model = "deepseek-flash"
+thinking_mode = "enabled"
+thinking_format = "thinking"
+max_output_tokens = 8192
+timeout_seconds = 120
+
+[models.reviewer]
+# 常规只读审查仍使用学校 DeepSeek；必须重新读取实际改动文件。
+model = "deepseek-flash"
+max_output_tokens = 8192
+timeout_seconds = 120
+
+[models.premium_reviewer]
+# 仅命中宿主高风险规则后调用用户自费 Kimi；独立 URL/Key，禁止继承学校凭据。
+base_url_env = "MOONSHOT_BASE_URL"
+api_key_env = "MOONSHOT_API_KEY"
+model = "kimi-k3"
+max_attempts = 1
+max_output_tokens = 4096
+timeout_seconds = 120

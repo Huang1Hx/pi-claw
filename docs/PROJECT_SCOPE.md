@@ -1,69 +1,40 @@
-# Pi-Claw 项目边界与验收基线
+# Pi-Claw 项目范围
 
-## 一句话目标
+Pi-Claw 是 Python/uv 本地 Coding Agent，在明确的工作区内执行检查、修改、验证与报告。
 
-Pi-Claw 是一个使用 Python/uv、沿 Kimi CLI 路线学习会话式 Coding Agent 的项目：它在指定
-工作区内完成 `Inspect -> Plan -> Act -> Verify -> Report`，所有工具调用都经过权限策略并
-写入可回放轨迹。
+## 当前支持
 
-## 演进路线
+- 小型 Python 仓库的文件发现、读取、搜索和精确修改。
+- 受限 argv 命令、逐次或精确 scope 审批、写入前版本复核。
+- OpenAI-compatible 同步响应和 SSE 流式传输；离线 scripted Provider。
+- typed events、服务端 Token 用量、有限请求重试和重复调用停止。
+- 确定性上下文压缩、旧回合大工具结果裁剪。
+- 显式宿主 Hooks，可拒绝工具操作，不自动加载仓库中的扩展脚本。
+- 工作区隔离会话、分段 journal、活动 checkpoint、本机文件锁和 seq 冲突检查。
+- 写后最低验证证据验收、脱敏 Trace 和独立工作区并发 Eval。
+- .env 与显式 TOML profile、轻量模型分类后按复杂度分流、失败升级、分模型 Token 和请求上限。
+- 独立 commands 注册表，支持状态、模型、会话、帮助和退出命令。
+- 默认 projects/ 代码工作区；TTY 斜杠菜单与 Tab 补全；同一最终正文去重显示。
+- 显式配置的规划→编码/验证→只读审查工作流，有界返工、阶段对话隔离和产物持久化。
 
-- **v0 安全内核**：Workspace、Policy、Tool、Trace、Provider 和有最大步数的 Agent Loop。
-- **v1 会话式 Agent**：Session、Active Context、项目 Prompt、三态审批、多 Tool Call、
-  `chat --print`、交互 REPL 和 `sessions`。
+## 当前边界
 
-v1 参考 Kimi CLI 类产品的工程路线，但不复刻完整 Kimi Code，不宣称相同模型能力、全部命令、
-远程基础设施、IDE 集成或生产级 Sandbox。
+- 自动路由支持提示驱动的轻量模型分类和旧本地规则，不训练分类器，也不证明分类准确。
+  轻量/主力角色由用户指定，不查询价格、不自动给模型能力排名。
+- 不提供任意 shell、跨仓库自治、Web 搜索、MCP 和 Subagent。
+- 不自动提交/推送代码，不执行 git push/reset/clean 等受禁命令。
+- 没有分布式队列、分布式锁、容器或虚拟机隔离。
+- Hooks 为可信宿主代码，不是沙箱插件；只有 before_tool 可以阻止动作。
+- 完成验收只要求写入后出现认可检查成功，尚未绑定任务指定测试集。
+- 流式文本为候选，不保证正确；实时原始片段不写入持久 Trace，完整消息再脱敏落盘。
+- 字符近似 Token 只用于上下文估算；usage 缺失时记录未知，不当作免费请求。
+- 历史显式金额配置仍兼容，但默认不算费用；分类会增加请求开销，不声称一定省钱。
+- 已授权真实模型冒烟的结果单独记录；尚未建立多任务真实分类/代码质量基准。
+- 多模型工作流是单宿主顺序协调，不是并发子代理；阶段原始推理不跨模型或落盘。
+  会话产物可恢复，但没有工作流状态机精确断点续跑、事务回滚或自动 Git 提交。
 
-## 当前 v1 范围
+## 验收
 
-- 支持小型本地 Python 仓库。
-- 提供文件枚举、文本搜索、文件读取、精确替换、全量校验后一次写回的 `apply_patch` 和受限命令工具。
-- 默认只读；修改文件或执行命令需要明确批准。
-- 不需要网络、模型 API 或 Docker，也能运行固定脚本模型演示与测试。
-- 可创建、列出、加载和恢复按工作区隔离的本地会话。
-- 原始消息以带递增 `seq` 的分段 journal 保存；压缩只更新带 `through_seq` 的活动 checkpoint，
-  不覆盖原始历史。
-- 交互审批支持允许一次、本会话允许同类和拒绝，非 TTY 默认拒绝。
-- 审批展示有界脱敏 diff、目标 preimage 或完整 argv/cwd；写 session scope 绑定参数与已审阅版本，
-  写入执行前再次复核目标哈希。
-- Provider 可返回同轮多个 Tool Call，Agent 按顺序执行并分别记录结果。
-- 可选接入 OpenAI-compatible Chat Completions API，包括 Kimi、Qwen、DeepSeek 和 OpenAI。
-- OpenAI-compatible 响应体有字节上限；会话 Base URL 元数据拒绝内嵌凭据、query 和 fragment。
-- JSONL 轨迹包含步骤、工具、结果和 UTC 时间戳，并对常见凭据字段脱敏。
-- Agent 受最大步数限制，不允许无限循环。
-
-## 明确不做
-
-- 不做 Web UI、IDE 插件、跨仓库自治和联网搜索。
-- 不执行 `sudo`、`curl/wget`、任意包变更、`git push/reset/clean` 等高风险操作。
-- Coding Profile 只允许少量可复现的 `uv` 同步/检查/测试形式，并始终需要审批。
-- 不自动提交或推送 Git 变更。
-- 不安装 Docker；容器 Sandbox 仅作为后续可选增强。
-- 不为了展示而强行加入 Multi-Agent；先建立可测的单 Agent 基线。
-
-## 权限模型
-
-1. 所有路径先解析为真实路径，并必须位于工作区根目录内。
-2. 只读工具可自动通过；写工具返回 `ask`，由 CLI 或调用方批准。
-3. 命令以 argv 数组执行，禁止 `shell=True`；可执行程序必须在白名单内。
-4. `.env`、`.git` 等敏感路径不得读取或修改。
-5. 网络默认关闭；工具不能自行扩大权限。
-
-## v1 验收
-
-- `uv sync` 后不设置 API key，也能运行离线演示。
-- 单元、集成、安全测试全部通过。
-- 路径穿越、符号链接越界、敏感文件访问和危险命令会被拒绝。
-- 文件写入未经批准不会发生，批准后只修改目标文件。
-- `apply_patch` 任一 edit 不存在或不唯一时，整个文件保持原样。
-- `chat --print` 可离线创建会话；`sessions`、`--continue`、`--session` 可恢复。
-- Context 压缩后活动窗口变小，append-only 原始消息仍完整保留。
-- checkpoint 后的 journal 尾部可恢复；最后半行会忽略，中断 Tool Call 补失败结果且不自动重放。
-- 非 TTY 副作用审批默认拒绝，本会话批准只作用于精确工具 scope。
-- 会话 append/state/checkpoint 和工具文件写入使用 `fsync`；已有文件替换与新文件独占创建均先
-  落盘内容，再让完整文件可见。
-- REPL `/resume` 遇到 Provider、模型或 Base URL 不一致时拒绝静默切换，并打印显式重启命令。
-- 每次 CLI 运行默认生成脱敏 JSONL 轨迹；库调用方也可显式传入 TraceWriter。
-  回放只读取历史事件，不重新执行工具。
-- README 能让初学者在 15 分钟内理解架构并完成演示。
+离线测试须覆盖原有权限、路径越界、审批指纹、会话恢复与并发冲突，并覆盖新 SSE、重试、
+usage、Hooks、裁剪和循环停止行为。安装后的 wheel 应能在源码目录外启动 CLI、
+运行内置 Eval 并恢复旧格式会话。

@@ -278,9 +278,20 @@ git check-ignore -v .env
 git status --short
 ```
 
-当前 Pi-Claw 不会自动读取 `.env`。如自行创建 `.env`，仍需由可信的本地 shell 或其他配置工具把变量加载到环境中。不要为了图方便给项目加入会打印全部环境变量的调试代码。
+当前 `chat` 和 `run` 会读取**启动目录**中的 `.env`，不是 `--workspace` 指向的任意目标仓库。
+项目已提供 `.env.example`；复制为 `.env` 后填入变量。已导出的终端变量优先。
+可使用 `--env-file /ABS/PATH/.env` 指定路径，或 `--no-env` 禁止文件加载。
+解析器只接受单行 `KEY=VALUE`（可有引号），不会执行命令、展开 `$变量`，也不修改全局环境。
+因此 `.env` 中要填写实际值，不能写 `OPENAI_API_KEY=$MOONSHOT_API_KEY` 期待自动替换。
+不要从不信任的启动目录加载配置。路由模式支持 `[connection]` 共用一个平台的
+`OPENAI_API_KEY` 和 `OPENAI_BASE_URL`，每个 profile 只填写不同 `model`。
+直接连接不同厂商时再用各自 `api_key_env`，并显式配套 `base_url`，不自动混用凭据。
 
 可以提交无真实值的 `.env.example` 作为字段说明，但真实 `.env`、Key、含 Key 的日志或 shell 记录都不能提交。
+
+多模型配置和路由预算见 [配置与模型路由](CONFIGURATION_AND_ROUTING.md)。本轮没有重新核对供应商
+价格和模型列表；上面的官方入口仍需以账号当前值为准。`chat` 默认使用 SSE，初次联调不兼容时
+可加 `--no-stream` 使用同步协议。
 
 ## 运行前必须理解的接口兼容要求
 

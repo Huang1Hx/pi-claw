@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from pi_claw.approval import TerminalApprovalBroker
-from pi_claw.policy import WorkspacePolicy
-from pi_claw.schemas import ToolCall
-from pi_claw.tools import ToolExecutor, ToolRegistry
+from core.schemas import ToolCall
+from security.approval import TerminalApprovalBroker
+from security.policy import WorkspacePolicy
+from tools import ToolExecutor, ToolRegistry
 
 
 def execute(executor: ToolExecutor, name: str, **arguments: object):
@@ -271,7 +271,7 @@ def test_atomic_replace_failure_preserves_original(
     def fail_replace(*_args: object) -> None:
         raise OSError("boom")
 
-    monkeypatch.setattr("pi_claw.tools.os.replace", fail_replace)
+    monkeypatch.setattr("tools.files.os.replace", fail_replace)
     executor = ToolExecutor(
         WorkspacePolicy(tmp_path, allow_write=True),
         approval_callback=lambda *_: True,

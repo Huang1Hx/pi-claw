@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import io
 
-from pi_claw.approval import ApprovalChoice, TerminalApprovalBroker
-from pi_claw.schemas import PolicyAction, PolicyDecision, ToolCall
+from core.schemas import PolicyAction, PolicyDecision, ToolCall
+from security.approval import ApprovalChoice, TerminalApprovalBroker
 
 DECISION = PolicyDecision(PolicyAction.ASK, "需要审批")
 

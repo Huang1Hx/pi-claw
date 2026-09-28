@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from pi_claw.context import ContextManager
-from pi_claw.providers import OfflineCodingProvider
-from pi_claw.repl import CodingRepl
-from pi_claw.session import SessionStore
-from pi_claw.trace import TraceWriter
+from core.context import ContextManager
+from interfaces.repl import CodingRepl
+from persistence.session_store import SessionStore
+from persistence.trace import TraceWriter
+from providers import OfflineCodingProvider
 
 
 def test_compaction_keeps_system_recent_messages_and_raw_input() -> None:

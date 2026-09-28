@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from pi_claw.policy import WorkspacePolicy
-from pi_claw.schemas import PolicyAction, ToolCall
+from core.schemas import PolicyAction, ToolCall
+from security.policy import WorkspacePolicy
 
 
 def call(name: str, **arguments: object) -> ToolCall:

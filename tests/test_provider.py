@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from pi_claw.providers import OpenAICompatibleProvider, ProviderError, ScriptedProvider
-from pi_claw.schemas import ModelReply
+from core.schemas import ModelReply
+from providers import OpenAICompatibleProvider, ProviderError, ScriptedProvider
 
 
 class FakeResponse:

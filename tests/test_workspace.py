@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from pi_claw.workspace import Workspace, WorkspaceViolation
+from security.workspace import Workspace, WorkspaceViolation
 
 
 def test_workspace_rejects_missing_or_file_root(tmp_path: Path) -> None:
