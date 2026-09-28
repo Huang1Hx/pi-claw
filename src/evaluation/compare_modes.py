@@ -10,11 +10,13 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime
 from hashlib import sha256
+from math import ceil
 from pathlib import Path
 from statistics import median
 
@@ -35,6 +37,25 @@ from tools import ToolExecutor
 
 MODES = ("single", "workflow", "team")
 VERIFY_ARGV = ["uv", "run", "python", "-m", "unittest", "-q", "test_target.py"]
+PUBLIC_SUMMARY_FIELDS = (
+    "schema_version",
+    "grader_version",
+    "generated_at",
+    "real_model",
+    "network_used",
+    "source_sha256",
+    "modes",
+    "tasks",
+    "trials_per_task",
+    "workers",
+    "deadline_seconds",
+    "max_steps",
+    "models",
+    "premium_model",
+    "accounting",
+    "by_mode",
+    "by_mode_and_task",
+)
 _PROCESS_LOCK = threading.Lock()
 _ACTIVE_PROCESSES: set[subprocess.Popen] = set()
 
@@ -42,6 +63,11 @@ _ACTIVE_PROCESSES: set[subprocess.Popen] = set()
 def save_json(path: Path, data) -> None:
     """所有评测产物统一脱敏；Settings、Key 与 URL 不进入报告。"""
     path.write_text(json.dumps(redact(data), ensure_ascii=False, indent=2) + "\n")
+
+
+def build_public_summary(report: dict) -> dict:
+    """用字段白名单生成可提交摘要；逐 trial 路径、Trace 和连接信息一律不复制。"""
+    return {name: report[name] for name in PUBLIC_SUMMARY_FIELDS if name in report}
 
 
 def approval_for(task_id: str, workspace: Path):
@@ -305,6 +331,63 @@ def _attempted_requests(result: dict, usage: dict) -> int:
     return max(attempted, int(usage.get("requests", 0)))
 
 
+def _model_usage(result: dict, events: list[dict]) -> dict[str, dict[str, int]]:
+    """按具体模型核算已知 Token，并把已路由但无 usage 的请求保留为缺口。"""
+    attempted = Counter()
+    profile_models = {}
+    for event in events:
+        if event["event"] != "model_routed":
+            continue
+        profile = event["payload"].get("profile")
+        model = event["payload"].get("model")
+        if isinstance(profile, str) and isinstance(model, str):
+            profile_models[(event["participant"], profile)] = model
+            attempted[model] += 1
+
+    participants = [("leader", result.get("leader", {}))]
+    participants.extend(
+        (f"subagent-{item.get('name')}", item.get("result", {}))
+        for item in result.get("subagents", [])
+        if isinstance(item, dict)
+    )
+    known: dict[str, Counter] = {}
+    for participant_name, participant in participants:
+        routing = participant.get("routing") if isinstance(participant, dict) else None
+        models = routing.get("models") if isinstance(routing, dict) else None
+        if not isinstance(models, dict):
+            continue
+        for profile, usage in models.items():
+            if not isinstance(usage, dict):
+                continue
+            model = profile_models.get((participant_name, profile))
+            if model is None:
+                candidates = {
+                    value
+                    for (event_participant, event_profile), value in profile_models.items()
+                    if event_profile == profile
+                }
+                model = candidates.pop() if len(candidates) == 1 else f"profile:{profile}"
+            totals = known.setdefault(model, Counter())
+            totals["requests_with_usage"] += int(usage.get("requests", 0))
+            totals["prompt_tokens"] += int(usage.get("prompt_tokens", 0))
+            totals["completion_tokens"] += int(usage.get("completion_tokens", 0))
+
+    rows = {}
+    for model in sorted(set(attempted) | set(known)):
+        values = known.get(model, Counter())
+        with_usage = values["requests_with_usage"]
+        attempted_requests = max(attempted[model], with_usage)
+        rows[model] = {
+            "attempted_requests": attempted_requests,
+            "requests_with_usage": with_usage,
+            "requests_without_usage": max(0, attempted_requests - with_usage),
+            "prompt_tokens": values["prompt_tokens"],
+            "completion_tokens": values["completion_tokens"],
+            "total_tokens": values["prompt_tokens"] + values["completion_tokens"],
+        }
+    return rows
+
+
 def _reconcile_usage(result: dict, usage: dict) -> dict:
     """把已知 Token 与无 usage 的已发起请求分开；未知请求绝不虚构 Token。"""
     reconciled = dict(usage)
@@ -405,13 +488,9 @@ def build_trial_report(folder: Path, metadata: dict) -> dict:
         usage_source = "partial_trace"
     else:
         usage = _reconcile_usage(result, usage)
-    models = sorted(
-        {
-            event["payload"]["model"]
-            for event in events
-            if event["event"] == "model_routed" and isinstance(event["payload"].get("model"), str)
-        }
-    )
+    model_usage = _model_usage(result, events)
+    models = sorted(model_usage)
+    model_requests = {model: values["attempted_requests"] for model, values in model_usage.items()}
     return {
         **metadata,
         "grader_version": GRADER_VERSION,
@@ -427,6 +506,8 @@ def build_trial_report(folder: Path, metadata: dict) -> dict:
         or bool(usage.get("requests_without_usage")),
         "duration_seconds": result.get("duration_seconds", metadata["duration_seconds"]),
         "models_used": models,
+        "model_requests": model_requests,
+        "model_usage": model_usage,
         "participants": len(_expected_participants(metadata["mode"])),
         "max_parallel_subagents": result.get("max_parallel_subagents", 0),
         "tool_calls": len(tool_results),
@@ -459,17 +540,79 @@ def reliability(rows: list[dict]) -> dict:
     }
 
 
-def summarize(rows: list[dict]) -> dict:
-    """汇总成功、可靠性、端到端耗时、主从总 Token、冲突、越权和返工。"""
+def _nearest_rank(values: list[float], percentile: float) -> float:
+    """计算不插值的最近秩分位数；P95 会保留真实观测到的长尾值。"""
+    ordered = sorted(values)
+    return ordered[max(0, ceil(percentile * len(ordered)) - 1)]
+
+
+def summarize(rows: list[dict], *, premium_model: str | None = None) -> dict:
+    """汇总成功、长尾耗时、模型总请求、Token、安全边界和返工。"""
     successes = sum(row["passed"] for row in rows)
     known_tokens = sum((row["usage"] or {}).get("total_tokens", 0) for row in rows)
     durations = [row["duration_seconds"] for row in rows]
+    statuses = Counter(row.get("leader_status", "unknown") for row in rows)
+    failure_layers = Counter(
+        item.get("layer", "unknown")
+        for row in rows
+        for item in row.get("failure_checks", [])
+        if item.get("passed") is not True
+    )
+    model_requests = Counter()
+    model_usage: dict[str, Counter] = {}
+    for row in rows:
+        model_requests.update(row.get("model_requests", {}))
+        for model, usage in row.get("model_usage", {}).items():
+            totals = model_usage.setdefault(model, Counter())
+            totals.update(usage)
+    model_usage_distribution = {
+        model: {
+            name: values[name]
+            for name in (
+                "attempted_requests",
+                "requests_with_usage",
+                "requests_without_usage",
+                "prompt_tokens",
+                "completion_tokens",
+                "total_tokens",
+            )
+        }
+        for model, values in sorted(model_usage.items())
+    }
+    empty_model_usage = {
+        "attempted_requests": 0,
+        "requests_with_usage": 0,
+        "requests_without_usage": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+    }
+    timeout_trials = statuses["deadline"]
     return {
         "models_used": sorted({model for row in rows for model in row["models_used"]}),
+        "model_request_distribution": dict(sorted(model_requests.items())),
+        "premium_model_requests": model_requests[premium_model] if premium_model else 0,
+        "model_usage_distribution": model_usage_distribution,
+        "premium_model_usage": model_usage_distribution.get(premium_model, empty_model_usage)
+        if premium_model
+        else empty_model_usage,
         "reliability": reliability(rows),
+        "strict_successes": successes,
+        "strict_failures": len(rows) - successes,
+        "p50_duration_seconds": round(median(durations), 3),
+        "p95_duration_seconds": round(_nearest_rank(durations, 0.95), 3),
         "median_duration_seconds": round(median(durations), 3),
         "total_duration_seconds": round(sum(durations), 3),
+        "timeout_trials": timeout_trials,
+        "timeout_rate": round(timeout_trials / len(rows), 6),
+        "status_distribution": dict(sorted(statuses.items())),
+        "failure_layer_distribution": dict(sorted(failure_layers.items())),
         "known_total_tokens": known_tokens,
+        "unattributed_known_tokens": max(
+            0,
+            known_tokens
+            - sum(values["total_tokens"] for values in model_usage_distribution.values()),
+        ),
         "unknown_usage_trials": sum(row["usage_may_be_incomplete"] for row in rows),
         "known_tokens_per_strict_success": round(known_tokens / successes, 2)
         if successes
@@ -604,7 +747,7 @@ def main() -> int:
     save_json(args.output / "grader-calibration.json", calibration)
     if not calibration["passed"]:
         raise RuntimeError("评分器校准失败，停止真实模型请求")
-    print("[校准] 两项参考实现通过，初始缺陷均被隐藏用例检出。", flush=True)
+    print(f"[校准] {len(TASKS)} 项参考实现通过，初始缺陷均被隐藏用例检出。", flush=True)
     if not args.live:
         print("未指定 --live：未调用模型。", flush=True)
         return 0
@@ -619,8 +762,10 @@ def main() -> int:
             for path in sorted(source_root.rglob("*.py"))
         )
     ).hexdigest()
+    premium_profile = settings.workflow.premium_reviewer
+    premium_model = settings.profiles[premium_profile].model if premium_profile else None
     manifest = {
-        "schema_version": 1,
+        "schema_version": 3,
         "grader_version": GRADER_VERSION,
         "generated_at": datetime.now(UTC).isoformat(),
         "real_model": True,
@@ -636,6 +781,7 @@ def main() -> int:
             role: settings.profiles[getattr(settings.workflow, role)].model
             for role in ("planner", "coder", "reviewer")
         },
+        "premium_model": premium_model,
         "accounting": "Token 统计包含主 Agent、全部子 Agent、工作流阶段与返工；不计算货币费用",
     }
     save_json(args.output / "manifest.json", manifest)
@@ -665,14 +811,30 @@ def main() -> int:
         return 130
     else:
         pool.shutdown()
+    by_mode = {
+        mode: summarize(
+            [row for row in reports if row["mode"] == mode], premium_model=premium_model
+        )
+        for mode in modes
+    }
+    by_mode_and_task = {
+        mode: {
+            task_id: summarize(
+                [row for row in reports if row["mode"] == mode and row["task"] == task_id],
+                premium_model=premium_model,
+            )
+            for task_id in tasks
+        }
+        for mode in modes
+    }
     summary = {
         **manifest,
-        "by_mode": {
-            mode: summarize([row for row in reports if row["mode"] == mode]) for mode in modes
-        },
+        "by_mode": by_mode,
+        "by_mode_and_task": by_mode_and_task,
         "trials": reports,
     }
     save_json(args.output / "report.json", summary)
+    save_json(args.output / "public-summary.json", build_public_summary(summary))
     print(json.dumps(summary["by_mode"], ensure_ascii=False), flush=True)
     return 0 if all(row["passed"] for row in reports) else 1
 

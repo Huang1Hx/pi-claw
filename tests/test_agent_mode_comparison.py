@@ -1,6 +1,8 @@
 """三种 Agent 架构对照评测的评分、核算与可靠性公式。"""
 
 import json
+import subprocess
+import sys
 
 import pytest
 
@@ -8,6 +10,7 @@ from core.schemas import ToolCall
 from evaluation.compare_modes import (
     VERIFY_ARGV,
     approval_for,
+    build_public_summary,
     build_trial_report,
     reliability,
     summarize,
@@ -15,6 +18,19 @@ from evaluation.compare_modes import (
 from evaluation.mode_grading import calibrate, safe_functions
 from evaluation.mode_tasks import TASKS
 from persistence.trace import TraceWriter
+
+STAGE2_TASK_IDS = {
+    "balance_transfer",
+    "config_overlay",
+    "dependency_order",
+    "event_deduplication",
+    "inventory_reservation",
+    "permission_filter",
+    "rate_limit_window",
+    "versioned_update",
+    "window_merge",
+    "worker_assignment",
+}
 
 
 def _trial(tmp_path, *, mode="single"):
@@ -73,6 +89,43 @@ def test_grader_calibration_and_exact_signatures():
     assert calibrate()["passed"] is True
     with pytest.raises(ValueError, match="函数签名"):
         safe_functions("def reserve(stock, orders=None):\n    return False, {}\n", "reserve")
+
+
+def test_grader_calibration_is_repeatable_and_does_not_mutate_hidden_cases():
+    """缺陷实现即使修改输入，也不能污染下一次校准或后续真实 trial。"""
+    first = calibrate()
+    second = calibrate()
+    assert first == second
+    assert second["passed"] is True
+
+
+def test_stage2_catalog_has_ten_calibrated_medium_tasks():
+    """任务缺失、签名漂移或初始缺陷逃过隐藏评分时，真实基线不具备比较意义。"""
+    assert set(TASKS) == STAGE2_TASK_IDS
+    assert all(task.parameters and len(task.parameters) <= 4 for task in TASKS.values())
+    calibration = calibrate()
+    assert calibration["passed"] is True
+    assert set(calibration["tasks"]) == STAGE2_TASK_IDS
+    assert all(row["passed"] is True for row in calibration["tasks"].values())
+
+
+@pytest.mark.parametrize("task_id", sorted(STAGE2_TASK_IDS))
+def test_each_reference_implementation_passes_its_public_suite(tmp_path, task_id):
+    """隐藏评分参考答案也必须通过 Agent 实际运行的公开 unittest。"""
+    task = TASKS[task_id]
+    workspace = tmp_path / task_id
+    workspace.mkdir()
+    for name, content in task.files.items():
+        (workspace / name).write_text(content)
+    (workspace / "solution.py").write_text(task.reference)
+    result = subprocess.run(
+        [sys.executable, "-m", "unittest", "-q", "test_target.py"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_bounded_candidate_allows_safe_non_recursive_helper(tmp_path):
@@ -211,6 +264,134 @@ def test_reliability_and_token_per_success_include_failed_trials():
     assert summary["known_total_tokens"] == 400
     assert summary["known_tokens_per_strict_success"] == 400
     assert summary["median_duration_seconds"] == 2
+
+
+def test_summary_reports_tail_latency_timeouts_status_layers_and_model_requests():
+    """固定样本锁定 P95、失败分层和高级模型触发次数，避免漂亮均值掩盖长尾。"""
+    rows = []
+    for duration, status, passed, layer, requests in (
+        (1, "completed", True, None, {"deepseek-flash": 2}),
+        (2, "completed", False, "L2_semantics", {"deepseek-flash": 3}),
+        (3, "deadline", False, "L0_execution", {"deepseek-flash": 1, "kimi-k3": 1}),
+        (100, "harness_error", False, "L0_execution", {}),
+    ):
+        rows.append(
+            {
+                "task": "a",
+                "passed": passed,
+                "leader_status": status,
+                "duration_seconds": duration,
+                "usage": {"total_tokens": 10},
+                "usage_may_be_incomplete": status == "deadline",
+                "models_used": list(requests),
+                "model_requests": requests,
+                "tool_calls": 0,
+                "unauthorized_attempts": 0,
+                "write_conflicts": 0,
+                "rework_events": 0,
+                "max_parallel_subagents": 0,
+                "failure_checks": []
+                if layer is None
+                else [{"name": "failed", "passed": False, "layer": layer}],
+            }
+        )
+    summary = summarize(rows, premium_model="kimi-k3")
+    assert summary["strict_successes"] == 1
+    assert summary["p50_duration_seconds"] == 2.5
+    assert summary["p95_duration_seconds"] == 100
+    assert summary["timeout_trials"] == 1
+    assert summary["timeout_rate"] == 0.25
+    assert summary["status_distribution"] == {
+        "completed": 2,
+        "deadline": 1,
+        "harness_error": 1,
+    }
+    assert summary["failure_layer_distribution"] == {"L0_execution": 2, "L2_semantics": 1}
+    assert summary["model_request_distribution"] == {"deepseek-flash": 6, "kimi-k3": 1}
+    assert summary["premium_model_requests"] == 1
+
+
+def test_per_model_usage_separates_known_tokens_from_missing_premium_usage(tmp_path):
+    """Kimi 已知 Token 与路由后无 usage 的请求必须分别记录，不能把缺口当作零。"""
+    folder = _trial(tmp_path)
+    result_path = folder / "run-result.json"
+    result = json.loads(result_path.read_text())
+    result["leader"]["routing"] = {
+        "models": {
+            "premium_reviewer": {
+                "requests": 1,
+                "prompt_tokens": 10,
+                "completion_tokens": 2,
+            }
+        }
+    }
+    result_path.write_text(json.dumps(result))
+    trace = TraceWriter(folder / "trace-leader.jsonl")
+    for request in (1, 2):
+        trace.record(
+            "model_routed",
+            {
+                "profile": "premium_reviewer",
+                "model": "kimi-k3",
+                "purpose": "premium_reviewing",
+                "request": request,
+            },
+        )
+    report = build_trial_report(
+        folder,
+        {"mode": "single", "task": "inventory_reservation", "trial": 1, "duration_seconds": 9},
+    )
+    assert report["model_usage"]["kimi-k3"] == {
+        "attempted_requests": 2,
+        "requests_with_usage": 1,
+        "requests_without_usage": 1,
+        "prompt_tokens": 10,
+        "completion_tokens": 2,
+        "total_tokens": 12,
+    }
+    summary = summarize([report], premium_model="kimi-k3")
+    assert summary["premium_model_usage"] == report["model_usage"]["kimi-k3"]
+
+
+def test_public_summary_excludes_trial_paths_traces_and_connection_data():
+    """可提交摘要只保留白名单聚合值，不泄漏本机目录、Trace 或连接配置。"""
+    report = {
+        "schema_version": 2,
+        "grader_version": "test",
+        "generated_at": "2026-09-27T00:00:00Z",
+        "real_model": True,
+        "network_used": True,
+        "source_sha256": "abc",
+        "modes": ["single"],
+        "tasks": ["a"],
+        "trials_per_task": 3,
+        "workers": 2,
+        "deadline_seconds": 420,
+        "max_steps": 24,
+        "models": {"coder": "deepseek-flash"},
+        "premium_model": "kimi-k3",
+        "accounting": "all participants",
+        "by_mode": {"single": {"strict_successes": 1}},
+        "by_mode_and_task": {"single": {"a": {"strict_successes": 1}}},
+        "trials": [
+            {
+                "workspace": "/Users/example/private",
+                "traces": ["/Users/example/trace.jsonl"],
+                "api_key": "secret-value",
+                "base_url": "https://private.invalid",
+            }
+        ],
+        "config_path": "/Users/example/pi-claw.toml",
+    }
+    public = build_public_summary(report)
+    text = json.dumps(public)
+    assert public["by_mode_and_task"]["single"]["a"]["strict_successes"] == 1
+    assert "trials" not in public
+    assert "config_path" not in public
+    assert "/Users/" not in text
+    assert "trace.jsonl" not in text
+    assert "secret-value" not in text
+    assert "private.invalid" not in text
 
 
 def test_deadline_recovers_known_partial_usage_from_all_traces(tmp_path):

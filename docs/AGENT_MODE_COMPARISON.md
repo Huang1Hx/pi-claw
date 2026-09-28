@@ -1,7 +1,7 @@
 # 单 Agent、顺序工作流与主从多 Agent 对照评测
 
 本评测用同一批任务、相同起始文件、相同主提示、相同工具和相同外部评分器比较三种执行架构。
-目标不是用两个小任务给模型下通用排名，而是回答：增加规划/审查或独立子 Agent 后，严格成功率、
+目标不是用少量任务给模型下通用排名，而是回答：增加规划/审查或独立子 Agent 后，严格成功率、
 重复可靠性、端到端耗时和完整 Token 消耗发生了什么变化。
 
 ## 三种模式与模型分配
@@ -12,8 +12,10 @@
 | `workflow` | 规划/编码/常规审查：`deepseek-flash` | 规划 → 编码/验证 → 审查；审查否决后有界返工 | 仅编码阶段的工具候选由外层 Agent 执行 |
 | `team` | 主 Agent与两个独立子 Agent：`deepseek-flash` | 两个子 Agent 并行只读分析；屏障汇合后主 Agent 编码/验证 | 只有主 Agent 可写和运行命令 |
 
-评测任务每次只修改一个普通算法文件，不命中高级审查规则，因此不会调用用户自费 `kimi-k3`。
-若未来把 Kimi 纳入对照，必须单独报告触发率、完整 Token 和付费请求数，不能混入本基线。
+工作流继承生产 `premium_review_policy=risk`：权限等高风险任务或常规审查经历两轮返工时，可以
+调用用户自费 `kimi-k3`。报告必须单列触发原因、尝试/已知请求数、Token 与 usage 缺口；Kimi
+Token 同时属于工作流总消耗，不能重复相加。意图分类在本评测中固定为本地规则，不为分类额外
+调用任何模型。
 
 `team` 不是分布式系统：当前实现在单宿主线程池中运行，每个参与者拥有独立 Agent、Provider、
 上下文和 Trace。两个子 Agent 结束后主 Agent 才启动，因此不存在多个写者并发修改。子 Agent
@@ -30,26 +32,24 @@
 uv run python -m unittest -q test_target.py
 ```
 
-### 任务一：批量库存原子预留 `inventory_reservation`
+十项任务都属于中等复杂度的局部代码修复：包含多条相互作用的输入、原子性、顺序或稳定性规则，
+但不依赖大型仓库知识、外部服务或长时间构建，适合在受控预算下重复比较架构差异。
 
-实现 `reserve(stock, orders)`。任务同时要求输入类型校验、bool 与 int 的区分、未知 SKU、重复
-SKU 累计数量、批次原子失败、成功扣减和输入不变性。初始实现会边遍历边扣减，没有完整输入校验，
-也会在后续订单失败时返回已部分扣减的数据。
+| 任务 ID | 主要规则 |
+|---|---|
+| `inventory_reservation` | 库存校验、累计需求、原子预留 |
+| `window_merge` | 排序、gap 合并、默认参数和输入不变性 |
+| `permission_filter` | 权限过滤、稳定顺序、授权/请求去重 |
+| `balance_transfer` | 顺序转账、到账复用、批次原子失败 |
+| `dependency_order` | 稳定拓扑排序、循环/缺失/重复依赖 |
+| `event_deduplication` | 精确事件契约、重复与冲突、稳定排序 |
+| `rate_limit_window` | 只计已接纳请求、滑动边界和单调输入 |
+| `config_overlay` | 两层副本、保护项、未知配置拒绝 |
+| `worker_assignment` | 最小累计负载与稳定并列规则 |
+| `versioned_update` | 乐观版本检查与批量原子更新 |
 
-公开测试覆盖基本成功、未知 SKU 原子失败、重复订单累计和空批次。隐藏评分再覆盖精确清零、
-零数量、bool 数量、非法库存键值、订单容器与元素类型和非法订单形状，共 12 个行为用例。这要求模型理解事务语义，
-不是只修一条显眼条件。
-
-### 任务二：带容差的时间窗口合并 `window_merge`
-
-实现 `merge_windows(windows, gap=0)`。任务要求完整输入校验、bool 端点排除、排序、重叠/接触/
-gap 范围内合并、tuple 输出和嵌套输入不变性。初始实现只有普通重叠合并，没有 gap 和无效输入处理。
-
-公开测试覆盖乱序重叠、gap 合并、非法零长度窗口和输入不变。隐藏评分再覆盖独立窗口、接触窗口、
-gap 边界、反向窗口、bool 端点、负/bool gap、窗口容器与非法形状，共 11 个行为用例。
-
-这两个任务属于中等复杂度的局部代码修复：包含多条相互作用的边界规则和回归要求，但不依赖大型
-仓库知识、外部服务或长时间构建，适合在受控预算下重复比较架构差异。
+任务静态材料位于 `mode_task_catalog.py`，Agent 不可见的隐藏用例位于 `mode_cases.py`。每项参考
+实现必须全部通过，初始缺陷必须至少失败一项；校准输入每次深拷贝，缺陷候选不能污染后续 trial。
 
 ## 公平性与严格评分
 
@@ -73,7 +73,9 @@ gap 边界、反向窗口、bool 端点、负/bool gap、窗口容器与非法�
 | 实测 `pass@k` | 对每个任务，k 次中至少一次成功的任务比例 |
 | 实测 `pass^k` | 对每个任务，k 次全部成功的任务比例；即重复成功率 |
 | 端到端耗时 | 从该 trial 启动到全部参与者结束；`team` 包含并行子 Agent 和主 Agent |
+| P50 / P95 | P50 为中位数；P95 为最近秩真实观测值；成功与失败 trial 都进入统计 |
 | 总 Token | 所有已报告的输入+输出 Token；包含规划、编码、审查、全部子 Agent和返工 |
+| 按模型 Token | 分 DeepSeek/Kimi 报告已知请求与 Token；路由后无 usage 的请求单列缺口 |
 | 每个严格成功 Token | 该模式全部 trial（含失败、返工）的已知总 Token / `S` |
 | 越权次数 | Policy/审批拒绝的调用；只读阶段/子 Agent 发起副作用候选也计入，按 participant+call_id 去重 |
 | 写冲突次数 | 工具的修改前指纹与执行前指纹不一致，因目标文件已变化而拒绝的次数 |
@@ -93,20 +95,39 @@ uv run --frozen python -m evaluation.compare_modes \
   --output runs/agent-modes-calibration
 ```
 
-运行默认对照：2 个任务 × 2 次重复 × 3 种模式，共 12 个真实 trial：
+运行当前对照：10 个任务 × 3 次重复 × 3 种模式，共 90 个真实 trial：
 
 ```bash
 uv run --frozen python -m evaluation.compare_modes \
   --live --config pi-claw.toml \
-  --trials 2 --workers 2 --deadline 420 --max-steps 24 \
-  --output runs/agent-modes-20260920
+  --trials 3 --workers 2 --deadline 420 --max-steps 24 \
+  --output runs/agent-modes-current
 ```
 
-输出目录必须不存在。根目录包含 `manifest.json`、`grader-calibration.json` 和 `report.json`；
+输出目录必须不存在。根目录包含 `manifest.json`、`grader-calibration.json`、`report.json` 和仅含
+白名单聚合字段的 `public-summary.json`；
 每个 trial 保留起始任务、脱敏配置摘要、日志、最终工作区、每个参与者的独立 Trace、运行结果和
 逐项评分。`runs/` 被 Git 忽略；API Key、Base URL 和价格不会写入产物。
 
-## 本轮实测结果
+## 当前 90-trial 实测结果
+
+2026-09-27 至 09-28 使用 grader 2.0、`deepseek-flash` 常规角色和按风险触发的 `kimi-k3` 完成
+90 个端到端 trial。失败不删除、不重跑替换；详细证据、分任务表和 Kimi 用量见
+[Iteration 017](iterations/ITERATION_017_CURRENT_MODEL_BASELINE.md)。
+
+| 模式 | 严格成功 | pass@3 | pass³ | P50 / P95 | 已知总 Token | 已知 Token/成功 | usage 缺口 | 越权 / 冲突 / 返工 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 单 Agent | 14/30（46.7%） | 60% | 40% | 55.648 / 211.616 s | 812,766 | ≥58,054.71 | 6/30 | 27 / 0 / 40 |
+| 规划—编码—审查 | 10/30（33.3%） | 50% | 20% | 71.767 / 183.521 s | 1,520,912 | ≥152,091.20 | 8/30 | 12 / 0 / 1 |
+| 主 Agent＋独立子 Agent | 9/30（30.0%） | 40% | 20% | 91.157 / 150.882 s | 1,110,475 | ≥123,386.11 | 8/30 | 16 / 0 / 4 |
+
+当前配置下单 Agent 的成功率、重复成功率和效率最好，证据不支持“增加 Agent 数天然提升可靠性”。
+但这不是通用架构排名：工作流按风险使用 Kimi，最后两个任务又被 Provider/DNS 故障污染。合计
+11 次 Kimi 路由中 10 次有 usage，已知 125,249 Token，另 1 次未知；这些消耗已包含在工作流
+总量中。90 项共有 22 个 provider_error/usage 缺口 trial；配置覆盖任务还有一处 grader 2.0
+文字歧义，已在 grader 2.1 澄清但不事后改分。下一阶段先做请求节流与故障隔离。
+
+## 历史 12-trial 小样本（不与当前基线混算）
 
 2026-09-21 使用 grader 1.2 完整运行 12 个 trial。执行产物位于
 `runs/agent-modes-final-20260921/`；正式汇总为 `report.json`，模型执行结束时的原始汇总另存

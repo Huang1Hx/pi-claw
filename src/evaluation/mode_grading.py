@@ -6,14 +6,14 @@ import ast
 from copy import deepcopy
 from pathlib import Path
 
+from evaluation.mode_cases import HIDDEN_CASES
 from evaluation.mode_tasks import TASKS
 
-GRADER_VERSION = "agent-modes-1.2"
+GRADER_VERSION = "agent-modes-2.1"
 ALLOWED_CALLS = {"isinstance", "len", "sorted", "dict", "list", "tuple", "max", "min"}
 ALLOWED_METHODS = {"copy", "get", "items", "append", "sort"}
 EXPECTED_SIGNATURES = {
-    "reserve": (("stock", "orders"), ()),
-    "merge_windows": (("windows", "gap"), (0,)),
+    task.function_name: (task.parameters, task.defaults) for task in TASKS.values()
 }
 
 
@@ -213,50 +213,8 @@ def safe_functions(source: str, expected_name: str) -> dict:
 
 
 def _behavior_cases(task_id: str):
-    """隐藏用例同时覆盖新要求和原有行为保留。"""
-    if task_id == "inventory_reservation":
-        return [
-            (
-                "basic_success",
-                "pass_to_pass",
-                ({"a": 5, "b": 2}, [("a", 2)]),
-                (True, {"a": 3, "b": 2}),
-            ),
-            ("empty_batch", "pass_to_pass", ({"a": 1}, []), (True, {"a": 1})),
-            ("exact_depletion", "pass_to_pass", ({"a": 2}, [("a", 2)]), (True, {"a": 0})),
-            (
-                "unknown_is_atomic",
-                "fail_to_pass",
-                ({"a": 5}, [("a", 2), ("x", 1)]),
-                (False, {"a": 5}),
-            ),
-            (
-                "duplicate_is_atomic",
-                "fail_to_pass",
-                ({"a": 3}, [("a", 2), ("a", 2)]),
-                (False, {"a": 3}),
-            ),
-            ("zero_quantity", "fail_to_pass", ({"a": 3}, [("a", 0)]), (False, {"a": 3})),
-            ("bool_quantity", "fail_to_pass", ({"a": 3}, [("a", True)]), (False, {"a": 3})),
-            ("invalid_stock_value", "fail_to_pass", ({"a": -1}, []), (False, {"a": -1})),
-            ("invalid_order_shape", "fail_to_pass", ({"a": 3}, [("a", 1, 2)]), (False, {"a": 3})),
-            ("orders_must_be_list", "fail_to_pass", ({"a": 3}, (("a", 1),)), (False, {"a": 3})),
-            ("order_must_be_tuple", "fail_to_pass", ({"a": 3}, [["a", 1]]), (False, {"a": 3})),
-            ("invalid_stock_key", "fail_to_pass", ({"": 3}, []), (False, {"": 3})),
-        ]
-    return [
-        ("unsorted_overlap", "pass_to_pass", ([(5, 8), (1, 3), (2, 6)], 0), [(1, 8)]),
-        ("separate_windows", "pass_to_pass", ([(1, 2), (5, 7)], 0), [(1, 2), (5, 7)]),
-        ("touching_windows", "pass_to_pass", ([(1, 3), (3, 4)], 0), [(1, 4)]),
-        ("gap_merge", "fail_to_pass", ([(1, 2), (4, 6)], 2), [(1, 6)]),
-        ("gap_boundary_separate", "fail_to_pass", ([(1, 2), (5, 6)], 2), [(1, 2), (5, 6)]),
-        ("invalid_reverse", "fail_to_pass", ([(3, 2)], 0), []),
-        ("invalid_bool_endpoint", "fail_to_pass", ([(True, 2)], 0), []),
-        ("invalid_gap", "fail_to_pass", ([(1, 2)], -1), []),
-        ("bool_gap", "fail_to_pass", ([(1, 2)], True), []),
-        ("invalid_shape", "fail_to_pass", ([(1, 2, 3)], 0), []),
-        ("windows_must_be_list", "fail_to_pass", (((1, 2),), 0), []),
-    ]
+    """按任务读取独立隐藏用例，防止评分实现继续膨胀。"""
+    return HIDDEN_CASES[task_id]
 
 
 def behavior_checks(task_id: str, source: str) -> list[dict]:
@@ -272,13 +230,15 @@ def behavior_checks(task_id: str, source: str) -> list[dict]:
         ]
     results = [check("bounded_candidate", True, "L1_boundary")]
     for name, category, arguments, expected in cases:
-        copied = deepcopy(arguments)
+        # 每次执行都从隐藏用例复制独立输入；缺陷候选的原地修改不能污染后续 trial。
+        run_arguments = deepcopy(arguments)
+        copied = deepcopy(run_arguments)
         try:
-            actual = function(*arguments)
-            passed = actual == expected and arguments == copied
+            actual = function(*run_arguments)
+            passed = actual == expected and run_arguments == copied
             detail = (
                 f"{category}: expected={expected!r}, actual={actual!r}, "
-                f"input_unchanged={arguments == copied}"
+                f"input_unchanged={run_arguments == copied}"
             )
         except Exception as exc:
             passed = False

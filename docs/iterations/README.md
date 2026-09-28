@@ -38,6 +38,7 @@ ITERATION_<三位序号>_<主题>.md
 | [Iteration 014](ITERATION_014_LAYERED_EVAL_AND_FAILURE_TRACE.md) | 分层量化与失败追踪 | 待用户审核 | 分层 gate、覆盖率、模型对照、失败 Trace 行号、历史复核、486 项测试 |
 | [Iteration 015](ITERATION_015_AGENT_MODE_COMPARISON.md) | 三种 Agent 架构同题对照 | 待用户审核 | 只读子 Agent、唯一写者、12 次同题实测、Token 缺口/耗时/冲突/越权指标 |
 | [Iteration 016](ITERATION_016_KIMI_PREMIUM_REVIEW.md) | DeepSeek 默认链路与 Kimi 高级审查 | 待用户审核 | 独立付费连接、确定性风险升级、536 项测试、DeepSeek/Kimi 单请求实测 |
+| [Iteration 017](ITERATION_017_CURRENT_MODEL_BASELINE.md) | 十任务当前模型端到端基线 | 已批准待提交 | 90 个真实 trial、pass@3/pass³、P95、分模型 Token、失败 Trace |
 
 Iteration 001–005 保留当时的路径与验证命令，不回写历史记录。当前目录和启动方式以
 [Iteration 006](ITERATION_006_DIRECT_SOURCE_LAYOUT.md)、[架构](../ARCHITECTURE.md) 和

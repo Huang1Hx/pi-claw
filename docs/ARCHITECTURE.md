@@ -37,7 +37,7 @@ core.schemas、core.events、core.usage 是低层数据协议。providers 和 se
 | persistence | journal.py、checkpoint.py、locking.py、storage.py | 原始日志、活动窗口、并发控制、耐久写入 |
 | persistence | trace.py、usage.py | 审计轨迹与按 run_id 幂等的用量账本 |
 | evaluation | runner.py、cases.json、routing.py | 独立工作区离线验收、复杂度分流与调用分布对照 |
-| evaluation | compare_modes.py、mode_tasks.py、mode_grading.py | 三种 Agent 架构同题、重复真实模型评测 |
+| evaluation | compare_modes.py、mode_tasks.py、mode_task_catalog.py、mode_cases.py、mode_grading.py | 十任务、三种 Agent 架构、重复真实模型评测与分模型核算 |
 | interfaces | cli.py、repl.py | 参数解析、终端显示和会话交互 |
 | interfaces | terminal_input.py、rendering.py | 注册表驱动斜杠菜单、TTY 降级、流式和最终显示去重 |
 

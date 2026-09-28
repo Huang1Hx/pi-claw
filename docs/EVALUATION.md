@@ -4,6 +4,24 @@
 并统计严格成功率、重复成功率、端到端耗时、完整 Token、冲突、越权和返工。任务、模型分配、
 公式、复现命令及原始产物结构见 [三种 Agent 架构对照评测](AGENT_MODE_COMPARISON.md)。
 
+三种架构的当前入口为：
+
+```bash
+uv run --frozen python -m evaluation.compare_modes \
+  --live --config pi-claw.toml --trials 3 --workers 2 \
+  --deadline 420 --max-steps 24 --output runs/agent-modes-current
+```
+
+该 suite 固定 10 个任务、每任务 3 次、3 种模式，共 90 个 trial。当前 grader 2.1 先校准参考/缺陷
+实现，再统计严格成功率、pass@3、pass³、P50/P95、终态、失败层、越权/冲突/返工，以及包含
+主 Agent、子 Agent、工作流阶段和必要 Kimi 审查的分模型 Token。报告同时写逐 trial
+`report.json` 和可提交的字段白名单 `public-summary.json`；usage 缺口绝不按零计算。
+
+grader 2.0 的当前历史基线为严格成功 `33/90`，但含 22 个 Provider 错误/用量缺口 trial，且
+配置覆盖任务存在已记录的文字歧义；它是端到端可靠性结果，
+不能当作剔除接口故障后的模型能力排名。完整口径见
+[Iteration 017](iterations/ITERATION_017_CURRENT_MODEL_BASELINE.md)。
+
 受限真实能力评测入口为 `uv run --frozen python -m evaluation.live --output <新目录>`。
 默认仅校准评分器；显式增加 `--live --config pi-claw.toml --route primary` 才调用真实模型。
 默认每任务重复 2 次、并发 2、每次最多 240 秒；只批准评测 auth.py 修改和指定公开测试命令。
