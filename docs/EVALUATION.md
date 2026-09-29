@@ -9,19 +9,30 @@
 ```bash
 uv run --frozen python -m evaluation.compare_modes \
   --live --config pi-claw.toml --trials 3 --workers 2 \
-  --deadline 420 --max-steps 24 --output runs/agent-modes-current
+  --deadline 420 --max-steps 24 \
+  --max-attempts 3 --retry-base-delay 2 --max-retry-delay 10 \
+  --output runs/agent-modes-current
 ```
 
-该 suite 固定 10 个任务、每任务 3 次、3 种模式，共 90 个 trial。当前 grader 2.1 先校准参考/缺陷
+该 suite 固定 10 个任务、每任务 3 次、3 种模式，共 90 个 trial。当前 grader 2.2 先校准参考/缺陷
 实现，再统计严格成功率、pass@3、pass³、P50/P95、终态、失败层、越权/冲突/返工，以及包含
 主 Agent、子 Agent、工作流阶段和必要 Kimi 审查的分模型 Token。报告同时写逐 trial
 `report.json` 和可提交的字段白名单 `public-summary.json`；usage 缺口绝不按零计算。
+
+三模式评测对学校 DeepSeek 的暂时性 429/5xx、连接失败和读取超时最多尝试 3 次，默认等待 2 秒、
+4 秒，并把尝试上限和等待参数写入快照与报告。鉴权/请求错误不重试，已经输出流片段后不重放，
+Kimi 仍由 profile 收紧为单次尝试。420 秒是整个 trial 的墙钟上限，启用重试不会延长它。
 
 grader 2.0 的原始历史基线为严格成功 `33/90`，含 22 个 Provider 错误；原始证据见
 [Iteration 017](iterations/ITERATION_017_CURRENT_MODEL_BASELINE.md)。使用 grader 2.1 只续跑这些
 Provider 失败后，最终结果为 `41/90`，0 个 Provider 错误、1 个 deadline；恢复方法、最终指标和
 包含全部失败尝试的实际 Token 成本见
 [Iteration 018](iterations/ITERATION_018_PROVIDER_RECOVERY.md)。
+
+grader 2.2 将依赖排序的有界实现约束写入任务规格，允许 `for` 内 `break`/`continue`、继续禁止
+`while`，并在审批拒绝中返回具体 AST 节点。只重跑 `dependency_order` 后严格成功为 `6/9`，且
+9 个候选均通过语法边界；该定向结果不回写 grader 2.1 的完整 90-trial 历史基线。详见
+[Iteration 019](iterations/ITERATION_019_DEPENDENCY_ORDER_BOUNDARY.md)。
 
 从已有报告继续执行传输失败项：
 

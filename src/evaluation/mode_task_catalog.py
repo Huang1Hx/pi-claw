@@ -324,6 +324,8 @@ if __name__ == "__main__":
 - 返回满足依赖顺序的节点列表；同时可选的节点按字典序选择，结果必须确定。
 - 循环、自依赖、缺失依赖或任一无效输入均返回空列表。
 - 空字典合法并返回空列表，不得修改输入。
+- 为保证评分执行有界，禁止 `while`、递归、import、集合和各种推导式；请使用最多按节点数
+  执行的有界 `for` 循环。`for` 内允许使用 `break` 和 `continue`。
 """,
         "initial": '''def dependency_order(graph):
     """Return nodes in a deterministic order."""

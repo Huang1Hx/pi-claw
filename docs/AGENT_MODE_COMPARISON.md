@@ -56,12 +56,14 @@ uv run python -m unittest -q test_target.py
 - 每个 trial 都复制全新的工作区；模式之间不共享模型上下文、最终代码或测试结果。
 - 外部评分器先用参考实现和错误初始实现校准，再允许真实模型运行。
 - 候选代码先经过有界 AST 检查：目标函数签名必须精确，可包含最多三个无递归纯辅助函数；
-  禁止导入、顶层执行和不受控调用。这仍不是通用 OS 沙箱。
+  禁止导入、顶层执行、不受控调用和 `while`；允许有明确上界的 `for` 以及其中的
+  `break`/`continue`。拒绝结果会返回具体 AST 节点。这仍不是通用 OS 沙箱。
 - 严格成功要求：Agent 终态为 `completed`、Trace 完整、主 Agent 真实跑过固定公开测试且成功、
   固定夹具未被修改、无额外文件、最终函数通过全部隐藏用例、所有输入保持不变。
 - 模型的“已经完成”文字和审查者的“approve”都不能替代文件与测试证据。
-- 各模式采用相同 `max_steps`、trial 墙钟期限和底层 LLM 单请求重试次数；顺序工作流自己的有界
-  规划/审查/返工是被比较架构的一部分。
+- 各模式采用相同 `max_steps`、420 秒 trial 墙钟期限和普通模型单请求重试协议；每个 DeepSeek
+  逻辑请求最多尝试 3 次，暂时性失败按 2 秒、4 秒指数退避，单次等待不超过 10 秒。Kimi profile
+  继续用 `max_attempts=1` 覆盖全局值。顺序工作流自己的有界规划/审查/返工是被比较架构的一部分。
 
 ## 指标定义
 
@@ -101,8 +103,13 @@ uv run --frozen python -m evaluation.compare_modes \
 uv run --frozen python -m evaluation.compare_modes \
   --live --config pi-claw.toml \
   --trials 3 --workers 2 --deadline 420 --max-steps 24 \
+  --max-attempts 3 --retry-base-delay 2 --max-retry-delay 10 \
   --output runs/agent-modes-current
 ```
+
+`deadline=420` 是整个 trial 的外层资源上限，不是单次 API 超时；模型 profile 当前为 120 秒。
+三次完整读取超时加默认退避约为 366 秒，因此连续慢失败仍可能触发外层 deadline。该限制用于
+阻止失控任务，不是“多阶段工作流一定有足够时间完成”的保证。
 
 输出目录必须不存在。根目录包含 `manifest.json`、`grader-calibration.json`、`report.json` 和仅含
 白名单聚合字段的 `public-summary.json`；
@@ -129,6 +136,18 @@ uv run --frozen python -m evaluation.compare_modes \
 最终能力表会用恢复结果替换同身份 Provider 失败，但工程成本不能删除旧尝试：从原始批次到四轮
 恢复实际执行 119 个 trial-run，累计已知 Token `5,398,767`，其中 DeepSeek `4,799,095`、Kimi
 `198,867`。因此架构能力指标和获取这份指标的实际成本必须分开阅读。
+
+## grader 2.2 的 `dependency_order` 定向复测
+
+旧 grader 2.1 的完整基线中，该任务 `0/9`，九份候选都使用任务规格未声明、评分器却禁止的
+`while`。2.2 公开有界实现约束，允许 `for` 内 `break`/`continue`，仍禁止 `while`，并让审批失败
+返回具体违规节点。随后只重跑 `dependency_order`，不回写上面的 90-trial 历史基线。
+
+最终严格成功为 `6/9`：单 Agent `2/3`、工作流 `1/3`、主从 `3/3`；9 个候选的语法边界检查
+全部通过。另有两个 DeepSeek `provider_error`，完成执行的 7 条中 6 条成功。最终选定结果包含
+437,337 个已知 Token；加上两次有限补跑，实际获取成本为 11 个 trial-run、440,265 个已知
+Token。完整过程与边界见
+[Iteration 019](iterations/ITERATION_019_DEPENDENCY_ORDER_BOUNDARY.md)。
 
 ## 历史 12-trial 小样本（不与当前基线混算）
 

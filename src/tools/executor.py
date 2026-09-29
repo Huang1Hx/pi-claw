@@ -18,7 +18,7 @@ from tools.registry import ToolRegistry
 from tools.shell import CommandTools
 from tools.write import WriteTools
 
-ApprovalCallback = Callable[..., bool]
+ApprovalCallback = Callable[..., bool | str]
 
 
 class ToolExecutor(
@@ -98,13 +98,13 @@ class ToolExecutor(
         # 用户确认可能持续较长时间，先记录文件版本，再检查批准时是否仍是同一份内容。
         prepared_fingerprint = self._write_fingerprint(call)
         if decision.action is PolicyAction.ASK and not approved:
-            approved = self._request_approval(call, decision, self.preview(call))
+            approved, rejection_reason = self._request_approval(call, decision, self.preview(call))
             if not approved:
                 return ToolResult(
                     call.id,
                     call.name,
                     False,
-                    error=f"未获批准：{decision.reason}",
+                    error=f"未获批准：{rejection_reason or decision.reason}",
                     metadata=policy_metadata,
                 )
             if prepared_fingerprint != self._write_fingerprint(call):
@@ -164,11 +164,11 @@ class ToolExecutor(
         call: ToolCall,
         decision: PolicyDecision,
         preview: str | None,
-    ) -> bool:
-        """兼容接收一至三个参数的审批回调；仅字面值 True 表示同意，无回调默认拒绝。"""
+    ) -> tuple[bool, str | None]:
+        """兼容旧布尔回调；字符串表示拒绝并向 Agent 返回可操作原因。"""
         callback = self.approval_callback
         if callback is None:
-            return False
+            return False, None
         try:
             parameters = inspect.signature(callback).parameters
             if len(parameters) >= 3:
@@ -177,9 +177,13 @@ class ToolExecutor(
                 result = callback(call, decision)
             else:
                 result = callback(call)
-            return result is True
+            if result is True:
+                return True, None
+            if isinstance(result, str) and result.strip():
+                return False, result.strip()[:1000]
+            return False, None
         except (TypeError, ValueError):
-            return False
+            return False, None
 
 
 def create_default_registry(executor: ToolExecutor) -> ToolRegistry:

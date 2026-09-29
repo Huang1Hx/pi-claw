@@ -9,7 +9,7 @@ from pathlib import Path
 from evaluation.mode_cases import HIDDEN_CASES
 from evaluation.mode_tasks import TASKS
 
-GRADER_VERSION = "agent-modes-2.1"
+GRADER_VERSION = "agent-modes-2.2"
 ALLOWED_CALLS = {"isinstance", "len", "sorted", "dict", "list", "tuple", "max", "min"}
 ALLOWED_METHODS = {"copy", "get", "items", "append", "sort"}
 EXPECTED_SIGNATURES = {
@@ -35,6 +35,8 @@ def safe_functions(source: str, expected_name: str) -> dict:
         ast.arg,
         ast.If,
         ast.For,
+        ast.Break,
+        ast.Continue,
         ast.Return,
         ast.Assign,
         ast.AugAssign,
@@ -72,8 +74,11 @@ def safe_functions(source: str, expected_name: str) -> dict:
         ast.Lambda,
         ast.keyword,
     }
-    if len(nodes) > 500 or any(type(node) not in allowed for node in nodes):
-        raise ValueError("超出受限纯函数语法")
+    if len(nodes) > 500:
+        raise ValueError(f"语法节点过多：{len(nodes)} > 500")
+    unsupported = sorted({type(node).__name__ for node in nodes if type(node) not in allowed})
+    if unsupported:
+        raise ValueError("不允许的语法节点：" + ", ".join(unsupported))
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
     nested_functions = [node for node in nodes if isinstance(node, ast.FunctionDef)]
     function_names = {function.name for function in functions}

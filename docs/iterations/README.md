@@ -39,7 +39,9 @@ ITERATION_<三位序号>_<主题>.md
 | [Iteration 015](ITERATION_015_AGENT_MODE_COMPARISON.md) | 三种 Agent 架构同题对照 | 待用户审核 | 只读子 Agent、唯一写者、12 次同题实测、Token 缺口/耗时/冲突/越权指标 |
 | [Iteration 016](ITERATION_016_KIMI_PREMIUM_REVIEW.md) | DeepSeek 默认链路与 Kimi 高级审查 | 待用户审核 | 独立付费连接、确定性风险升级、536 项测试、DeepSeek/Kimi 单请求实测 |
 | [Iteration 017](ITERATION_017_CURRENT_MODEL_BASELINE.md) | 十任务当前模型端到端基线 | 已合并 main | 90 个真实 trial、pass@3/pass³、P95、分模型 Token、失败 Trace |
-| [Iteration 018](ITERATION_018_PROVIDER_RECOVERY.md) | Provider 失败续跑与完整结果 | 待用户审核 | 身份保持续跑、41/90、0 Provider 错误、累计获取成本 |
+| [Iteration 018](ITERATION_018_PROVIDER_RECOVERY.md) | Provider 失败续跑与完整结果 | 已推送远程 | 身份保持续跑、41/90、0 Provider 错误、累计获取成本 |
+| [Iteration 019](ITERATION_019_DEPENDENCY_ORDER_BOUNDARY.md) | 依赖排序语法边界与定向复测 | 已批准待提交 | grader 2.2、具体 AST 反馈、6/9、边界失败可追踪 |
+| [Iteration 020](ITERATION_020_EVAL_TRANSPORT_RETRY.md) | 评测传输有限重试 | 已批准待提交 | DeepSeek 三次尝试、2/4 秒退避、Kimi 单次、420 秒总上限 |
 
 Iteration 001–005 保留当时的路径与验证命令，不回写历史记录。当前目录和启动方式以
 [Iteration 006](ITERATION_006_DIRECT_SOURCE_LAYOUT.md)、[架构](../ARCHITECTURE.md) 和

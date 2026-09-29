@@ -3,6 +3,7 @@
 import json
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,12 +15,15 @@ from evaluation.compare_modes import (
     build_trial_report,
     combine_resumed_reports,
     reliability,
+    run_trial,
     select_resume_jobs,
     summarize,
 )
-from evaluation.mode_grading import calibrate, safe_functions
+from evaluation.mode_grading import GRADER_VERSION, calibrate, safe_functions
 from evaluation.mode_tasks import TASKS
 from persistence.trace import TraceWriter
+from security.policy import WorkspacePolicy
+from tools import ToolExecutor
 
 STAGE2_TASK_IDS = {
     "balance_transfer",
@@ -189,6 +193,64 @@ def test_bounded_candidate_allows_safe_sort_key_but_not_reverse_keyword(tmp_path
         safe_functions(
             source.replace("key=lambda item: (item[0], item[1])", "reverse=True"), "merge_windows"
         )
+
+
+def test_bounded_candidate_reports_while_and_allows_bounded_loop_control():
+    """拒绝无法静态证明终止的 while，并允许有界 for 内的 break/continue。"""
+    with pytest.raises(ValueError, match="不允许的语法节点：While"):
+        safe_functions(
+            "def dependency_order(graph):\n"
+            "    while len(graph) > 0:\n"
+            "        return []\n"
+            "    return []\n",
+            "dependency_order",
+        )
+    namespace = safe_functions(
+        "def dependency_order(graph):\n"
+        "    result = []\n"
+        "    for node in graph:\n"
+        "        if not node:\n"
+        "            continue\n"
+        "        result.append(node)\n"
+        "        break\n"
+        "    return result\n",
+        "dependency_order",
+    )
+    assert namespace["dependency_order"]({"b": [], "a": []}) == ["b"]
+
+
+def test_dependency_task_publishes_bounded_syntax_contract():
+    """模型必须能从 SPEC 得知 while 禁止及有界 for 的替代方案。"""
+    spec = TASKS["dependency_order"].spec
+    assert "禁止 `while`" in spec
+    assert "有界 `for`" in spec
+
+
+def test_dependency_test_approval_returns_specific_syntax_node(tmp_path):
+    """公开测试被前置门槛拒绝时，Agent 应收到可修复的 AST 节点而非泛化未批准。"""
+    task = TASKS["dependency_order"]
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for name, content in task.files.items():
+        (workspace / name).write_text(content)
+    (workspace / "solution.py").write_text(
+        "def dependency_order(graph):\n"
+        "    while len(graph) > 0:\n"
+        "        return []\n"
+        "    return []\n"
+    )
+    executor = ToolExecutor(
+        WorkspacePolicy(
+            workspace,
+            allow_write=True,
+            allow_commands=True,
+            command_profile="coding",
+        ),
+        approval_callback=approval_for("dependency_order", workspace),
+    )
+    result = executor.execute(ToolCall("verify", "run_command", {"argv": VERIFY_ARGV}))
+    assert result.ok is False
+    assert "不允许的语法节点：While" in result.error
 
 
 @pytest.mark.parametrize("mode", ["single", "workflow", "team"])
@@ -423,6 +485,53 @@ def test_resume_jobs_select_only_provider_errors_and_preserve_trial_identity():
     assert select_resume_jobs(report) == [("single", "worker_assignment", 2)]
 
 
+def test_trial_worker_receives_bounded_retry_settings(tmp_path, monkeypatch):
+    """防止父进程报告启用重试，实际 worker 却继续按单次请求运行。"""
+    commands = []
+
+    class CompletedProcess:
+        returncode = 0
+
+        def __init__(self, command, **_kwargs):
+            commands.append(command)
+            folder = tmp_path / "single" / "inventory_reservation-1"
+            (folder / "run-result.json").write_text(
+                json.dumps(
+                    {
+                        "mode": "single",
+                        "leader": {"status": "provider_error"},
+                        "subagents": [],
+                        "usage": None,
+                        "duration_seconds": 0.1,
+                    }
+                )
+            )
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", CompletedProcess)
+    args = SimpleNamespace(
+        output=tmp_path,
+        config=tmp_path / "pi-claw.toml",
+        max_steps=24,
+        deadline=420,
+        max_attempts=3,
+        retry_base_delay=2.0,
+        max_retry_delay=10.0,
+    )
+
+    run_trial("single", "inventory_reservation", 1, args)
+
+    command = commands[0]
+    assert command[command.index("--max-attempts") + 1] == "3"
+    assert command[command.index("--retry-base-delay") + 1] == "2.0"
+    assert command[command.index("--max-retry-delay") + 1] == "10.0"
+
+
 @pytest.mark.parametrize(
     "row",
     [
@@ -471,7 +580,7 @@ def test_resume_replaces_provider_error_and_regrades_retained_trial(tmp_path):
         (1, "completed"),
         (2, "completed"),
     ]
-    assert all(row["grader_version"] == "agent-modes-2.1" for row in combined)
+    assert all(row["grader_version"] == GRADER_VERSION for row in combined)
 
 
 def test_deadline_recovers_known_partial_usage_from_all_traces(tmp_path):

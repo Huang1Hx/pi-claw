@@ -68,6 +68,23 @@ def test_write_requires_approval(workspace: Path) -> None:
     assert (workspace / "alpha.txt").read_text(encoding="utf-8").startswith("alpha")
 
 
+def test_approval_callback_can_return_specific_rejection_reason(workspace: Path) -> None:
+    """宿主自动审批器可向 Agent 返回可操作原因，布尔回调继续保持兼容。"""
+    executor = ToolExecutor(
+        WorkspacePolicy(workspace, allow_write=True),
+        approval_callback=lambda *_: "候选代码包含不允许的语法节点：While",
+    )
+    result = execute(
+        executor,
+        "write_or_replace",
+        path="alpha.txt",
+        old="alpha",
+        new="changed",
+    )
+    assert result.ok is False
+    assert result.error == "未获批准：候选代码包含不允许的语法节点：While"
+
+
 def test_exact_replace_after_explicit_approval(workspace: Path) -> None:
     seen: list[str] = []
 

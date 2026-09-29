@@ -153,6 +153,32 @@ def test_missing_profile_key_does_not_fallback_or_contact_service(workspace, mon
     assert "wrong-key" not in result.error
 
 
+def test_router_forwards_retry_budget_and_delays_to_http_transport(monkeypatch):
+    """防止路由层只接收重试配置，却仍让底层传输使用旧默认值。"""
+    captured = {}
+
+    class CapturingProvider:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def events(self, messages, tools, *, stream):
+            yield ProviderEvent("message_complete", reply=reply())
+
+    monkeypatch.setattr("routing.router.OpenAICompatibleProvider", CapturingProvider)
+    router = RoutedProvider(
+        settings(),
+        mode="primary",
+        max_attempts=3,
+        retry_base_delay=2.0,
+        max_retry_delay=10.0,
+    )
+
+    assert router.complete([{"role": "user", "content": "go"}]).final_text == "done"
+    assert captured["max_attempts"] == 3
+    assert captured["retry_base_delay"] == 2.0
+    assert captured["max_retry_delay"] == 10.0
+
+
 def test_streaming_routing_filters_tools_and_enforces_policy(workspace):
     observed = []
 

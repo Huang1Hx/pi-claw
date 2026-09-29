@@ -24,6 +24,8 @@ class RoutedProvider:
         *,
         mode: str = "auto",
         max_attempts: int = 3,
+        retry_base_delay: float = 0.5,
+        max_retry_delay: float = 10.0,
         factory: Callable[[ModelProfile], Any] | None = None,
     ) -> None:
         """校验固定/自动模式与模型配置，注入测试 Provider 工厂；此处不发起请求。"""
@@ -33,6 +35,14 @@ class RoutedProvider:
             raise ValueError("路由需要 --config 指定模型配置")
         if type(max_attempts) is not int or not 1 <= max_attempts <= 10:
             raise ValueError("max_attempts 必须是 1–10 的整数")
+        if (
+            isinstance(retry_base_delay, bool)
+            or not isinstance(retry_base_delay, (int, float))
+            or isinstance(max_retry_delay, bool)
+            or not isinstance(max_retry_delay, (int, float))
+            or not 0 <= retry_base_delay <= max_retry_delay
+        ):
+            raise ValueError("重试等待必须满足 0 <= retry_base_delay <= max_retry_delay")
         if not isinstance(
             settings.routing.intent_strategy, str
         ) or settings.routing.intent_strategy not in {"rules", "model"}:
@@ -50,6 +60,8 @@ class RoutedProvider:
                 raise ValueError("工作流角色引用的模型 profile 不存在")
         self.settings, self.mode = settings, mode
         self.factory, self.max_attempts = factory, max_attempts
+        self.retry_base_delay = float(retry_base_delay)
+        self.max_retry_delay = float(max_retry_delay)
         self.begin_run("")
 
     def begin_run(self, task: str) -> None:
@@ -194,6 +206,8 @@ class RoutedProvider:
                     base_url=profile.base_url,
                     model=profile.model,
                     max_attempts=profile.max_attempts or self.max_attempts,
+                    retry_base_delay=self.retry_base_delay,
+                    max_retry_delay=self.max_retry_delay,
                     max_output_tokens=min(128, profile.max_output_tokens or rules.max_output_tokens)
                     if is_classification
                     else profile.max_output_tokens or rules.max_output_tokens,

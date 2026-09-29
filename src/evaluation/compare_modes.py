@@ -50,6 +50,7 @@ PUBLIC_SUMMARY_FIELDS = (
     "workers",
     "deadline_seconds",
     "max_steps",
+    "transport",
     "models",
     "premium_model",
     "accounting",
@@ -148,16 +149,24 @@ def approval_for(task_id: str, workspace: Path):
             if (workspace / "test_target.py").read_text() != task.public_test:
                 return False
             safe_functions((workspace / "solution.py").read_text(), task.function_name)
-        except (OSError, SyntaxError, TypeError, ValueError):
-            return False
+        except (SyntaxError, TypeError, ValueError) as error:
+            return f"候选代码未通过受限语法检查：{error}"
+        except OSError as error:
+            return f"评测文件读取失败：{error}"
         return True
 
     return approve
 
 
-def _provider(settings, profile: str) -> RoutedProvider:
+def _provider(settings, profile: str, args) -> RoutedProvider:
     """每个 Agent 使用独立 Provider 状态；相同连接仅共享配置值。"""
-    return RoutedProvider(settings, mode=profile, max_attempts=1)
+    return RoutedProvider(
+        settings,
+        mode=profile,
+        max_attempts=args.max_attempts,
+        retry_base_delay=args.retry_base_delay,
+        max_retry_delay=args.max_retry_delay,
+    )
 
 
 def _executor(workspace: Path, task_id: str, *, writable: bool) -> ToolExecutor:
@@ -227,7 +236,9 @@ def worker(args) -> None:
                 for name in profile_map[args.mode]
             ],
             "max_steps": args.max_steps,
-            "max_attempts_per_request": 1,
+            "max_attempts_per_request": args.max_attempts,
+            "retry_base_delay_seconds": args.retry_base_delay,
+            "max_retry_delay_seconds": args.max_retry_delay,
             "command_timeout_seconds": 10,
             "workflow": {
                 "max_planning_requests": settings.workflow.max_planning_requests,
@@ -242,7 +253,7 @@ def worker(args) -> None:
     writable = _executor(workspace, args.worker, writable=True)
     if args.mode == "single":
         result = _agent(
-            _provider(settings, settings.workflow.coder),
+            _provider(settings, settings.workflow.coder, args),
             writable,
             folder / "trace-leader.jsonl",
             workspace,
@@ -258,7 +269,7 @@ def worker(args) -> None:
         }
     elif args.mode == "workflow":
         result = _agent(
-            RoutedProvider(workflow_settings, mode="auto", max_attempts=1),
+            _provider(workflow_settings, "auto", args),
             writable,
             folder / "trace-leader.jsonl",
             workspace,
@@ -274,21 +285,21 @@ def worker(args) -> None:
         }
     else:
         leader = _agent(
-            _provider(settings, settings.workflow.coder),
+            _provider(settings, settings.workflow.coder, args),
             writable,
             folder / "trace-leader.jsonl",
             workspace,
             steps=args.max_steps,
         )
         implementation = _agent(
-            _provider(settings, settings.workflow.planner),
+            _provider(settings, settings.workflow.planner, args),
             _executor(workspace, args.worker, writable=False),
             folder / "trace-subagent-implementation.jsonl",
             workspace,
             steps=6,
         )
         risks = _agent(
-            _provider(settings, settings.workflow.reviewer),
+            _provider(settings, settings.workflow.reviewer, args),
             _executor(workspace, args.worker, writable=False),
             folder / "trace-subagent-risks.jsonl",
             workspace,
@@ -711,6 +722,12 @@ def run_trial(mode: str, task_id: str, number: int, args) -> dict:
         str(args.config.resolve()),
         "--max-steps",
         str(args.max_steps),
+        "--max-attempts",
+        str(args.max_attempts),
+        "--retry-base-delay",
+        str(args.retry_base_delay),
+        "--max-retry-delay",
+        str(args.max_retry_delay),
     ]
     started = time.monotonic()
     timed_out = False
@@ -790,10 +807,32 @@ def main() -> int:
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--deadline", type=int, default=420)
     parser.add_argument("--max-steps", type=int, default=24)
+    parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=3,
+        help="每个普通模型逻辑请求的最大 HTTP 尝试次数；profile 可单独收紧",
+    )
+    parser.add_argument(
+        "--retry-base-delay",
+        type=float,
+        default=2.0,
+        help="暂时性失败后的指数退避基数秒数",
+    )
+    parser.add_argument(
+        "--max-retry-delay",
+        type=float,
+        default=10.0,
+        help="单次重试等待上限秒数，也用于限制 Retry-After",
+    )
     parser.add_argument("--task", choices=tuple(TASKS), action="append")
     parser.add_argument("--mode", choices=MODES, action="append")
     parser.add_argument("--worker", choices=tuple(TASKS), help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if not 1 <= args.max_attempts <= 10:
+        parser.error("max-attempts 为 1–10")
+    if not 0 <= args.retry_base_delay <= args.max_retry_delay <= 60:
+        parser.error("重试等待须满足 0 <= retry-base-delay <= max-retry-delay <= 60")
     if args.worker:
         args.mode = args.mode[0]
         worker(args)
@@ -869,6 +908,11 @@ def main() -> int:
         "workers": args.workers,
         "deadline_seconds": args.deadline,
         "max_steps": args.max_steps,
+        "transport": {
+            "max_attempts_per_request": args.max_attempts,
+            "retry_base_delay_seconds": args.retry_base_delay,
+            "max_retry_delay_seconds": args.max_retry_delay,
+        },
         "models": models,
         "premium_model": premium_model,
         "accounting": "Token 统计包含主 Agent、全部子 Agent、工作流阶段与返工；不计算货币费用",
@@ -893,7 +937,8 @@ def main() -> int:
     print(
         f"[{'续跑' if source_report else '批次'}] {len(jobs)} trials；modes={modes}；"
         f"tasks={tasks}；并发={args.workers}；"
-        f"每 trial 期限={args.deadline}s。",
+        f"每 trial 期限={args.deadline}s；每请求最多 {args.max_attempts} 次尝试，"
+        f"退避基数={args.retry_base_delay}s。",
         flush=True,
     )
     pool = ThreadPoolExecutor(max_workers=args.workers)
