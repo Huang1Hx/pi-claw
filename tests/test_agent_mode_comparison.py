@@ -3,6 +3,7 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -251,6 +252,47 @@ def test_dependency_test_approval_returns_specific_syntax_node(tmp_path):
     result = executor.execute(ToolCall("verify", "run_command", {"argv": VERIFY_ARGV}))
     assert result.ok is False
     assert "不允许的语法节点：While" in result.error
+
+
+def test_approval_returns_actionable_fixed_command_and_workspace_errors(tmp_path):
+    """Trace 反馈必须告诉模型精确验证命令和 cwd，避免泛化拒绝造成重复调用。"""
+    task = TASKS["dependency_order"]
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for name, content in task.files.items():
+        (workspace / name).write_text(content)
+    (workspace / "subdir").mkdir()
+    executor = ToolExecutor(
+        WorkspacePolicy(
+            workspace,
+            allow_write=True,
+            allow_commands=True,
+            command_profile="coding",
+        ),
+        approval_callback=approval_for("dependency_order", workspace),
+    )
+
+    wrong_command = executor.execute(
+        ToolCall(
+            "wrong-command",
+            "run_command",
+            {"argv": ["uv", "run", "python", "-m", "unittest", "test_target.py"]},
+        )
+    )
+    wrong_cwd = executor.execute(
+        ToolCall("wrong-cwd", "run_command", {"argv": VERIFY_ARGV, "cwd": "subdir"})
+    )
+    wrong_file = executor.execute(
+        ToolCall("wrong-file", "write_or_replace", {"path": "test_target.py", "content": "x"})
+    )
+
+    assert wrong_command.ok is False
+    assert "必须精确使用" in wrong_command.error
+    assert "uv" in wrong_command.error
+    assert wrong_cwd.ok is False
+    assert "工作区根目录" in wrong_cwd.error
+    assert wrong_file.ok is False
+    assert "只能修改 solution.py" in wrong_file.error
 
 
 @pytest.mark.parametrize("mode", ["single", "workflow", "team"])
@@ -530,6 +572,66 @@ def test_trial_worker_receives_bounded_retry_settings(tmp_path, monkeypatch):
     assert command[command.index("--max-attempts") + 1] == "3"
     assert command[command.index("--retry-base-delay") + 1] == "2.0"
     assert command[command.index("--max-retry-delay") + 1] == "10.0"
+
+
+def test_trial_worker_receives_repair_seed_prompt_and_metadata(tmp_path, monkeypatch):
+    """修复 runner 准备的候选、提示和父血缘必须真实进入 worker trial 目录。"""
+    commands = []
+    folder = tmp_path / "round-1" / "single" / "dependency_order-1"
+
+    class CompletedProcess:
+        returncode = 0
+
+        def __init__(self, command, **_kwargs):
+            commands.append(command)
+            (folder / "run-result.json").write_text(
+                json.dumps(
+                    {
+                        "mode": "single",
+                        "leader": {"status": "provider_error"},
+                        "subagents": [],
+                        "usage": None,
+                        "duration_seconds": 0.1,
+                    }
+                )
+            )
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", CompletedProcess)
+    args = SimpleNamespace(
+        output=tmp_path,
+        config=tmp_path / "pi-claw.toml",
+        max_steps=24,
+        deadline=420,
+        max_attempts=3,
+        retry_base_delay=2.0,
+        max_retry_delay=10.0,
+    )
+    seed = "def dependency_order(graph):\n    return []\n"
+
+    run_trial(
+        "single",
+        "dependency_order",
+        1,
+        args,
+        folder=folder,
+        seed_solution=seed,
+        prompt="repair prompt",
+        trial_metadata={"round": 1, "parent_solution_sha256": "abc"},
+    )
+
+    assert (folder / "workspace" / "solution.py").read_text() == seed
+    task = json.loads((folder / "task.json").read_text())
+    assert task["prompt"] == "repair prompt"
+    assert task["repair"] == {"round": 1, "parent_solution_sha256": "abc"}
+    command = commands[0]
+    prompt_path = Path(command[command.index("--worker-prompt-file") + 1])
+    assert prompt_path.read_text() == "repair prompt"
 
 
 @pytest.mark.parametrize(

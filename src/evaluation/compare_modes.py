@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import signal
@@ -27,6 +28,15 @@ from core.context import ContextManager
 from core.prompts import build_system_prompt
 from core.team import ReadOnlySubagentTeam, SubagentAssignment
 from evaluation.mode_grading import GRADER_VERSION, calibrate, grade, safe_functions
+from evaluation.mode_repair import (
+    RepairJob,
+    build_repair_evidence,
+    build_repair_prompt,
+    is_transient_provider_error,
+    select_repair_jobs,
+    summarize_repairs,
+)
+from evaluation.mode_reports import load_report_root, merge_subset, trial_identity
 from evaluation.mode_tasks import TASKS
 from evaluation.report import read_trace
 from persistence.trace import TraceWriter, redact
@@ -55,6 +65,8 @@ PUBLIC_SUMMARY_FIELDS = (
     "premium_model",
     "accounting",
     "continuation",
+    "acquisition",
+    "repair",
     "by_mode",
     "by_mode_and_task",
 )
@@ -69,15 +81,430 @@ def save_json(path: Path, data) -> None:
 
 def build_public_summary(report: dict) -> dict:
     """用字段白名单生成可提交摘要；逐 trial 路径、Trace 和连接信息一律不复制。"""
-    return {name: report[name] for name in PUBLIC_SUMMARY_FIELDS if name in report}
+    public = {name: report[name] for name in PUBLIC_SUMMARY_FIELDS if name in report}
+    repair = public.get("repair")
+    if isinstance(repair, dict):
+        # 未恢复项可公开身份与失败层，但本机 Trace 路径只留在完整报告。
+        public["repair"] = json.loads(json.dumps(repair))
+        for item in public["repair"].get("unrecovered", []):
+            item.pop("traces", None)
+    return public
 
 
-def _trial_identity(row: dict) -> tuple[str, str, int]:
-    """用稳定三元组关联原 trial 与恢复结果，避免依赖目录遍历顺序。"""
-    mode, task, trial = row.get("mode"), row.get("task"), row.get("trial")
-    if mode not in MODES or task not in TASKS or type(trial) is not int or not 1 <= trial <= 5:
-        raise ValueError("无效的 trial 身份")
-    return mode, task, trial
+def _report_acquisition(report: dict) -> dict:
+    """优先沿用已有血缘成本；旧报告则从逐 trial 已知量建立保守下界。"""
+    acquisition = report.get("acquisition")
+    if isinstance(acquisition, dict) and type(acquisition.get("total_known_tokens")) is int:
+        return {
+            "total_known_tokens": acquisition["total_known_tokens"],
+            "total_duration_seconds": float(acquisition.get("total_duration_seconds", 0)),
+            "unknown_usage_trials": int(acquisition.get("unknown_usage_trials", 0)),
+        }
+    rows = report.get("trials")
+    if not isinstance(rows, list):
+        raise ValueError("报告缺少 trials，无法核算采集成本")
+    return {
+        "total_known_tokens": sum((row.get("usage") or {}).get("total_tokens", 0) for row in rows),
+        "total_duration_seconds": round(
+            sum(float(row.get("duration_seconds", 0)) for row in rows), 3
+        ),
+        "unknown_usage_trials": sum(bool(row.get("usage_may_be_incomplete")) for row in rows),
+    }
+
+
+def build_continuation_acquisition(source: dict, completed: dict) -> dict:
+    """核算恢复血缘：原批次全部成本，加上原 provider error 身份的新补跑成本。"""
+    source_rows = source.get("trials")
+    completed_rows = completed.get("trials")
+    if not isinstance(source_rows, list) or not isinstance(completed_rows, list):
+        raise ValueError("恢复成本来源缺少 trials")
+    source_map = {trial_identity(row): row for row in source_rows}
+    completed_map = {trial_identity(row): row for row in completed_rows}
+    if len(source_map) != len(source_rows) or len(completed_map) != len(completed_rows):
+        raise ValueError("恢复成本来源包含重复 trial 身份")
+    if set(source_map) != set(completed_map):
+        raise ValueError("恢复前后 trial 身份集合不一致")
+    retry_identities = {
+        identity
+        for identity, row in source_map.items()
+        if row.get("leader_status") == "provider_error"
+    }
+    source_cost = _report_acquisition(source)
+    retry_cost = _report_acquisition(
+        {"trials": [completed_map[identity] for identity in sorted(retry_identities)]}
+    )
+    return {
+        "source": source_cost,
+        "retry": retry_cost,
+        "total_known_tokens": source_cost["total_known_tokens"] + retry_cost["total_known_tokens"],
+        "total_duration_seconds": round(
+            source_cost["total_duration_seconds"] + retry_cost["total_duration_seconds"], 3
+        ),
+        "unknown_usage_trials": source_cost["unknown_usage_trials"]
+        + retry_cost["unknown_usage_trials"],
+        "note": "包含原批次全部 trial 与原 provider_error 身份的新补跑；保留项不重复计费",
+    }
+
+
+def _regrade_report_row(row: dict) -> dict:
+    """从来源记录的只读工作区按当前评分器重建 trial 报告。"""
+    identity = trial_identity(row)
+    workspace_value = row.get("workspace")
+    if not isinstance(workspace_value, str):
+        raise ValueError(f"无法离线重评原 trial：{identity}")
+    workspace = Path(workspace_value).resolve()
+    folder = workspace.parent
+    if not workspace.is_dir() or not (folder / "run-result.json").is_file():
+        raise ValueError(f"无法离线重评原 trial：{identity}")
+    return build_trial_report(
+        folder,
+        {
+            "mode": row["mode"],
+            "task": row["task"],
+            "trial": row["trial"],
+            "duration_seconds": float(row.get("duration_seconds", 0)),
+        },
+    )
+
+
+def merge_report_roots(
+    source_root: Path,
+    replacement_root: Path,
+    output: Path,
+    *,
+    replacement_origin_root: Path | None = None,
+) -> dict:
+    """离线合并两个真实批次，并在结束前复核来源文件没有发生变化。"""
+    source, source_path, source_digest = load_report_root(source_root.resolve())
+    replacement, replacement_path, replacement_digest = load_report_root(replacement_root.resolve())
+    replacement_rows = replacement.get("trials")
+    if replacement.get("grader_version") != GRADER_VERSION or (
+        isinstance(replacement_rows, list)
+        and any(
+            not isinstance(row, dict) or row.get("grader_version") != GRADER_VERSION
+            for row in replacement_rows
+        )
+    ):
+        raise ValueError(f"替换报告评分器必须是当前 {GRADER_VERSION}")
+    rows, merge_metadata = merge_subset(
+        source,
+        replacement,
+        regrade=_regrade_report_row,
+    )
+    # 替换项虽然不重复评分，也必须指向仍可审计的工作区。
+    replacement_identities = {trial_identity(row) for row in replacement.get("trials", [])}
+    for row in rows:
+        if trial_identity(row) in replacement_identities:
+            _regrade_report_row(row)
+
+    calibration = calibrate()
+    if not calibration["passed"]:
+        raise RuntimeError("评分器校准失败，停止合并")
+    output = output.resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    save_json(output / "grader-calibration.json", calibration)
+
+    source_cost = _report_acquisition(source)
+    replacement_origin = None
+    replacement_origin_path = None
+    replacement_origin_digest = None
+    if replacement_origin_root is not None:
+        (
+            replacement_origin,
+            replacement_origin_path,
+            replacement_origin_digest,
+        ) = load_report_root(replacement_origin_root.resolve())
+        replacement_cost = build_continuation_acquisition(
+            replacement_origin,
+            replacement,
+        )
+    else:
+        replacement_cost = _report_acquisition(replacement)
+    acquisition = {
+        "source": source_cost,
+        "replacement": replacement_cost,
+        "total_known_tokens": source_cost["total_known_tokens"]
+        + replacement_cost["total_known_tokens"],
+        "total_duration_seconds": round(
+            source_cost["total_duration_seconds"] + replacement_cost["total_duration_seconds"],
+            3,
+        ),
+        "unknown_usage_trials": source_cost["unknown_usage_trials"]
+        + replacement_cost["unknown_usage_trials"],
+        "note": "包含完整来源批次与替换批次的采集成本；merged_trial_cost 另行汇总",
+    }
+    manifest = {
+        "schema_version": 4,
+        "grader_version": GRADER_VERSION,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "real_model": bool(source.get("real_model") or replacement.get("real_model")),
+        "network_used": bool(source.get("network_used") or replacement.get("network_used")),
+        "source_sha256": source.get("source_sha256"),
+        "modes": source["modes"],
+        "tasks": source["tasks"],
+        "trials_per_task": source["trials_per_task"],
+        "workers": source.get("workers"),
+        "deadline_seconds": source["deadline_seconds"],
+        "max_steps": source["max_steps"],
+        "transport": source.get("transport"),
+        "models": source["models"],
+        "premium_model": source.get("premium_model"),
+        "accounting": source.get(
+            "accounting",
+            "Token 统计包含主 Agent、全部子 Agent、工作流阶段与返工；不计算货币费用",
+        ),
+        "acquisition": acquisition,
+        "merge": {
+            **merge_metadata,
+            "source_report": str(source_path),
+            "source_report_sha256": source_digest,
+            "source_grader_version": source.get("grader_version"),
+            "replacement_report": str(replacement_path),
+            "replacement_report_sha256": replacement_digest,
+            "replacement_grader_version": replacement.get("grader_version"),
+            **(
+                {
+                    "replacement_origin_report": str(replacement_origin_path),
+                    "replacement_origin_report_sha256": replacement_origin_digest,
+                }
+                if replacement_origin_path is not None
+                else {}
+            ),
+        },
+    }
+    premium_model = manifest["premium_model"]
+    by_mode = {
+        mode: summarize([row for row in rows if row["mode"] == mode], premium_model=premium_model)
+        for mode in manifest["modes"]
+    }
+    by_mode_and_task = {
+        mode: {
+            task_id: summarize(
+                [row for row in rows if row["mode"] == mode and row["task"] == task_id],
+                premium_model=premium_model,
+            )
+            for task_id in manifest["tasks"]
+        }
+        for mode in manifest["modes"]
+    }
+    summary = {**manifest, "by_mode": by_mode, "by_mode_and_task": by_mode_and_task, "trials": rows}
+    # 评分与汇总期间来源必须保持字节级不变，否则血缘指纹没有意义。
+    if load_report_root(source_path.parent)[2] != source_digest:
+        raise RuntimeError("合并期间来源 report.json 发生变化")
+    if load_report_root(replacement_path.parent)[2] != replacement_digest:
+        raise RuntimeError("合并期间替换 report.json 发生变化")
+    if replacement_origin_path is not None and (
+        load_report_root(replacement_origin_path.parent)[2] != replacement_origin_digest
+    ):
+        raise RuntimeError("合并期间替换来源 report.json 发生变化")
+    save_json(output / "manifest.json", manifest)
+    save_json(output / "report.json", summary)
+    save_json(output / "public-summary.json", build_public_summary(summary))
+    return summary
+
+
+def _code_fingerprint() -> str:
+    """对当前产品 Python 源码计算稳定指纹，区分不同实现生成的报告。"""
+    source_root = Path(__file__).resolve().parents[1]
+    return sha256(
+        b"".join(
+            path.relative_to(source_root).as_posix().encode() + path.read_bytes()
+            for path in sorted(source_root.rglob("*.py"))
+        )
+    ).hexdigest()
+
+
+def run_repair_report(source_root: Path, args) -> dict:
+    """执行有界修复批次，写入独立账本并在结束时复核来源报告指纹。"""
+    baseline, source_path, source_digest = load_report_root(source_root.resolve())
+    if baseline.get("grader_version") != GRADER_VERSION:
+        raise ValueError(
+            f"修复来源评分器必须是 {GRADER_VERSION}，当前为 {baseline.get('grader_version')}"
+        )
+    # 在创建输出目录前验证身份、候选文件和模型配置，避免半成品目录。
+    select_repair_jobs(baseline)
+    settings = load_settings(config_path=args.config.resolve(), cwd=args.config.resolve().parent)
+    roles = {settings.workflow.planner, settings.workflow.coder, settings.workflow.reviewer}
+    if not settings.workflow.enabled or not roles <= set(settings.profiles):
+        raise ValueError("修复需要已启用且模型完整的 planner/coder/reviewer 工作流配置")
+    models = {
+        role: settings.profiles[getattr(settings.workflow, role)].model
+        for role in ("planner", "coder", "reviewer")
+    }
+    premium_profile = settings.workflow.premium_reviewer
+    premium_model = settings.profiles[premium_profile].model if premium_profile else None
+    if baseline.get("models") != models or baseline.get("premium_model") != premium_model:
+        raise ValueError("修复必须沿用来源报告中的 DeepSeek/Kimi 模型分配")
+
+    args.output = args.output.resolve()
+    args.deadline = int(baseline["deadline_seconds"])
+    args.max_steps = int(baseline["max_steps"])
+    args.output.mkdir(parents=True, exist_ok=False)
+    calibration = calibrate()
+    save_json(args.output / "grader-calibration.json", calibration)
+    if not calibration["passed"]:
+        raise RuntimeError("评分器校准失败，停止修复")
+    manifest = {
+        "schema_version": 4,
+        "grader_version": GRADER_VERSION,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "real_model": True,
+        "network_used": True,
+        "source_sha256": _code_fingerprint(),
+        "modes": baseline["modes"],
+        "tasks": baseline["tasks"],
+        "trials_per_task": baseline["trials_per_task"],
+        "workers": args.workers,
+        "deadline_seconds": args.deadline,
+        "max_steps": args.max_steps,
+        "transport": {
+            "max_attempts_per_request": args.max_attempts,
+            "retry_base_delay_seconds": args.retry_base_delay,
+            "max_retry_delay_seconds": args.max_retry_delay,
+        },
+        "models": models,
+        "premium_model": premium_model,
+        "accounting": "首次采集与所有修复轮次分开核算；未知 Token 不按零处理",
+        "repair_source": {
+            "report": str(source_path),
+            "report_sha256": source_digest,
+            "max_rounds": args.repair_rounds,
+        },
+    }
+    save_json(args.output / "manifest.json", manifest)
+    ledger = execute_repair_rounds(baseline, args)
+    metrics = summarize_repairs(baseline, ledger, premium_model=premium_model)
+    if load_report_root(source_path.parent)[2] != source_digest:
+        raise RuntimeError("修复期间来源 report.json 发生变化")
+    ledger_document = {
+        "schema_version": 1,
+        "source_report": str(source_path),
+        "source_report_sha256": source_digest,
+        "entries": ledger,
+    }
+    summary = {**manifest, "repair": metrics, "ledger_entries": len(ledger)}
+    save_json(args.output / "repair-ledger.json", ledger_document)
+    save_json(args.output / "report.json", summary)
+    save_json(args.output / "public-summary.json", build_public_summary(summary))
+    return summary
+
+
+def _load_json_with_digest(path: Path, label: str) -> tuple[dict, str]:
+    """读取独立 JSON 账本并对原始字节做指纹，避免重序列化改变血缘。"""
+    try:
+        raw = path.read_bytes()
+        value = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"无法读取 {label}：{error}") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} 顶层必须是 JSON 对象")
+    return value, sha256(raw).hexdigest()
+
+
+def run_repair_continuation(source_root: Path, args) -> dict:
+    """在新目录续跑旧修复账本中的瞬时传输失败，并保留被替代尝试。"""
+    source, source_path, source_digest = load_report_root(source_root.resolve())
+    ledger_path = (source_root.resolve() / "repair-ledger.json").resolve()
+    ledger_document, ledger_digest = _load_json_with_digest(ledger_path, "repair-ledger.json")
+    entries = ledger_document.get("entries")
+    if not isinstance(entries, list):
+        raise ValueError("repair-ledger.json 缺少 entries")
+    if source.get("grader_version") != GRADER_VERSION:
+        raise ValueError(
+            f"修复续跑来源评分器必须是 {GRADER_VERSION}，当前为 {source.get('grader_version')}"
+        )
+    repair_source = source.get("repair_source")
+    if not isinstance(repair_source, dict):
+        raise ValueError("修复报告缺少 repair_source 血缘")
+    baseline_path = Path(repair_source["report"]).resolve()
+    baseline, resolved_baseline_path, baseline_digest = load_report_root(baseline_path.parent)
+    if resolved_baseline_path != baseline_path:
+        raise ValueError("baseline report 路径不一致")
+    if baseline_digest != repair_source.get("report_sha256"):
+        raise ValueError("baseline report 指纹与修复来源不一致")
+    ledger_source_value = ledger_document.get("source_report")
+    if not isinstance(ledger_source_value, str):
+        raise ValueError("修复账本缺少 baseline report 路径")
+    if Path(ledger_source_value).resolve() != baseline_path:
+        raise ValueError("修复账本与修复报告指向不同 baseline")
+    if ledger_document.get("source_report_sha256") != baseline_digest:
+        raise ValueError("修复账本的基线指纹与修复报告不一致")
+
+    settings = load_settings(config_path=args.config.resolve(), cwd=args.config.resolve().parent)
+    roles = {settings.workflow.planner, settings.workflow.coder, settings.workflow.reviewer}
+    if not settings.workflow.enabled or not roles <= set(settings.profiles):
+        raise ValueError("修复续跑需要已启用且模型完整的工作流配置")
+    models = {
+        role: settings.profiles[getattr(settings.workflow, role)].model
+        for role in ("planner", "coder", "reviewer")
+    }
+    premium_profile = settings.workflow.premium_reviewer
+    premium_model = settings.profiles[premium_profile].model if premium_profile else None
+    if source.get("models") != models or source.get("premium_model") != premium_model:
+        raise ValueError("修复续跑必须沿用来源报告中的 DeepSeek/Kimi 模型分配")
+
+    args.output = args.output.resolve()
+    args.deadline = int(source["deadline_seconds"])
+    args.max_steps = int(source["max_steps"])
+    args.repair_rounds = int(repair_source.get("max_rounds", 2))
+    args.output.mkdir(parents=True, exist_ok=False)
+    calibration = calibrate()
+    save_json(args.output / "grader-calibration.json", calibration)
+    if not calibration["passed"]:
+        raise RuntimeError("评分器校准失败，停止修复续跑")
+    continuation = {
+        "source_report": str(source_path),
+        "source_report_sha256": source_digest,
+        "source_ledger": str(ledger_path),
+        "source_ledger_sha256": ledger_digest,
+        "selected_failure": "transient_provider_error",
+    }
+    manifest = {
+        "schema_version": 4,
+        "grader_version": GRADER_VERSION,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "real_model": True,
+        "network_used": True,
+        "source_sha256": _code_fingerprint(),
+        "modes": baseline["modes"],
+        "tasks": baseline["tasks"],
+        "trials_per_task": baseline["trials_per_task"],
+        "workers": args.workers,
+        "deadline_seconds": args.deadline,
+        "max_steps": args.max_steps,
+        "transport": {
+            "max_attempts_per_request": args.max_attempts,
+            "retry_base_delay_seconds": args.retry_base_delay,
+            "max_retry_delay_seconds": args.max_retry_delay,
+        },
+        "models": models,
+        "premium_model": premium_model,
+        "accounting": "旧修复轮次、被替代传输失败与新续跑全部计入；未知 Token 不按零处理",
+        "repair_source": repair_source,
+        "repair_continuation": continuation,
+    }
+    save_json(args.output / "manifest.json", manifest)
+    updated_entries = resume_repair_transport(baseline, entries, args)
+    metrics = summarize_repairs(baseline, updated_entries, premium_model=premium_model)
+
+    if load_report_root(source_path.parent)[2] != source_digest:
+        raise RuntimeError("续跑期间来源修复 report.json 发生变化")
+    if _load_json_with_digest(ledger_path, "repair-ledger.json")[1] != ledger_digest:
+        raise RuntimeError("续跑期间来源 repair-ledger.json 发生变化")
+    if load_report_root(baseline_path.parent)[2] != baseline_digest:
+        raise RuntimeError("续跑期间 baseline report.json 发生变化")
+    output_ledger = {
+        "schema_version": 1,
+        "source_report": str(baseline_path),
+        "source_report_sha256": baseline_digest,
+        "continuation": continuation,
+        "entries": updated_entries,
+    }
+    summary = {**manifest, "repair": metrics, "ledger_entries": len(updated_entries)}
+    save_json(args.output / "repair-ledger.json", output_ledger)
+    save_json(args.output / "report.json", summary)
+    save_json(args.output / "public-summary.json", build_public_summary(summary))
+    return summary
 
 
 def select_resume_jobs(report: dict) -> list[tuple[str, str, int]]:
@@ -85,7 +512,7 @@ def select_resume_jobs(report: dict) -> list[tuple[str, str, int]]:
     rows = report.get("trials")
     if not isinstance(rows, list):
         raise ValueError("续跑来源缺少 trials")
-    identities = [_trial_identity(row) for row in rows]
+    identities = [trial_identity(row) for row in rows]
     if len(identities) != len(set(identities)):
         raise ValueError("续跑来源包含重复 trial 身份")
     return [
@@ -101,13 +528,13 @@ def combine_resumed_reports(source_report: dict, replacements: list[dict]) -> li
     if not isinstance(source_rows, list):
         raise ValueError("续跑来源缺少 trials")
     expected = set(select_resume_jobs(source_report))
-    replacement_map = {_trial_identity(row): row for row in replacements}
+    replacement_map = {trial_identity(row): row for row in replacements}
     if len(replacement_map) != len(replacements) or set(replacement_map) != expected:
         raise ValueError("恢复结果与 provider_error trial 清单不一致")
 
     combined = []
     for row in source_rows:
-        identity = _trial_identity(row)
+        identity = trial_identity(row)
         if identity in replacement_map:
             combined.append(replacement_map[identity])
             continue
@@ -137,13 +564,17 @@ def approval_for(task_id: str, workspace: Path):
         """Policy 的 DENY 不会进入回调；这里进一步收窄允许副作用。"""
         args = call.arguments
         if call.name in {"write_or_replace", "apply_patch"}:
-            return args.get("path") in {"solution.py", "./solution.py"}
-        if call.name != "run_command" or args.get("argv") != VERIFY_ARGV:
+            if args.get("path") not in {"solution.py", "./solution.py"}:
+                return "评测中只能修改 solution.py；SPEC.md、test_target.py 和其他文件均为只读"
+            return True
+        if call.name != "run_command":
             return False
+        if args.get("argv") != VERIFY_ARGV:
+            return f"验证命令必须精确使用 argv={VERIFY_ARGV!r}，不得增删参数或改用其他命令"
         try:
             boundary = Workspace(workspace)
             if boundary.resolve(args.get("cwd", ".")) != boundary.root:
-                return False
+                return "验证命令的 cwd 必须是 trial 工作区根目录（使用 '.' 或省略 cwd）"
             if (workspace / "SPEC.md").read_text() != task.spec:
                 return False
             if (workspace / "test_target.py").read_text() != task.public_test:
@@ -203,6 +634,12 @@ def worker(args) -> None:
     folder = args.output.resolve()
     workspace = folder / "workspace"
     task = TASKS[args.worker]
+    prompt = task.prompt
+    if args.worker_prompt_file:
+        prompt_path = args.worker_prompt_file.resolve()
+        if prompt_path.parent != folder:
+            raise ValueError("worker prompt 必须位于当前 trial 目录")
+        prompt = prompt_path.read_text()
     settings = load_settings(config_path=args.config.resolve(), cwd=args.config.resolve().parent)
     # 对照关注架构，不额外调用模型做意图分类；工作流仍使用当前角色和返工上限。
     workflow_settings = replace(
@@ -258,7 +695,7 @@ def worker(args) -> None:
             folder / "trace-leader.jsonl",
             workspace,
             steps=args.max_steps,
-        ).run(task.prompt)
+        ).run(prompt)
         payload = {
             "mode": args.mode,
             "leader": result.to_dict(),
@@ -274,7 +711,7 @@ def worker(args) -> None:
             folder / "trace-leader.jsonl",
             workspace,
             steps=args.max_steps,
-        ).run(task.prompt)
+        ).run(prompt)
         payload = {
             "mode": args.mode,
             "leader": result.to_dict(),
@@ -311,7 +748,7 @@ def worker(args) -> None:
             max_workers=2,
         )
         result = team.run(
-            task.prompt,
+            prompt,
             (
                 SubagentAssignment(
                     "implementation",
@@ -695,18 +1132,40 @@ def summarize(rows: list[dict], *, premium_model: str | None = None) -> dict:
     }
 
 
-def run_trial(mode: str, task_id: str, number: int, args) -> dict:
+def run_trial(
+    mode: str,
+    task_id: str,
+    number: int,
+    args,
+    *,
+    folder: Path | None = None,
+    seed_solution: str | None = None,
+    prompt: str | None = None,
+    trial_metadata: dict | None = None,
+) -> dict:
     """父进程提供 trial 墙钟期限；超时清理整个 worker 进程组并保留失败证据。"""
-    folder = args.output / mode / f"{task_id}-{number}"
+    folder = folder or args.output / mode / f"{task_id}-{number}"
     folder.mkdir(parents=True)
     workspace = folder / "workspace"
     workspace.mkdir()
     for name, content in TASKS[task_id].files.items():
         (workspace / name).write_text(content)
+    if seed_solution is not None:
+        (workspace / "solution.py").write_text(seed_solution)
+    task_prompt = prompt or TASKS[task_id].prompt
     save_json(
         folder / "task.json",
-        {"task": task_id, "title": TASKS[task_id].title, "prompt": TASKS[task_id].prompt},
+        {
+            "task": task_id,
+            "title": TASKS[task_id].title,
+            "prompt": task_prompt,
+            **({"repair": trial_metadata} if trial_metadata is not None else {}),
+        },
     )
+    prompt_file = None
+    if prompt is not None:
+        prompt_file = folder / "repair-prompt.txt"
+        prompt_file.write_text(prompt)
     print(f"[开始] mode={mode} task={task_id} trial={number}", flush=True)
     command = [
         sys.executable,
@@ -729,6 +1188,8 @@ def run_trial(mode: str, task_id: str, number: int, args) -> dict:
         "--max-retry-delay",
         str(args.max_retry_delay),
     ]
+    if prompt_file is not None:
+        command.extend(["--worker-prompt-file", str(prompt_file.resolve())])
     started = time.monotonic()
     timed_out = False
     with (folder / "progress.log").open("w") as stream:
@@ -782,6 +1243,146 @@ def run_trial(mode: str, task_id: str, number: int, args) -> dict:
     return report
 
 
+def run_repair_round(job: RepairJob, round_number: int, args) -> dict:
+    """用父候选与脱敏 Trace 运行一个保持原模式的独立修复 trial。"""
+    evidence = build_repair_evidence(job.source_row)
+    prompt = build_repair_prompt(job, evidence, round_number)
+    seed = job.source_solution.read_text()
+    folder = args.output / f"round-{round_number}" / job.mode / f"{job.task}-{job.trial}"
+    metadata = {
+        "round": round_number,
+        "parent_identity": {
+            "mode": job.mode,
+            "task": job.task,
+            "trial": job.trial,
+        },
+        "parent_workspace": str(job.source_workspace),
+        "parent_solution_sha256": sha256(seed.encode()).hexdigest(),
+        "source_traces": [str(path) for path in job.source_traces],
+    }
+    return run_trial(
+        job.mode,
+        job.task,
+        job.trial,
+        args,
+        folder=folder,
+        seed_solution=seed,
+        prompt=prompt,
+        trial_metadata=metadata,
+    )
+
+
+def execute_repair_rounds(
+    baseline: dict,
+    args,
+    *,
+    runner=None,
+) -> list[dict]:
+    """按轮并发修复；每个身份成功或传输失败即停止，最多执行两轮。"""
+    if args.repair_rounds not in {1, 2}:
+        raise ValueError("repair-rounds 必须为 1–2")
+    runner = runner or run_repair_round
+    active = select_repair_jobs(baseline)
+    ledger = {
+        job.identity: {
+            "identity": {"mode": job.mode, "task": job.task, "trial": job.trial},
+            "baseline": job.source_row,
+            "rounds": [],
+            "final_passed": False,
+            "stop_reason": None,
+        }
+        for job in active
+    }
+    for round_number in range(1, args.repair_rounds + 1):
+        if not active:
+            break
+        pool = ThreadPoolExecutor(max_workers=args.workers)
+        futures = [pool.submit(runner, job, round_number, args) for job in active]
+        try:
+            results = [future.result() for future in futures]
+        except BaseException:
+            for future in futures:
+                future.cancel()
+            stop_active_trials()
+            pool.shutdown(wait=True, cancel_futures=True)
+            raise
+        else:
+            pool.shutdown()
+
+        next_active = []
+        for job, result in zip(active, results, strict=True):
+            entry = ledger[job.identity]
+            entry["rounds"].append(result)
+            entry["final_passed"] = result.get("passed") is True
+            if entry["final_passed"]:
+                entry["stop_reason"] = "passed"
+                continue
+            status = result.get("leader_status")
+            if status in {"provider_error", "harness_error"}:
+                entry["stop_reason"] = status
+                continue
+            if round_number == args.repair_rounds:
+                entry["stop_reason"] = "round_limit"
+                continue
+            next_active.extend(select_repair_jobs({"trials": [result]}))
+        active = next_active
+    return list(ledger.values())
+
+
+def resume_repair_transport(
+    baseline: dict,
+    source_ledger: list[dict],
+    args,
+    *,
+    runner=None,
+) -> list[dict]:
+    """只续跑瞬时 provider error，并保留被替代尝试以完整核算成本。"""
+    if args.repair_rounds not in {1, 2}:
+        raise ValueError("repair-rounds 必须为 1–2")
+    runner = runner or run_repair_round
+    baseline_identities = {trial_identity(row) for row in baseline.get("trials", [])}
+    ledger = copy.deepcopy(source_ledger)
+    for entry in ledger:
+        identity = trial_identity(entry.get("identity", {}))
+        if identity not in baseline_identities:
+            raise ValueError("repair ledger 身份不在 baseline")
+        rounds = entry.get("rounds")
+        if not isinstance(rounds, list) or not rounds:
+            raise ValueError("repair ledger 缺少 rounds")
+        failed_transport = rounds[-1]
+        if not is_transient_provider_error(failed_transport):
+            continue
+
+        round_number = len(rounds)
+        parent = entry["baseline"] if round_number == 1 else rounds[-2]
+        job = select_repair_jobs({"trials": [parent]})[0]
+        replacement = runner(job, round_number, args)
+        entry.setdefault("superseded_transport_attempts", []).append(failed_transport)
+        rounds[-1] = replacement
+        entry["final_passed"] = replacement.get("passed") is True
+        if entry["final_passed"]:
+            entry["stop_reason"] = "passed"
+            continue
+        status = replacement.get("leader_status")
+        if status in {"provider_error", "harness_error"}:
+            entry["stop_reason"] = status
+            continue
+        if round_number >= args.repair_rounds:
+            entry["stop_reason"] = "round_limit"
+            continue
+
+        next_job = select_repair_jobs({"trials": [replacement]})[0]
+        next_result = runner(next_job, round_number + 1, args)
+        rounds.append(next_result)
+        entry["final_passed"] = next_result.get("passed") is True
+        entry["stop_reason"] = (
+            "passed" if entry["final_passed"] else next_result.get("leader_status")
+        )
+        if entry["stop_reason"] not in {"passed", "provider_error", "harness_error"}:
+            entry["stop_reason"] = "round_limit"
+    return ledger
+
+
 def stop_active_trials() -> None:
     """批次被用户中断时终止所有独立进程组，避免模型请求成为孤儿进程。"""
     with _PROCESS_LOCK:
@@ -803,6 +1404,20 @@ def main() -> int:
         type=Path,
         help="从已有 report.json 仅续跑 provider_error，并重新生成完整合并报告",
     )
+    parser.add_argument("--merge-from", type=Path, help="离线合并的完整来源批次")
+    parser.add_argument("--replace-from", type=Path, help="离线替换的 trial 子集批次")
+    parser.add_argument(
+        "--replace-origin",
+        type=Path,
+        help="替换批次是旧版恢复报告时，提供其原始来源以完整核算失败请求成本",
+    )
+    parser.add_argument("--repair-from", type=Path, help="从完整报告自动修复失败候选")
+    parser.add_argument(
+        "--resume-repair-from",
+        type=Path,
+        help="从已有修复报告只续跑 Trace 证明为瞬时故障的 provider_error",
+    )
+    parser.add_argument("--repair-rounds", type=int, default=2, help="每个候选最多修复 1–2 轮")
     parser.add_argument("--trials", type=int, default=2)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--deadline", type=int, default=420)
@@ -828,6 +1443,7 @@ def main() -> int:
     parser.add_argument("--task", choices=tuple(TASKS), action="append")
     parser.add_argument("--mode", choices=MODES, action="append")
     parser.add_argument("--worker", choices=tuple(TASKS), help=argparse.SUPPRESS)
+    parser.add_argument("--worker-prompt-file", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if not 1 <= args.max_attempts <= 10:
         parser.error("max-attempts 为 1–10")
@@ -837,6 +1453,65 @@ def main() -> int:
         args.mode = args.mode[0]
         worker(args)
         return 0
+    merge_requested = any(
+        value is not None for value in (args.merge_from, args.replace_from, args.replace_origin)
+    )
+    if merge_requested:
+        if args.merge_from is None or args.replace_from is None:
+            parser.error("--merge-from 与 --replace-from 必须同时提供")
+        if (
+            args.live
+            or args.resume_from
+            or args.repair_from
+            or args.resume_repair_from
+            or args.mode
+            or args.task
+        ):
+            parser.error(
+                "离线合并不能同时使用 --live、--resume-from、--repair-from、--mode 或 --task"
+            )
+        try:
+            summary = merge_report_roots(
+                args.merge_from,
+                args.replace_from,
+                args.output,
+                replacement_origin_root=args.replace_origin,
+            )
+        except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError) as error:
+            parser.error(f"无法合并报告：{error}")
+        print(json.dumps(summary["by_mode"], ensure_ascii=False), flush=True)
+        return 0 if all(row["passed"] for row in summary["trials"]) else 1
+    if args.repair_from:
+        if not args.live:
+            parser.error("--repair-from 必须与 --live 一起使用")
+        if args.resume_from or args.resume_repair_from or args.mode or args.task:
+            parser.error(
+                "修复模式从来源报告恢复，不能同时指定 --resume-from、"
+                "--resume-repair-from、--mode 或 --task"
+            )
+        if not 1 <= args.workers <= 3:
+            parser.error("workers 为 1–3")
+        if args.repair_rounds not in {1, 2}:
+            parser.error("repair-rounds 必须为 1–2")
+        try:
+            summary = run_repair_report(args.repair_from, args)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError) as error:
+            parser.error(f"无法执行修复批次：{error}")
+        print(json.dumps(summary["repair"], ensure_ascii=False), flush=True)
+        return 0 if summary["repair"]["post_repair"]["strict_failures"] == 0 else 1
+    if args.resume_repair_from:
+        if not args.live:
+            parser.error("--resume-repair-from 必须与 --live 一起使用")
+        if args.resume_from or args.mode or args.task:
+            parser.error("修复续跑不能同时指定 --resume-from、--mode 或 --task")
+        if not 1 <= args.workers <= 3:
+            parser.error("workers 为 1–3")
+        try:
+            summary = run_repair_continuation(args.resume_repair_from, args)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError) as error:
+            parser.error(f"无法执行修复续跑：{error}")
+        print(json.dumps(summary["repair"], ensure_ascii=False), flush=True)
+        return 0 if summary["repair"]["post_repair"]["strict_failures"] == 0 else 1
     if not 1 <= args.trials <= 5 or not 1 <= args.workers <= 3:
         parser.error("trials 为 1–5；workers 为 1–3")
     if not 30 <= args.deadline <= 900 or not 4 <= args.max_steps <= 40:
@@ -878,13 +1553,7 @@ def main() -> int:
     roles = {settings.workflow.planner, settings.workflow.coder, settings.workflow.reviewer}
     if not settings.workflow.enabled or not roles <= set(settings.profiles):
         parser.error("比较需要已启用且模型完整的 planner/coder/reviewer 工作流配置")
-    source_root = Path(__file__).resolve().parents[1]
-    fingerprint = sha256(
-        b"".join(
-            path.relative_to(source_root).as_posix().encode() + path.read_bytes()
-            for path in sorted(source_root.rglob("*.py"))
-        )
-    ).hexdigest()
+    fingerprint = _code_fingerprint()
     premium_profile = settings.workflow.premium_reviewer
     premium_model = settings.profiles[premium_profile].model if premium_profile else None
     models = {
@@ -961,6 +1630,12 @@ def main() -> int:
         manifest["continuation"]["remaining_provider_errors"] = sum(
             row["leader_status"] == "provider_error" for row in reports
         )
+        manifest["acquisition"] = build_continuation_acquisition(
+            source_report,
+            {"trials": reports},
+        )
+    else:
+        manifest["acquisition"] = _report_acquisition({"trials": reports})
     by_mode = {
         mode: summarize(
             [row for row in reports if row["mode"] == mode], premium_model=premium_model
@@ -983,6 +1658,7 @@ def main() -> int:
         "by_mode_and_task": by_mode_and_task,
         "trials": reports,
     }
+    save_json(args.output / "manifest.json", manifest)
     save_json(args.output / "report.json", summary)
     save_json(args.output / "public-summary.json", build_public_summary(summary))
     print(json.dumps(summary["by_mode"], ensure_ascii=False), flush=True)
