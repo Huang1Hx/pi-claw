@@ -42,7 +42,7 @@ ITERATION_<三位序号>_<主题>.md
 | [Iteration 018](ITERATION_018_PROVIDER_RECOVERY.md) | Provider 失败续跑与完整结果 | 已合并 main | 身份保持续跑、41/90、0 Provider 错误、累计获取成本 |
 | [Iteration 019](ITERATION_019_DEPENDENCY_ORDER_BOUNDARY.md) | 依赖排序语法边界与定向复测 | 已合并 main | grader 2.2、具体 AST 反馈、6/9、边界失败可追踪 |
 | [Iteration 020](ITERATION_020_EVAL_TRANSPORT_RETRY.md) | 评测传输有限重试 | 已合并 main | DeepSeek 三次尝试、2/4 秒退避、Kimi 单次、420 秒总上限 |
-| [Iteration 021](ITERATION_021_TRACE_GUIDED_EVAL_REPAIR.md) | Trace 驱动评测合并与候选修复 | 待用户审核 | grader 2.2 合并、两轮修复、传输续跑、49/90→78/90、完整成本账本 |
+| [Iteration 021](ITERATION_021_TRACE_GUIDED_EVAL_REPAIR.md) | Trace 驱动评测合并与候选修复 | 已合并 main | grader 2.2 合并、两轮修复、传输续跑、49/90→78/90、完整成本账本 |
 
 Iteration 001–005 保留当时的路径与验证命令，不回写历史记录。当前目录和启动方式以
 [Iteration 006](ITERATION_006_DIRECT_SOURCE_LAYOUT.md)、[架构](../ARCHITECTURE.md) 和
