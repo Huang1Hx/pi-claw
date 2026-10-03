@@ -9,8 +9,8 @@
 **架构原则：** 宿主掌握工具授权和完成验收；模型输出视为不可信候选；离线工程回归与真实模型
 能力评测分开；原始 Trace 保持 Git 忽略，只提交任务、评分器和脱敏汇总。
 
-**当前稳定基线：** `main` 与 `optimize` 均包含功能提交 `2db1271`，Iteration 018–020 已完成
-审核、验证、提交和远程集成；两个分支在本轮状态记录提交后保持一致。
+**当前稳定基线：** `main` 与 `optimize` 均位于 `144ad87`；Iteration 018–021 已完成审核、
+验证、提交和远程集成。Trace 驱动修复的核心实现为 `bfc79e7`，最终完整回归为 596 tests。
 
 ## 全局约束
 
@@ -28,11 +28,11 @@
 |---|---|---|---|
 | 0 | 目录重构、评测框架、DeepSeek/Kimi 分工 | 已完成 | `639a322`；536 tests；已推送 `optimize` |
 | 1 | 公开仓库工程化与 CI | 待执行 | GitHub Actions、构建、License、贡献说明 |
-| 2 | 当前模型真实评测基线 | **已完成并合并 main** | 最终 90 trial 为 41/90；定向 grader 2.2 为 6/9 |
-| 3 | 根据 Trace 修复超时与请求链稳定性 | **进行中；请求级重试已合并** | 三次尝试与退避已实现；尚待真实模型前后对照 |
+| 2 | 当前模型真实评测基线 | **已完成并合并 main** | grader 2.2 合并后首次 49/90；两轮修复后 78/90 |
+| 3 | Trace 恢复、请求稳定性与执行沙箱 | **进行中；Trace 修复已完成，生命周期与 OS 沙箱待执行** | `bfc79e7`；49/90→78/90；596 tests |
 | 4 | 任务相关的完成验收与抗伪完成 | 待执行 | 无关测试、篡改测试、旧绿灯等攻击用例全部拒绝 |
 | 5 | 路由校准与 Multi-Agent 故障隔离 | 待执行 | 错误降级率、主力调用率、子 Agent 部分失败指标 |
-| 6 | 可选 Sandbox 与正式发布 | 待执行 | 隔离演示、版本标签、两条真实端到端案例 |
+| 6 | 正式发布 | 待执行 | 沙箱隔离演示、版本标签、两条真实端到端案例 |
 
 ---
 
@@ -131,23 +131,63 @@ DeepSeek 配置比较：
 - [x] 用 grader 2.1 离线重评保留项，最终消除 Provider 错误并得到严格成功 `41/90`。
 - [x] 分开报告最终 90 条 Token 与包含 29 次恢复尝试的累计获取成本。
 - [x] 验证公开摘要不含 Key、URL、绝对路径、workspace 或逐条 Trace。
-- [x] Iteration 018 已提交并推送 `optimize`（`b961e3b`），尚未合并 `main`。
+- [x] Iteration 018 已提交并推送 `optimize`（`b961e3b`），随后已随阶段 2 合并 `main`。
 
 ### Task 2.7：依赖排序评测契约修订
 
 - [x] 定位 `dependency_order` 的九份候选与旧 AST 白名单冲突。
 - [x] 公开禁止 `while`、推荐有界 `for`，并允许其中的 `break`/`continue`。
 - [x] 审批拒绝返回具体违规语法节点，保留旧布尔审批回调兼容。
-- [x] 只重跑依赖排序：严格成功 6/9，语法边界 9/9 通过；两个 Provider 错误经一次有限补跑仍保留。
+- [x] 只重跑依赖排序：首次严格成功 6/9；服务恢复后定向补跑达到 8/9，语法边界 9/9 通过。
 - [x] 完整回归 560 passed，源码覆盖率 85%，Ruff、格式和构建通过。
 - [x] 用户已批准提交、推送并合并 `main`。
 
-## 阶段 3：稳定性修复
+## 阶段 3：稳定性与执行沙箱
 
-只根据阶段 2 Trace 中已经发生的失败立项，不预先猜测。重点为连接/读取超时、阶段上下文大小、
-取消和重试边界、子 Agent 超时传播、失败请求 Token 缺口。阶段 2 还复现了 DNS 失败和请求级
-HTTP 429；应增加跨 trial/Agent 的共享请求节流、Retry-After 退避与可恢复续跑。使用同一批任务
-做修改前后对照。
+阶段 3 同时收口模型请求稳定性和不可信代码执行边界。当前项目已经有应用层安全控制，但不能
+称为操作系统沙箱：`Workspace` 限制路径，`WorkspacePolicy` 决定 ALLOW/ASK/DENY，
+`TerminalApprovalBroker` 绑定具体预览或 argv/cwd，`ToolExecutor` 复核版本并统一执行，命令使用
+`shell=False`、环境白名单和超时。只读子 Agent 不能写入或执行命令，评测 trial 另有独立工作区
+和进程组期限。
+
+这些机制能防止常见误操作，却不能阻止获批 pytest/unittest 中的仓库代码读取宿主其他文件、
+联网、派生后台进程或消耗宿主资源；命令输出也是捕获完成后才截断。阶段 3 的目标是在不削弱
+Policy/Approval 的前提下增加可选 Docker 执行后端，并明确保留 `host` 为“可信工作区兼容模式”。
+选择 `docker` 后必须 fail closed：Docker、镜像或隔离参数不可用时直接拒绝，绝不静默回退宿主。
+
+### 当前应用层边界（保留并继续作为第一道门）
+
+| 层 | 当前机制 | 能防什么 | 不能证明什么 |
+|---|---|---|---|
+| Workspace | 真实路径归一化、拒绝 `..`/越界 symlink、敏感文件名 | 普通文件工具越过项目边界 | 同机恶意进程与检查后换链竞态 |
+| Policy | 只读默认允许；写和命令 ASK；危险命令硬 DENY | 模型直接调用未注册、破坏性或联网命令 | 白名单测试代码本身安全 |
+| Approval | 一次/会话批准；写入绑定预览与 preimage；命令绑定 argv/cwd | 宽泛授权和审批后普通文件变化 | 用户批准等于 OS 隔离 |
+| Executor/Files | 统一入口、精确替换、原子落盘、大小/扫描预算 | 半写、重复匹配、常见并发覆盖 | 多文件事务与恶意跨进程 CAS |
+| Command | `shell=False`、环境白名单、30 秒上限、显示输出截断 | Shell 注入、凭据环境继承、普通超时 | 宿主文件/网络/CPU/内存/子进程隔离 |
+| Multi-Agent/Eval | 子 Agent 只读；先并行读后主 Agent 写；trial 工作区与期限 | 多 Agent 同时写、评测无限运行 | 分布式容错或生产级沙箱 |
+
+### 阶段 3 执行决策：冻结 78/90，不在同题上追分
+
+Iteration 021 已经提供足够的优先级证据：41 个首次失败经过 55 次修复尝试后恢复 29 个，第一轮
+恢复 28 个，第二轮只恢复 1 个；修复增量为 7,800,571 个已知 Token。最终 12 个失败不是 12 个
+单纯语义错误，而是 8 个 `deadline`、2 个 `loop_detected`、1 个 `unverified` 和 1 个被请求预算
+耗尽误归类的 `provider_error`。Trace 显示多数失败由非固定或非白名单命令被拒后仍反复调用引起。
+
+因此把 `78/90` 和对应 grader、任务、隐藏用例、最大两轮修复规则冻结为阶段 2 基线；不得为达到
+`90/90` 修改评分器、放宽安全策略、增加第三语义修复轮次或删除失败。`90/90` 只作为观察到的
+stretch result，不是阶段 3 完成门槛。阶段 3 按下列依赖顺序执行：
+
+| 顺序 | 任务 | 先做原因 | 阶段门槛 |
+|---:|---|---|---|
+| 1 | 3.3 执行后端抽象 | 后续 Host/Docker 共用同一执行与结果契约 | Host 行为兼容，Docker 不可用时 fail closed |
+| 2 | 3.4 生命周期与停止语义 | 直接处理剩余失败中的 deadline、loop 和错误终态 | 无新请求越过 deadline；重复拒绝有界停止；进程可清理 |
+| 3 | 3.5 临时工作区快照 | Docker 挂载前先消除凭据和宿主目录暴露 | 快照只含普通文件，清单和上限可审计 |
+| 4 | 3.6 Docker 隔离 | 在稳定 Runner 和安全快照之上增加 OS 隔离 | 断网、资源限制、非 root、无危险挂载且不回退 Host |
+| 5 | 3.7 文件竞态加固 | 补齐 Host 文件工具的 TOCTOU 边界 | symlink/inode 竞态均拒绝，外部文件不变 |
+| 6 | 3.8 攻击评测与分层复测 | 先过确定性安全门，再花模型调用验证行为 | 安全硬门槛 100%；12 项诊断复测；90-trial 回归；holdout |
+
+评测代码和真实模型调用只能发生在对应实现与离线回归通过以后，不能边修改边反复运行同一批
+12 项。这样既保留可比性，也避免把评测集变成训练集。
 
 ### Task 3.1：请求级有限重试
 
@@ -157,6 +197,194 @@ HTTP 429；应增加跨 trial/Agent 的共享请求节流、Retry-After 退避�
 - [x] 父进程、worker、快照和报告使用同一重试参数；420 秒 trial 上限保持不变。
 - [x] 完整回归 562 passed，源码覆盖率 86%，Ruff、格式和构建通过。
 - [x] 用户已批准提交、推送并合并 `main`；本轮不新增真实模型复测。
+
+### Task 3.2：Trace 驱动合并与有界候选修复
+
+- [x] 将 `dependency_order` 最终 9 项按稳定身份合入 grader 2.2 的 90-trial 报告。
+- [x] 从脱敏 Trace 生成最多两轮修复提示，只继承候选 `solution.py`，不继承被污染 fixture。
+- [x] 对瞬时 Provider 失败提供独立续跑；请求预算耗尽不自动重试。
+- [x] 首次严格成功 `49/90`，修复后 `78/90`；41 个失败恢复 29 个。
+- [x] 保存来源 SHA256、每轮状态、失败尝试、Token、耗时和公开脱敏摘要。
+- [x] 完整回归 596 passed，Ruff、格式、构建、报告指纹和公开摘要检查通过。
+- [x] Iteration 021 已提交、推送并合并 `main`。
+
+### Task 3.3：执行后端抽象与配置契约
+
+**文件：**
+
+- 新增 `src/sandbox/__init__.py`
+- 新增 `src/sandbox/models.py`
+- 新增 `src/sandbox/base.py`
+- 新增 `src/sandbox/host.py`
+- 新增 `src/sandbox/docker.py`
+- 修改 `src/config/models.py`、`src/config/loader.py`、`src/tools/shell.py`
+- 修改 `src/interfaces/cli.py`、`src/interfaces/repl.py`、`src/commands/status.py`
+- 修改 `pyproject.toml`，把 `src/sandbox` 纳入 wheel
+- 新增 `tests/test_sandbox_config.py`、`tests/test_sandbox_runner.py`
+
+**接口：**
+
+- `SandboxSettings`：`backend` 只允许 `host|docker`；默认 `host`，Docker 默认 512 MiB、
+  1 CPU、128 PIDs、64 MiB tmpfs，禁止网络。
+- `CommandRequest(argv, cwd, timeout)`：只接收 Policy 已批准的 argv，不接收 shell 字符串。
+- `CommandExecution`：统一返回退出码、有界 stdout/stderr、截断、超时、清理和后端元数据。
+- `CommandRunner.run(request, *, control=None) -> CommandExecution`：`HostCommandRunner` 保持兼容；
+  `control` 的 deadline/取消行为在 3.4 接入，`DockerCommandRunner` 在 3.6 提供隔离执行。
+
+- [ ] 先写失败测试：默认 host、显式 docker、非法 backend/资源值、Docker 不可用时 fail closed。
+- [ ] 实现配置解析；`.env` 不新增沙箱开关，防止模型连接配置隐式改变执行权限。
+- [ ] 将 `CommandTools.run_command()` 改为委托 `CommandRunner`，保持现有 ToolResult 合约。
+- [ ] `--sandbox host|docker` 只覆盖本次启动；`/status` 显示实际后端和资源限制。
+- [ ] `--yes --sandbox host` 继续打印“不提供 OS 沙箱”的警告；docker 预检失败时在模型调用前停止。
+- [ ] 运行配置、CLI、工具专项测试，并确认 host 后端现有测试完全兼容。
+
+### Task 3.4：Agent/命令生命周期与停止语义
+
+该任务紧跟 Runner 抽象，先处理 12 个未恢复项暴露的主要根因，再增加 Docker 启动开销。不能靠
+提高 420 秒上限或放宽命令白名单换取通过率。
+
+**文件：**
+
+- 新增 `src/core/control.py`
+- 修改 `src/core/agent.py`、`src/core/loop_detection.py`
+- 修改 `src/routing/router.py`、`src/routing/workflow.py`
+- 修改 `src/sandbox/host.py`、`src/tools/shell.py`
+- 修改 `src/evaluation/compare_modes.py`、`src/evaluation/report.py`
+- 修改 `tests/test_agent.py`、`tests/test_workflow.py`、`tests/test_agent_mode_comparison.py`
+- 新增 `tests/test_sandbox_lifecycle.py`
+
+**接口：**
+
+- `ExecutionControl(deadline_monotonic, cancel_event)`：Agent、工作流和命令 Runner 共用剩余时间与取消信号。
+- `remaining_seconds()`：任何阶段启动模型请求或命令前先计算剩余预算，不使用各层互不相知的超时。
+- `request_budget_exhausted`：请求上限耗尽使用独立终态，不再误报为 Provider 服务错误。
+- 重复策略拒绝保留总终态 `loop_detected`，同时记录结构化 `stop_reason=policy_stall`、工具名和策略原因。
+
+- [ ] 先写失败测试：相同非白名单命令连续被拒后必须有界停止，不能耗尽整个 420 秒或 36 次请求。
+- [ ] 外层 trial deadline 传入 Agent、workflow、team leader/subagents 和命令 Runner；剩余时间不足时
+  不再启动新模型请求或命令，并把停止原因、剩余预算和当前阶段写入 Trace。
+- [ ] 保持 420 秒外层上限不变；不得用延长 deadline 掩盖重试、审批反馈或取消传播缺陷。
+- [ ] 请求预算耗尽、真实 Provider 失败、语义 loop、策略拒绝停滞和用户取消必须使用不同原因；
+  旧报告仍可读取，新报告不得把本地预算耗尽计入 Provider 可用性。
+- [ ] Host 命令使用独立进程组；超时/取消先 TERM，最多等待 2 秒，再 KILL 整组并验证无子进程。
+- [ ] stdout/stderr 边读边丢弃超出预算的部分并继续 drain 管道，避免“捕获完成后截断”的内存峰值。
+- [ ] Agent/REPL 中断传递到正在运行的模型请求和命令；恢复会话不自动重放已中断副作用。
+- [ ] 测试无限循环、重复审批拒绝、输出洪泛、后台子进程、SIGTERM 不退出和并发命令；完成后运行
+  Agent、workflow、评测报告和 Host Runner 专项回归。
+
+### Task 3.5：无敏感文件的临时工作区快照
+
+**文件：**
+
+- 新增 `src/sandbox/snapshot.py`
+- 修改 `src/security/workspace.py`、`src/sandbox/docker.py`
+- 新增 `tests/test_sandbox_snapshot.py`
+
+**接口：**
+
+- `WorkspaceSnapshotBuilder.build(source: Workspace) -> WorkspaceSnapshot`
+- `WorkspaceSnapshot(path, manifest_sha256, file_count, total_bytes)`
+
+- [ ] 先写失败测试：快照遇到 symlink、FIFO 或设备文件必须整体失败，不能跟随或静默跳过；
+  `.git`、`.env*`、凭据、`.venv`、`runs` 和 `.pi-claw` 会话目录按固定规则排除，并把相对路径、
+  数量和原因写入 manifest；文件数与总字节超过上限必须失败而不是截断后继续。
+- [ ] 每次命令从已审批工作区创建新的临时快照；只复制普通文件并记录相对路径、大小和 SHA256。
+- [ ] Docker 只能把快照只读挂载到 `/input`，不能挂载原始工作区、用户目录、Docker socket 或
+  其他宿主目录；受信入口把 `/input` 复制到有容量上限的 `/workspace` tmpfs 后再执行命令。
+- [ ] 容器内命令可写 `/workspace` 以生成缓存/临时文件，但结果不回写快照或原工作区；产品修改
+  仍只能走文件工具审批，磁盘洪泛最多耗尽该容器的 tmpfs 上限。
+- [ ] Docker 后端禁止 `uv sync` 等依赖安装命令；依赖必须预装在固定镜像中，运行时不访问包索引。
+- [ ] Docker 运行环境固定 `UV_PROJECT_ENVIRONMENT=/opt/venv`、`UV_OFFLINE=1`、
+  `UV_NO_SYNC=1`、`UV_NO_ENV_FILE=1`，避免同步、下载或从快照中的 dotenv 注入变量。
+- [ ] 命令结束或异常后清理快照；清理失败进入 Trace 和最终结果，不能伪装为成功。
+
+### Task 3.6：Docker 隔离参数、镜像固定与容器清理
+
+**文件：**
+
+- 新增 `docker/sandbox/Dockerfile`
+- 新增 `docker/sandbox/README.md`
+- 新增 `scripts/build-sandbox-image.sh`
+- 修改 `src/sandbox/docker.py`
+- 新增 `tests/test_docker_sandbox_command.py`
+
+**固定执行边界：**
+
+- 受信宿主代码构造 Docker argv，模型永远不能提供 Docker 参数。
+- 使用绝对 Docker CLI 路径、`shell=False`、`--pull=never`；预检把配置的 tag 解析为不可变
+  image ID，报告中记录 image ID。
+- 默认组合 `--network=none`、`--read-only`、`--cap-drop=ALL`、
+  `--security-opt=no-new-privileges=true`、`--pids-limit=128`、`--memory=512m`、
+  `--memory-swap=512m`、`--cpus=1.0`、非 root UID/GID，以及
+  `--tmpfs=/tmp:rw,nosuid,nodev,noexec,size=64m` 和
+  `--tmpfs=/workspace:rw,nosuid,nodev,noexec,size=256m`。
+- 唯一宿主挂载是临时快照到 `/input:ro`，容器没有任何宿主读写挂载；不使用 `--privileged`、
+  host PID/network、设备映射、Docker socket 或额外 capability。
+- 容器环境使用固定白名单；不透传宿主 `PATH`、模型 API Key、代理变量或 Docker 配置路径。
+
+- [ ] 先测试完整 argv 与固定顺序，证明用户/模型输入不能插入额外挂载、网络或 capability。
+- [ ] 镜像只包含锁定 Python/uv 与项目测试依赖，基础镜像按 digest 固定；构建过程生成 SBOM/摘要。
+- [ ] macOS 使用 Docker Desktop/Colima 的 Linux VM；Linux 推荐 rootless Docker。控制 Docker daemon
+  本身属于高权限操作，因此只允许受信 Pi-Claw 宿主进程调用。
+- [ ] 容器启动失败、镜像漂移、资源参数不受支持时返回明确错误，不降级到 Host。
+- [ ] Docker CLI 接入 3.4 的 `ExecutionControl`；容器使用不可预测名称，所有退出路径在 `finally`
+  中强制删除并确认不存在，清理失败返回 `cleanup_failed`。
+- [ ] Trace 记录 backend、image ID、网络模式、mount 数、资源上限和清理状态，不记录宿主绝对路径
+  或凭据。
+
+### Task 3.7：文件竞态加固
+
+**文件：**
+
+- 新增 `src/security/secure_fs.py`
+- 修改 `src/security/workspace.py`、`src/tools/files.py`、`src/tools/read.py`、
+  `src/tools/write.py`、`src/tools/edit.py`
+- 新增 `tests/test_secure_fs.py`
+
+- [ ] 使用 root directory fd 和相对路径逐段访问；可用平台使用 `O_NOFOLLOW`，拒绝任何中间 symlink。
+- [ ] 在预览、审批后复核和最终打开三个时点核对 inode/type/preimage；原子替换仍在同一目录完成。
+- [ ] 用测试钩子模拟“校验后把父目录换成 symlink”和“审批后换目标文件”，两者均必须拒绝且
+  工作区外文件保持不变。
+- [ ] 不支持安全 dir-fd 语义的平台在 docker 模式正常工作；host 写模式明确 fail closed 或显示
+  降级能力，不能悄悄宣称同等保护。
+- [ ] 文档继续说明：这些措施减少 TOCTOU 窗口，但不能控制同机特权恶意进程。
+
+### Task 3.8：攻击用例、量化验收和文档
+
+**文件：**
+
+- 新增 `tests/test_docker_sandbox_integration.py`
+- 新增 `src/evaluation/sandbox_cases.py`
+- 新增 `src/evaluation/mode_holdout_tasks.py`
+- 新增 `tests/test_agent_mode_holdout.py`
+- 修改 `docs/SECURITY.md`、`docs/RUNTIME.md`、`docs/ARCHITECTURE.md`、`README.MD`
+- 新增 `docs/iterations/ITERATION_022_EXECUTION_SANDBOX.md`
+- 修改 `docs/iterations/README.md` 和本文件阶段状态
+
+- [ ] 使用确定性恶意 fixture 验证：读取宿主文件、读取 `.env`、外联网络、写原工作区、访问
+  Docker socket、fork bomb、内存膨胀、磁盘洪泛、无限循环、后台子进程和输出洪泛。
+- [ ] 必须达到：宿主/凭据泄漏 0、网络成功 0、原工作区命令副作用 0、逃逸成功 0、残留容器/
+  进程 0、攻击用例阻断率 100%。
+- [ ] 超时后 5 秒内完成进程组和容器清理；默认硬限制为 512 MiB、1 CPU、128 PIDs、30 秒。
+- [ ] 连续运行至少 30 个 sandbox trial，报告完成率、清理率、P50/P95 启动与总耗时、峰值输出
+  缓冲、拒绝原因分布；性能只作参考，安全指标是硬门槛。
+- [ ] Docker 缺失时单元测试照常运行，integration 标记为 skip；发布/CI 的 sandbox job 必须有
+  Docker 且不得 skip。若 CI 尚未落地，阶段 3 不能标记全部完成。
+- [ ] 比较 host/docker 的确定性任务结果；允许耗时不同，不允许评分、文件结果或审批语义漂移。
+- [ ] **诊断复测：**只运行 Iteration 021 冻结的 12 个未恢复身份，每项最多一次，保持原模型、
+  420 秒 deadline、24 steps、grader 2.2 和权限策略；单独生成 Stage 3 报告，不替换 78/90 基线。
+- [ ] 诊断复测要求：请求预算耗尽误记为 Provider 错误为 0；deadline + loop 从原 10/12 明显下降，
+  目标不超过 2/12；任何未达目标项必须保留 Trace 和明确根因，不能靠加时或放宽权限重跑。
+- [ ] **同协议完整回归：**从干净工作区重新运行 90 trial，并按冻结规则最多修复两轮；最终严格
+  成功不得低于 78/90，完整报告必须包含全部首次运行、修复尝试、Token、耗时和失败终态。
+- [ ] **新任务 holdout：**在实现冻结后一次性加入至少 3 个同等难度且未参与本阶段调试的任务，
+  三种模式各重复 3 次（至少 27 trial），报告严格成功率、pass@3、pass³、P50/P95、总 Token 和
+  每成功任务 Token；首次结果作为新基线，不因分数修改任务或删除失败。
+- [ ] `90/90` 只能作为 stretch result；阶段完成由确定性安全硬门槛、生命周期目标、原 90 项
+  不回归和 holdout 证据共同决定，不能只展示最好的一次模型结果。
+- [ ] 完整运行 pytest、Ruff、format、覆盖率、wheel/sdist 构建和敏感信息扫描。
+- [ ] 明确发布边界：Docker 显著加强命令隔离，但容器仍不是虚拟机，也不能消除内核/daemon、
+  镜像供应链或宿主配置风险。
 
 ## 阶段 4：语义完成验收
 
@@ -168,7 +396,8 @@ HTTP 429；应增加跨 trial/Agent 的共享请求节流、Retry-After 退避�
 建立带标签的 simple/complex 数据集，报告分类准确率和复杂任务错误降级率。增强子 Agent 独立
 超时、取消、部分结果交接和总 Token 核算。仍明确限定为单宿主并发，不冒充分布式系统。
 
-## 阶段 6：Sandbox 与发布
+## 阶段 6：正式发布
 
-在不削弱现有 Policy/Approval 的前提下增加可选隔离执行后端；准备普通缺陷修复和高风险 Kimi
-审查两个端到端演示，完成版本标签和公开限制说明。
+阶段 3 沙箱硬门槛通过后，准备普通缺陷修复和高风险 Kimi 审查两个端到端演示；演示必须显示
+实际执行后端、镜像 ID、网络与资源限制、审批记录和最终验证证据。随后完成版本标签、变更日志、
+安装文档和公开限制说明；未安装 Docker 的用户继续可选可信 host 模式，但不得把它标为 sandbox。
