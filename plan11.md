@@ -231,12 +231,13 @@ stretch result，不是阶段 3 完成门槛。阶段 3 按下列依赖顺序执
 - `CommandRunner.run(request, *, control=None) -> CommandExecution`：`HostCommandRunner` 保持兼容；
   `control` 的 deadline/取消行为在 3.4 接入，`DockerCommandRunner` 在 3.6 提供隔离执行。
 
-- [ ] 先写失败测试：默认 host、显式 docker、非法 backend/资源值、Docker 不可用时 fail closed。
-- [ ] 实现配置解析；`.env` 不新增沙箱开关，防止模型连接配置隐式改变执行权限。
-- [ ] 将 `CommandTools.run_command()` 改为委托 `CommandRunner`，保持现有 ToolResult 合约。
-- [ ] `--sandbox host|docker` 只覆盖本次启动；`/status` 显示实际后端和资源限制。
-- [ ] `--yes --sandbox host` 继续打印“不提供 OS 沙箱”的警告；docker 预检失败时在模型调用前停止。
-- [ ] 运行配置、CLI、工具专项测试，并确认 host 后端现有测试完全兼容。
+- [x] 先写失败测试：默认 host、显式 docker、非法 backend/资源值、Docker 不可用时 fail closed。
+- [x] 实现配置解析；`.env` 不新增沙箱开关，防止模型连接配置隐式改变执行权限。
+- [x] 将 `CommandTools.run_command()` 改为委托 `CommandRunner`，保持现有 ToolResult 合约。
+- [x] `--sandbox host|docker` 只覆盖本次启动；`/status` 显示实际后端和资源限制。
+- [x] `--yes --sandbox host` 继续打印“不提供 OS 沙箱”的警告；docker 预检失败时在模型调用前停止。
+- [x] 配置、CLI、工具和 Host 兼容专项测试通过；完整回归 615 passed，Ruff、format、wheel/sdist
+  构建、敏感信息签名扫描和 `git diff --check` 通过。
 
 ### Task 3.4：Agent/命令生命周期与停止语义
 

@@ -7,6 +7,8 @@ import subprocess
 from collections.abc import Callable
 
 from core.schemas import PolicyAction, PolicyDecision, ToolCall, ToolResult
+from sandbox.base import CommandRunner
+from sandbox.host import HostCommandRunner
 from security.policy import WorkspacePolicy
 from tools.builtins import BuiltinTools
 from tools.edit import EditTools
@@ -47,6 +49,7 @@ class ToolExecutor(
         max_write_bytes: int = 512_000,
         max_scan_file_bytes: int = 1_000_000,
         max_scan_bytes: int = 10_000_000,
+        command_runner: CommandRunner | None = None,
     ) -> None:
         """绑定策略及资源预算；未提供注册表时装配内置工具，自定义注册表由调用方负责填充。"""
         if command_timeout <= 0:
@@ -68,6 +71,7 @@ class ToolExecutor(
         self.approval_callback = approval_callback
         self.command_timeout = command_timeout
         self.max_output_chars = max_output_chars
+        self.command_runner = command_runner or HostCommandRunner(max_output_chars=max_output_chars)
         self.max_files = max_files
         self.max_matches = max_matches
         self.max_read_bytes = max_read_bytes

@@ -30,6 +30,7 @@ packages = [
   "src/persistence",
   "src/providers",
   "src/routing",
+  "src/sandbox",
   "src/security",
   "src/tools",
 ]

@@ -17,6 +17,7 @@ PACKAGES = {
     "persistence",
     "providers",
     "routing",
+    "sandbox",
     "security",
     "tools",
 }

@@ -60,6 +60,20 @@ class RoutingSettings:
 
 
 @dataclass(frozen=True)
+class SandboxSettings:
+    """一次启动的命令执行边界；host 是可信工作区兼容模式。"""
+
+    backend: str = "host"
+    memory_mib: int = 512
+    cpus: float = 1.0
+    pids: int = 128
+    tmpfs_mib: int = 64
+    workspace_tmpfs_mib: int = 256
+    network: str = "none"
+    image: str = "pi-claw-sandbox:local"
+
+
+@dataclass(frozen=True)
 class Settings:
     """一次启动独立配置；不修改全局 os.environ。"""
 
@@ -69,3 +83,4 @@ class Settings:
     config_path: Path | None = None
     env_file: Path | None = None
     workflow: WorkflowSettings = field(default_factory=WorkflowSettings)
+    sandbox: SandboxSettings = field(default_factory=SandboxSettings)

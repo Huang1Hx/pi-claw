@@ -24,6 +24,8 @@ from persistence.session_store import SessionInfo, SessionStore
 from persistence.trace import TraceWriter, redact
 from providers import OfflineCodingProvider, Provider
 from routing import RoutedProvider
+from sandbox import create_runner
+from sandbox.base import CommandRunner
 from security.approval import TerminalApprovalBroker
 from security.policy import WorkspacePolicy
 from tools import ToolExecutor
@@ -54,6 +56,7 @@ class CodingRepl:
         streaming: bool = True,
         settings: Settings | None = None,
         max_attempts: int = 3,
+        command_runner: CommandRunner | None = None,
     ) -> None:
         """恢复或创建会话、加载带序号的活动快照并装配运行时；模型在用户回合才调用。"""
         self.workspace = Path(workspace).expanduser().resolve(strict=True)
@@ -72,6 +75,9 @@ class CodingRepl:
         self.streaming = streaming
         self.display = ReplyDisplay(self.output)
         self.settings = settings
+        self.command_runner = command_runner or create_runner(
+            settings.sandbox if settings is not None else Settings().sandbox
+        )
         self.max_attempts = max_attempts
         self.commands = create_commands()
         self.terminal_input = TerminalInput(
@@ -137,7 +143,9 @@ class CodingRepl:
             allow_commands=True,
             command_profile="coding",
         )
-        executor = ToolExecutor(policy, approval_callback=self.approval)
+        executor = ToolExecutor(
+            policy, approval_callback=self.approval, command_runner=self.command_runner
+        )
         system_prompt = next(
             (
                 str(message.get("content", ""))

@@ -9,7 +9,26 @@ from pathlib import Path
 
 from config.connections import resolve_connection
 from config.env import read_env
-from config.models import ModelProfile, RoutingSettings, Settings, WorkflowSettings
+from config.models import ModelProfile, RoutingSettings, SandboxSettings, Settings, WorkflowSettings
+
+
+def _sandbox_settings(value: object) -> SandboxSettings:
+    """只接受显式 TOML 沙箱配置，拒绝放宽网络边界或无效预算。"""
+    if not isinstance(value, dict) or set(value) - set(SandboxSettings.__dataclass_fields__):
+        raise ValueError("sandbox 包含未知配置项")
+    settings = SandboxSettings(**value)
+    if type(settings.backend) is not str or settings.backend not in {"host", "docker"}:
+        raise ValueError("sandbox.backend 必须是 host 或 docker")
+    for name in ("memory_mib", "pids", "tmpfs_mib", "workspace_tmpfs_mib"):
+        item = getattr(settings, name)
+        if type(item) is not int or item <= 0:
+            raise ValueError(f"sandbox.{name} 必须是正整数")
+    if type(settings.cpus) not in {int, float} or not 0 < settings.cpus <= 64:
+        raise ValueError("sandbox.cpus 必须是有效正数")
+    if settings.network != "none":
+        raise ValueError("sandbox.network 只能是 none")
+    _string(settings.image, "sandbox.image")
+    return settings
 
 
 def _price(value: object, label: str) -> Decimal | None:
@@ -67,7 +86,7 @@ def load_settings(
         data = tomllib.loads(raw.decode("utf-8"))
     except (tomllib.TOMLDecodeError, UnicodeDecodeError):
         raise ValueError("TOML 配置格式无效") from None
-    if set(data) - {"connection", "models", "routing", "workflow"}:
+    if set(data) - {"connection", "models", "routing", "workflow", "sandbox"}:
         raise ValueError("未知 TOML 顶层配置项")
     shared_connection = (
         resolve_connection(data["connection"], environment, label="connection")
@@ -198,4 +217,7 @@ def load_settings(
             raise ValueError("workflow.premium_reviewer 必须引用已定义的 profile")
     if workflow.premium_review_policy != "off" and workflow.premium_reviewer is None:
         raise ValueError("启用高级审查时必须配置 workflow.premium_reviewer")
-    return Settings(profiles, routing, environment, config_path.resolve(), source_env, workflow)
+    sandbox = _sandbox_settings(data.get("sandbox", {}))
+    return Settings(
+        profiles, routing, environment, config_path.resolve(), source_env, workflow, sandbox
+    )

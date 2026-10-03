@@ -8,6 +8,7 @@ import sys
 import tempfile
 import uuid
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from persistence.session_store import SessionStore
 from persistence.trace import TraceReplay, TraceWriter
 from providers import OfflineCodingProvider, OpenAICompatibleProvider, ScriptedProvider
 from routing import RoutedProvider
+from sandbox import create_runner
 from security.policy import WorkspacePolicy
 from tools import ToolExecutor
 
@@ -133,6 +135,7 @@ def _add_config_options(parser: argparse.ArgumentParser) -> None:
     """两个模型入口共享显式配置参数；.env 默认仅在启动目录加载。"""
     parser.add_argument("--config", type=Path, help="显式加载模型 profile TOML")
     parser.add_argument("--route", metavar="auto|PROFILE", help="启用路由或固定已配置 profile")
+    parser.add_argument("--sandbox", choices=("host", "docker"), help="覆盖本次启动的命令后端")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--env-file", type=Path, help="覆盖启动目录的 .env")
     group.add_argument("--no-env", action="store_true", help="不读取 .env，仍读取进程环境")
@@ -160,11 +163,11 @@ def _approval(enabled: bool):
     return (lambda *_: True) if enabled else None
 
 
-def _warn_yes(enabled: bool) -> None:
+def _warn_yes(enabled: bool, backend: str = "host") -> None:
     """使用 --yes 时向标准错误提示执行仓库代码的风险；这不是沙箱授权。"""
-    if enabled:
+    if enabled and backend == "host":
         print(
-            "警告：--yes 会运行工作区代码；本程序不提供进程沙箱，仅对可信工作区使用。",
+            "警告：--yes 会运行工作区代码；host 不提供 OS 沙箱，仅对可信工作区使用。",
             file=sys.stderr,
         )
 
@@ -250,7 +253,7 @@ def _run_demo(args: argparse.Namespace) -> int:
 
 def _run_agent(args: argparse.Namespace) -> int:
     """装配一次性任务的 Provider、Policy、工具和验收器，输出 JSON 终态并返回退出码。"""
-    _warn_yes(args.yes)
+    _warn_yes(args.yes, args.settings.sandbox.backend)
     workspace = resolve_workspace(args.workspace)
     trace = _trace(args.trace)
     print(f"审计轨迹：{trace.path}")
@@ -274,7 +277,9 @@ def _run_agent(args: argparse.Namespace) -> int:
             ]
         )
     policy = WorkspacePolicy(workspace, allow_write=args.yes, allow_commands=args.yes)
-    executor = ToolExecutor(policy, approval_callback=_approval(args.yes))
+    executor = ToolExecutor(
+        policy, approval_callback=_approval(args.yes), command_runner=args.command_runner
+    )
     result = Agent(
         provider,
         executor,
@@ -288,7 +293,7 @@ def _run_agent(args: argparse.Namespace) -> int:
 
 def _run_chat(args: argparse.Namespace) -> int:
     """解析恢复会话和模型配置，装配 CodingRepl；密钥仅从本次启动配置取得。"""
-    _warn_yes(args.yes)
+    _warn_yes(args.yes, args.settings.sandbox.backend)
     workspace = resolve_workspace(args.workspace)
     trace = _trace(args.trace)
     print(f"审计轨迹：{trace.path}")
@@ -340,6 +345,7 @@ def _run_chat(args: argparse.Namespace) -> int:
         streaming=not args.no_stream,
         settings=args.settings,
         max_attempts=args.max_attempts,
+        command_runner=args.command_runner,
     )
     return repl.run(args.prompt, print_only=args.print_only)
 
@@ -429,6 +435,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.settings = load_settings(
                 config_path=args.config, env_file=args.env_file, no_env=args.no_env
             )
+            if args.sandbox:
+                args.settings = replace(
+                    args.settings, sandbox=replace(args.settings.sandbox, backend=args.sandbox)
+                )
+            args.command_runner = create_runner(args.settings.sandbox)
         if args.command == "chat":
             return _run_chat(args)
         if args.command == "sessions":
@@ -451,7 +462,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"报告：{args.output.resolve()}"
             )
             return 0 if report["passed_cases"] == report["total_cases"] else 1
-    except (OSError, TypeError, ValueError) as exc:
+    except (OSError, TypeError, ValueError, RuntimeError) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 2
     parser.error("未知命令")
