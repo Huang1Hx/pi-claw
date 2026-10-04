@@ -27,6 +27,9 @@ class RunStatus(StrEnum):
     UNVERIFIED = "unverified"
     FAILED = "failed"
     LOOP_DETECTED = "loop_detected"
+    REQUEST_BUDGET_EXHAUSTED = "request_budget_exhausted"
+    DEADLINE = "deadline"
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True, slots=True)

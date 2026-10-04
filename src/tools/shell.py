@@ -28,7 +28,10 @@ class CommandTools:
         effective_timeout = self.command_timeout if timeout is None else float(timeout)
         if effective_timeout <= 0 or effective_timeout > self.command_timeout:
             raise ValueError(f"timeout 必须在 0 到 {self.command_timeout} 秒之间")
-        execution = self.command_runner.run(CommandRequest(argv, resolved_cwd, effective_timeout))
+        execution = self.command_runner.run(
+            CommandRequest(argv, resolved_cwd, effective_timeout),
+            control=self.execution_control,
+        )
         return {
             "argv": argv,
             "cwd": str(resolved_cwd.relative_to(self.workspace.root)) or ".",
@@ -39,4 +42,5 @@ class CommandTools:
             "backend": execution.backend,
             "timed_out": execution.timed_out,
             "cleanup_failed": execution.cleanup_failed,
+            "cancelled": execution.cancelled,
         }

@@ -12,13 +12,14 @@ from typing import Any
 
 from core.completion import CompletionCheck, CompletionVerifier, ToolObservation
 from core.context import ContextManager
+from core.control import ExecutionCancelled, ExecutionControl, ExecutionDeadlineExceeded
 from core.events import AgentEvent
 from core.hooks import HookBus, HookDecision
 from core.loop_detection import RepetitionGuard
-from core.schemas import ModelReply, RunResult, RunStatus, ToolResult
+from core.schemas import ModelReply, RunResult, RunStatus, ToolCall, ToolResult
 from core.usage import TokenUsage, UsageTracker
 from persistence.trace import TraceWriter, redact
-from providers import Provider, ProviderError, WorkflowStopped
+from providers import Provider, ProviderError, RequestBudgetExceeded, WorkflowStopped
 from tools import ApprovalCallback, ToolExecutor
 
 # 逐条消息持久化回调，与只负责展示进度的 on_event 分开；存储失败不能静默忽略。
@@ -74,12 +75,14 @@ class Agent:
         self._event_seq = 0
         self._running = False
         self._workflow_generation = 0
+        self._control: ExecutionControl | None = None
 
     def run(
         self,
         task: str,
         *,
         messages: list[dict[str, Any]] | None = None,
+        control: ExecutionControl | None = None,
     ) -> RunResult:
         """执行一个用户回合，返回包含终态、用量和路由摘要的 RunResult。
 
@@ -97,8 +100,12 @@ class Agent:
         self.usage = UsageTracker()
         self._event_seq = 0
         self._workflow_generation = 0
+        self._control = control or ExecutionControl()
         result = None
         try:
+            set_control = getattr(self.provider, "set_control", None)
+            if callable(set_control):
+                set_control(self._control)
             begin_run = getattr(self.provider, "begin_run", None)
             if callable(begin_run):
                 begin_run(task)
@@ -120,6 +127,7 @@ class Agent:
             self._fire_hook("run_end", payload, result.steps if result else 0, run_id)
             self._emit("run_end", payload, result.steps if result else 0, run_id)
             self._running = False
+            self._control = None
 
     def _run(
         self,
@@ -148,6 +156,8 @@ class Agent:
 
         for step in range(1, self.max_steps + 1):
             try:
+                if self._control is not None:
+                    self._control.checkpoint()
                 # 只缩减发给模型的活动窗口，已落盘的原始 journal/trace 不随之删除。
                 if self.context_manager:
                     pruned, count = self.context_manager.prune_tool_results(history)
@@ -167,12 +177,41 @@ class Agent:
                     self._fire_hook("after_compact", {"messages": len(history)}, step, run_id)
                 schemas = self.tool_executor.registry.openai_schemas()
                 reply = self._model_reply(history, schemas, step, run_id)
+                if self._control is not None:
+                    self._control.checkpoint()
                 if not isinstance(reply, ModelReply):
                     raise ProviderError("Provider 必须返回 ModelReply")
             except WorkflowStopped as exc:
                 error = str(exc)
                 self._record("run_unverified", {"error": error}, step, run_id)
                 return RunResult(RunStatus.UNVERIFIED, run_id, step, error=error)
+            except RequestBudgetExceeded as exc:
+                error = str(exc)
+                self._record(
+                    "request_budget_exhausted",
+                    self._stop_context("request_budget_exhausted", error),
+                    step,
+                    run_id,
+                )
+                return RunResult(
+                    RunStatus.REQUEST_BUDGET_EXHAUSTED,
+                    run_id,
+                    step,
+                    error=error,
+                )
+            except ExecutionDeadlineExceeded as exc:
+                error = str(exc)
+                self._record("deadline", self._stop_context("deadline", error), step, run_id)
+                return RunResult(RunStatus.DEADLINE, run_id, step, error=error)
+            except ExecutionCancelled as exc:
+                error = str(exc)
+                self._record("cancelled", self._stop_context("user_cancelled", error), step, run_id)
+                return RunResult(RunStatus.CANCELLED, run_id, step, error=error)
+            except KeyboardInterrupt:
+                self._control.cancel()
+                error = "用户中断了正在进行的模型请求"
+                self._record("cancelled", self._stop_context("user_interrupt", error), step, run_id)
+                return RunResult(RunStatus.CANCELLED, run_id, step, error=error)
             except Exception as exc:  # Provider 是可插拔边界，需把未知实现错误转成结果。
                 error = f"Provider 错误：{exc}"
                 self._record("provider_error", {"error": error}, step, run_id)
@@ -265,7 +304,36 @@ class Agent:
                 reply.to_message(),
             )
             repeated = False
-            for call in calls:
+            for call_index, call in enumerate(calls):
+                try:
+                    if self._control is not None:
+                        self._control.checkpoint()
+                except ExecutionDeadlineExceeded as exc:
+                    error = str(exc)
+                    self._record_interrupted_tools(
+                        history,
+                        calls[call_index:],
+                        error,
+                        step,
+                        run_id,
+                        current_started=False,
+                    )
+                    self._record("deadline", self._stop_context("deadline", error), step, run_id)
+                    return RunResult(RunStatus.DEADLINE, run_id, step, error=error)
+                except ExecutionCancelled as exc:
+                    error = str(exc)
+                    self._record_interrupted_tools(
+                        history,
+                        calls[call_index:],
+                        error,
+                        step,
+                        run_id,
+                        current_started=False,
+                    )
+                    self._record(
+                        "cancelled", self._stop_context("user_cancelled", error), step, run_id
+                    )
+                    return RunResult(RunStatus.CANCELLED, run_id, step, error=error)
                 self._record("tool_call", call.to_dict(), step, run_id)
                 decision = self._fire_hook("before_tool", call.to_dict(), step, run_id)
                 if repeated:
@@ -280,7 +348,77 @@ class Agent:
                         call.id, call.name, False, error=f"Hook 拒绝：{decision.reason}"
                     )
                 else:
-                    result = self.tool_executor.execute(call)
+                    try:
+                        result = self.tool_executor.execute(call, control=self._control)
+                    except ExecutionDeadlineExceeded as exc:
+                        cleanup_failed = bool(getattr(exc, "cleanup_failed", False))
+                        error = str(exc) + ("；命令进程组清理失败" if cleanup_failed else "")
+                        self._record_interrupted_tools(
+                            history,
+                            calls[call_index:],
+                            error,
+                            step,
+                            run_id,
+                            current_started=True,
+                        )
+                        self._record(
+                            "deadline",
+                            self._stop_context(
+                                "deadline",
+                                error,
+                                cleanup_failed=cleanup_failed,
+                            ),
+                            step,
+                            run_id,
+                        )
+                        return RunResult(RunStatus.DEADLINE, run_id, step, error=error)
+                    except ExecutionCancelled as exc:
+                        cleanup_failed = bool(getattr(exc, "cleanup_failed", False))
+                        error = str(exc) + ("；命令进程组清理失败" if cleanup_failed else "")
+                        self._record_interrupted_tools(
+                            history,
+                            calls[call_index:],
+                            error,
+                            step,
+                            run_id,
+                            current_started=True,
+                        )
+                        self._record(
+                            "cancelled",
+                            self._stop_context(
+                                "user_cancelled",
+                                error,
+                                cleanup_failed=cleanup_failed,
+                            ),
+                            step,
+                            run_id,
+                        )
+                        return RunResult(RunStatus.CANCELLED, run_id, step, error=error)
+                    except KeyboardInterrupt as exc:
+                        self._control.cancel()
+                        cleanup_failed = bool(getattr(exc, "cleanup_failed", False))
+                        error = "用户中断了正在执行的工具" + (
+                            "；命令进程组清理失败" if cleanup_failed else ""
+                        )
+                        self._record_interrupted_tools(
+                            history,
+                            calls[call_index:],
+                            error,
+                            step,
+                            run_id,
+                            current_started=True,
+                        )
+                        self._record(
+                            "cancelled",
+                            self._stop_context(
+                                "user_interrupt",
+                                error,
+                                cleanup_failed=cleanup_failed,
+                            ),
+                            step,
+                            run_id,
+                        )
+                        return RunResult(RunStatus.CANCELLED, run_id, step, error=error)
                 # 拒绝、失败也形成真实观察；模型下一轮才能据此恢复，而不是猜测执行结果。
                 observations.append(ToolObservation(call, result))
                 self._fire_hook("after_tool", result.to_dict(), step, run_id)
@@ -306,12 +444,76 @@ class Agent:
                 repeated = repeated or guard.observe(call, result)
             if repeated:
                 error = "相同工具参数和结果反复出现，已停止无进展循环"
-                self._record("loop_detected", {"error": error}, step, run_id)
+                self._record(
+                    "loop_detected",
+                    self._stop_context(
+                        guard.stop_reason,
+                        error,
+                        tool_name=guard.tool_name,
+                        policy_reason=guard.policy_reason,
+                    ),
+                    step,
+                    run_id,
+                )
                 return RunResult(RunStatus.LOOP_DETECTED, run_id, step, error=error)
 
         error = f"达到最大步骤数 {self.max_steps}，已安全停止"
         self._record("max_steps_reached", {"error": error}, self.max_steps, run_id)
         return RunResult(RunStatus.MAX_STEPS, run_id, self.max_steps, error=error)
+
+    def _stop_context(self, stop_reason: str, error: str, **details: Any) -> dict[str, Any]:
+        """构造不含凭据的结构化停止上下文，供 Trace 和评测归因。"""
+        remaining = self._control.remaining_seconds() if self._control is not None else None
+        workflow = getattr(self.provider, "workflow", None)
+        phase = getattr(workflow, "phase", None)
+        if hasattr(phase, "value"):
+            phase = phase.value
+        return {
+            "error": error,
+            "stop_reason": stop_reason,
+            "remaining_seconds": round(remaining, 3) if remaining is not None else None,
+            "phase": phase,
+            **{key: value for key, value in details.items() if value is not None},
+        }
+
+    def _record_interrupted_tools(
+        self,
+        history: list[dict[str, Any]],
+        calls: tuple[ToolCall, ...],
+        error: str,
+        step: int,
+        run_id: str,
+        *,
+        current_started: bool,
+    ) -> None:
+        """补齐本轮所有未完成调用，保持协议成对并禁止恢复时自动重放。"""
+        for index, call in enumerate(calls):
+            started = index == 0 and current_started
+            metadata = {"interrupted": True, "replay_allowed": False}
+            if not started:
+                metadata["not_started"] = True
+            message = (
+                f"工具执行被中断，副作用状态未知：{error}"
+                if started
+                else f"同轮前序调用已停止，本工具未执行：{error}"
+            )
+            result = ToolResult(
+                call.id,
+                call.name,
+                False,
+                error=message,
+                metadata=metadata,
+            )
+            self._record("tool_result", result.to_dict(), step, run_id)
+            self._append_message(
+                history,
+                {
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "name": call.name,
+                    "content": json.dumps(result.to_dict(), ensure_ascii=False),
+                },
+            )
 
     def _verify_completion(
         self,

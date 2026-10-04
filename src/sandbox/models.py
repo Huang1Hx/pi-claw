@@ -33,5 +33,6 @@ class CommandExecution:
     truncated: bool
     timed_out: bool = False
     cleanup_failed: bool = False
+    cancelled: bool = False
     backend: str = "host"
     metadata: dict[str, str | int | float | bool] = field(default_factory=dict)

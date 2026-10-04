@@ -7,6 +7,7 @@ import pytest
 
 from config import ModelProfile, RoutingSettings, Settings
 from core.agent import Agent
+from core.control import ExecutionControl
 from core.schemas import ModelReply, RunStatus, ToolCall
 from core.usage import TokenUsage
 from providers import ScriptedProvider
@@ -121,7 +122,7 @@ def test_cheap_round_limit_and_request_budget(workspace):
     )
     assert result.ok and result.routing["escalations"] == 1
     stopped, _, _ = run_routed(workspace, [reply(call=read)], [], config=settings(max_requests=1))
-    assert stopped.status is RunStatus.PROVIDER_ERROR
+    assert stopped.status is RunStatus.REQUEST_BUDGET_EXHAUSTED
     assert stopped.routing["requests"] == 1
 
 
@@ -177,6 +178,41 @@ def test_router_forwards_retry_budget_and_delays_to_http_transport(monkeypatch):
     assert captured["max_attempts"] == 3
     assert captured["retry_base_delay"] == 2.0
     assert captured["max_retry_delay"] == 10.0
+
+
+def test_router_clamps_model_timeout_to_outer_deadline(monkeypatch, workspace):
+    """单次 HTTP 请求不能占用超过整个 Agent 运行的剩余墙钟时间。"""
+    captured = {}
+
+    class CapturingProvider:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def events(self, messages, tools, *, stream):
+            yield ProviderEvent("message_complete", reply=reply())
+
+    monkeypatch.setattr("routing.router.OpenAICompatibleProvider", CapturingProvider)
+    control = ExecutionControl(deadline_monotonic=13.0, clock=lambda: 10.0)
+    result = Agent(
+        RoutedProvider(settings(), mode="primary"),
+        ToolExecutor(WorkspacePolicy(workspace)),
+    ).run("task", control=control)
+
+    assert result.ok
+    assert captured["timeout"] == pytest.approx(3.0)
+
+
+def test_pre_cancelled_routed_run_returns_cancelled_result(workspace):
+    """路由回合初始化不能在 Agent 的终态处理边界之外抛出取消异常。"""
+    provider = ScriptedProvider([reply()])
+    router = RoutedProvider(settings(), mode="primary", factory=lambda _profile: provider)
+    control = ExecutionControl()
+    control.cancel()
+
+    result = Agent(router, ToolExecutor(WorkspacePolicy(workspace))).run("task", control=control)
+
+    assert result.status is RunStatus.CANCELLED
+    assert result.usage["requests"] == 0
 
 
 def test_streaming_routing_filters_tools_and_enforces_policy(workspace):

@@ -6,7 +6,8 @@ import time
 import pytest
 
 from core.agent import Agent
-from core.schemas import ModelReply
+from core.control import ExecutionControl
+from core.schemas import ModelReply, RunStatus
 from core.team import ReadOnlySubagentTeam, SubagentAssignment
 from core.usage import TokenUsage
 from providers import ScriptedProvider
@@ -90,3 +91,29 @@ def test_team_validates_exact_assignments(tmp_path):
     )
     with pytest.raises(ValueError, match="一一对应"):
         team.run("task", (SubagentAssignment("other", "role", "task"),))
+
+
+def test_team_shares_outer_cancellation_with_children_and_leader(tmp_path):
+    """取消属于整个团队运行，不能只停主 Agent 而留下子 Agent 继续请求。"""
+    control = ExecutionControl()
+    control.cancel()
+    team = ReadOnlySubagentTeam(
+        make_agent(tmp_path, ScriptedProvider([ModelReply.final("lead")])),
+        {
+            "a": make_agent(tmp_path, ScriptedProvider([ModelReply.final("a")])),
+            "b": make_agent(tmp_path, ScriptedProvider([ModelReply.final("b")])),
+        },
+    )
+
+    result = team.run(
+        "task",
+        (
+            SubagentAssignment("a", "role", "task-a"),
+            SubagentAssignment("b", "role", "task-b"),
+        ),
+        control=control,
+    )
+
+    assert result.leader.status is RunStatus.CANCELLED
+    assert {item.result.status for item in result.subagents} == {RunStatus.CANCELLED}
+    assert result.usage["requests"] == 0

@@ -6,6 +6,7 @@ import inspect
 import subprocess
 from collections.abc import Callable
 
+from core.control import ExecutionControl, ExecutionStopped
 from core.schemas import PolicyAction, PolicyDecision, ToolCall, ToolResult
 from sandbox.base import CommandRunner
 from sandbox.host import HostCommandRunner
@@ -72,6 +73,7 @@ class ToolExecutor(
         self.command_timeout = command_timeout
         self.max_output_chars = max_output_chars
         self.command_runner = command_runner or HostCommandRunner(max_output_chars=max_output_chars)
+        self.execution_control: ExecutionControl | None = None
         self.max_files = max_files
         self.max_matches = max_matches
         self.max_read_bytes = max_read_bytes
@@ -82,13 +84,21 @@ class ToolExecutor(
         if registry is None:
             self._register_builtin_tools()
 
-    def execute(self, call: ToolCall, *, approved: bool = False) -> ToolResult:
+    def execute(
+        self,
+        call: ToolCall,
+        *,
+        approved: bool = False,
+        control: ExecutionControl | None = None,
+    ) -> ToolResult:
         """统一经过策略、审批与版本复核后执行工具并返回标准结果。
 
         call 是模型提议，不是授权；approved 是受信宿主的显式批准，不能覆盖 DENY。
         策略拒绝、未获审批、超时和普通 handler 异常均返回 ok=False 的 ToolResult。
         文件工具可能写入磁盘，命令工具可能运行仓库代码；本层不提供 OS 沙箱。
         """
+        if control is not None:
+            control.checkpoint()
         decision = self.policy.evaluate(call)
         policy_metadata = {"policy": decision.to_dict()}
         if decision.action is PolicyAction.DENY:
@@ -121,6 +131,9 @@ class ToolExecutor(
                 )
 
         # 只有过完策略和审批门槛，才从注册表取出真实函数并展开参数调用。
+        # 审批可能阻塞较长时间，必须在任何真实 handler/副作用前重新检查生命周期。
+        if control is not None:
+            control.checkpoint()
         handler = self.registry.get(call.name)
         if handler is None:
             return ToolResult(
@@ -130,6 +143,8 @@ class ToolExecutor(
                 error=f"未知工具：{call.name}",
                 metadata=policy_metadata,
             )
+        previous_control = self.execution_control
+        self.execution_control = control
         try:
             output = handler(**call.arguments)
             ok = not (
@@ -146,6 +161,8 @@ class ToolExecutor(
                 error=error,
                 metadata=policy_metadata,
             )
+        except ExecutionStopped:
+            raise
         except subprocess.TimeoutExpired as exc:
             return ToolResult(
                 call.id,
@@ -162,6 +179,8 @@ class ToolExecutor(
                 error=f"工具执行失败：{exc}",
                 metadata=policy_metadata,
             )
+        finally:
+            self.execution_control = previous_control
 
     def _request_approval(
         self,

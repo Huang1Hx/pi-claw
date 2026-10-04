@@ -16,6 +16,9 @@ class RepetitionGuard:
             raise ValueError("重复阈值至少为 2，窗口不得小于阈值")
         self.threshold = threshold
         self.history: deque[str] = deque(maxlen=window)
+        self.stop_reason = "semantic_loop"
+        self.tool_name: str | None = None
+        self.policy_reason: str | None = None
 
     def observe(self, call: ToolCall, result: ToolResult) -> bool:
         """成功写入视为进展并重置窗口；其他调用按真实结果比较。"""
@@ -26,4 +29,16 @@ class RepetitionGuard:
         encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode()
         fingerprint = hashlib.sha256(encoded).hexdigest()
         self.history.append(fingerprint)
-        return self.history.count(fingerprint) >= self.threshold
+        repeated = self.history.count(fingerprint) >= self.threshold
+        if repeated:
+            policy = result.metadata.get("policy", {})
+            self.tool_name = call.name
+            if policy.get("action") == "deny" or (result.error or "").startswith(
+                ("策略拒绝：", "未获批准：")
+            ):
+                self.stop_reason = "policy_stall"
+                self.policy_reason = str(policy.get("reason") or result.error or "策略拒绝")
+            else:
+                self.stop_reason = "semantic_loop"
+                self.policy_reason = None
+        return repeated

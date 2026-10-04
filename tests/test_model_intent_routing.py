@@ -9,6 +9,7 @@ import pytest
 
 from config import ModelProfile, RoutingSettings, Settings, load_settings
 from core.agent import Agent
+from core.control import ExecutionControl
 from core.schemas import ModelReply, RunStatus, ToolCall
 from core.usage import TokenUsage
 from providers import ProviderError, ScriptedProvider
@@ -177,9 +178,33 @@ def test_classification_failure_falls_back_without_logging_raw_error(workspace):
 def test_classification_cannot_bypass_total_request_limit(workspace):
     """分类也消耗总请求配额，配额耗尽后不得继续主力请求。"""
     result, _, _ = run(workspace, [classified("complex")], [], settings=config(max_requests=1))
-    assert result.status is RunStatus.PROVIDER_ERROR
+    assert result.status is RunStatus.REQUEST_BUDGET_EXHAUSTED
     assert result.routing["requests"] == result.routing["classification_requests"] == 1
     assert result.usage["total_tokens"] == 55
+
+
+def test_cancellation_during_classification_never_starts_execution_model(workspace):
+    """分类结束时已取消，不能被 fallback 吞掉后继续请求主力模型。"""
+    control = ExecutionControl()
+    calls = []
+
+    class CancellingClassifier:
+        def complete(self, messages, tools=None):
+            control.cancel()
+            return classified("complex")
+
+    def factory(profile):
+        calls.append(profile.name)
+        return CancellingClassifier() if profile.name == "economy" else ScriptedProvider([answer()])
+
+    router = RoutedProvider(config(), factory=factory)
+    result = Agent(router, ToolExecutor(WorkspacePolicy(workspace))).run(
+        "判断意图", control=control
+    )
+
+    assert result.status is RunStatus.CANCELLED
+    assert calls == ["economy"]
+    assert result.routing["requests"] == 1
 
 
 def test_task_length_bound_skips_classifier_and_uses_strong(workspace):

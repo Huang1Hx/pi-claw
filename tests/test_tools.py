@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from core.control import ExecutionCancelled, ExecutionControl
 from core.schemas import ToolCall
 from security.approval import TerminalApprovalBroker
 from security.policy import WorkspacePolicy
@@ -104,6 +105,28 @@ def test_exact_replace_after_explicit_approval(workspace: Path) -> None:
     assert result.output["replacements"] == 1
     assert seen == ["write_or_replace"]
     assert (workspace / "alpha.txt").read_text(encoding="utf-8").startswith("changed")
+
+
+def test_cancellation_during_approval_prevents_handler_side_effect(workspace: Path) -> None:
+    """批准返回后必须重新检查生命周期，取消的写入不能进入真实 handler。"""
+    control = ExecutionControl()
+
+    def cancel_then_approve(*_args) -> bool:
+        control.cancel()
+        return True
+
+    executor = ToolExecutor(
+        WorkspacePolicy(workspace, allow_write=True), approval_callback=cancel_then_approve
+    )
+    call = ToolCall(
+        "write",
+        "write_or_replace",
+        {"path": "alpha.txt", "old": "alpha", "new": "changed"},
+    )
+
+    with pytest.raises(ExecutionCancelled):
+        executor.execute(call, control=control)
+    assert (workspace / "alpha.txt").read_text(encoding="utf-8").startswith("alpha")
 
 
 @pytest.mark.parametrize(

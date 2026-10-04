@@ -8,6 +8,7 @@ from typing import Any
 
 from core.agent import Agent
 from core.completion import ToolEvidenceCompletionVerifier
+from core.control import ExecutionControl
 from core.schemas import ModelReply, RunStatus, ToolCall
 from persistence.trace import TraceReplay, TraceWriter
 from providers import ProviderError, ScriptedProvider
@@ -58,6 +59,41 @@ def test_agent_converts_provider_error_to_result(workspace: Path) -> None:
     assert "offline failure" in result.error
 
 
+def test_agent_converts_keyboard_interrupt_to_cancelled_without_retry(workspace: Path) -> None:
+    """终端 Ctrl+C 是用户取消，不应冒充 Provider 故障或自动再次请求。"""
+
+    class InterruptedProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, _messages: object, _tools: object) -> ModelReply:
+            self.calls += 1
+            raise KeyboardInterrupt
+
+    provider = InterruptedProvider()
+    result = Agent(provider, ToolExecutor(WorkspacePolicy(workspace))).run("task")
+
+    assert result.status is RunStatus.CANCELLED
+    assert provider.calls == 1
+
+
+def test_agent_checks_cancellation_after_custom_provider_returns(workspace: Path) -> None:
+    """不感知 control 的自定义 Provider 返回后，也不能用完整文本覆盖取消终态。"""
+    control = ExecutionControl()
+
+    class CancellingProvider:
+        def complete(self, _messages: object, _tools: object) -> ModelReply:
+            control.cancel()
+            return ModelReply.final("too late")
+
+    result = Agent(CancellingProvider(), ToolExecutor(WorkspacePolicy(workspace))).run(
+        "task", control=control
+    )
+
+    assert result.status is RunStatus.CANCELLED
+    assert result.final_text is None
+
+
 def test_agent_rejects_provider_returning_wrong_type(workspace: Path) -> None:
     class InvalidProvider:
         def complete(self, _messages: object, _tools: object) -> str:
@@ -81,6 +117,50 @@ def test_agent_stops_at_max_steps(workspace: Path) -> None:
     assert result.status is RunStatus.MAX_STEPS
     assert result.steps == 2
     assert "安全停止" in result.error
+
+
+def test_repeated_policy_denial_records_policy_stall(workspace: Path, tmp_path: Path) -> None:
+    """同一越权调用连续被拒绝时要有界停止，并在 Trace 标明策略停滞。"""
+    trace_path = tmp_path / "policy-stall.jsonl"
+    replies = [
+        ModelReply.call(ToolCall(f"escape-{index}", "read_file", {"path": "../outside"}))
+        for index in range(3)
+    ]
+
+    result = Agent(
+        ScriptedProvider(replies),
+        ToolExecutor(WorkspacePolicy(workspace)),
+        trace=TraceWriter(trace_path),
+        max_steps=8,
+    ).run("读取工作区外文件")
+
+    assert result.status is RunStatus.LOOP_DETECTED
+    assert result.steps == 3
+    stopped = [
+        event for event in TraceReplay(trace_path).read() if event["event"] == "loop_detected"
+    ]
+    assert stopped[-1]["payload"]["stop_reason"] == "policy_stall"
+    assert stopped[-1]["payload"]["tool_name"] == "read_file"
+    assert "穿越" in stopped[-1]["payload"]["policy_reason"]
+    assert ".." in stopped[-1]["payload"]["policy_reason"]
+
+
+def test_repeated_non_whitelisted_command_stops_in_three_requests(workspace: Path) -> None:
+    """危险命令被同一策略拒绝三次后终止，不消耗完整步骤或路由请求预算。"""
+    replies = [
+        ModelReply.call(ToolCall(f"unsafe-{index}", "run_command", {"argv": ["rm", "-rf", "."]}))
+        for index in range(3)
+    ]
+
+    result = Agent(
+        ScriptedProvider(replies),
+        ToolExecutor(WorkspacePolicy(workspace, allow_commands=True)),
+        max_steps=24,
+    ).run("删除全部文件")
+
+    assert result.status is RunStatus.LOOP_DETECTED
+    assert result.steps == 3
+    assert result.usage["requests"] == 3
 
 
 def test_agent_persists_history_and_executes_multiple_tool_calls(

@@ -6,8 +6,9 @@ from dataclasses import replace
 from typing import Any
 
 from config.models import ModelProfile, Settings
+from core.control import ExecutionControl, ExecutionStopped
 from core.schemas import ModelReply, RunResult, ToolCall, ToolResult
-from providers import OpenAICompatibleProvider, ProviderError
+from providers import OpenAICompatibleProvider, ProviderError, RequestBudgetExceeded
 from providers.events import ProviderEvent
 from routing.classifier import classification_messages, parse_complexity, require_strong
 from routing.cost import CostLedger
@@ -59,10 +60,15 @@ class RoutedProvider:
             if any(name not in settings.profiles for name in roles):
                 raise ValueError("工作流角色引用的模型 profile 不存在")
         self.settings, self.mode = settings, mode
+        self.control: ExecutionControl | None = None
         self.factory, self.max_attempts = factory, max_attempts
         self.retry_base_delay = float(retry_base_delay)
         self.max_retry_delay = float(max_retry_delay)
         self.begin_run("")
+
+    def set_control(self, control: ExecutionControl | None) -> None:
+        """接收当前 Agent 回合的共享截止时间和取消信号。"""
+        self.control = control
 
     def begin_run(self, task: str) -> None:
         """每个用户回合重新建立预算；分类延迟到首个请求，升级在本回合内保持。"""
@@ -158,8 +164,10 @@ class RoutedProvider:
     ) -> Generator[ProviderEvent, None, ModelReply]:
         """统一分类/执行的预算与用量入口；完整消费底层流，分类原文不向用户透传。"""
         rules = self.settings.routing
+        if self.control is not None:
+            self.control.checkpoint()
         if self.requests >= rules.max_requests:
-            raise ProviderError("已达到本回合模型请求上限")
+            raise RequestBudgetExceeded("已达到本回合模型请求上限")
         # 仅兼容用户主动配置的旧金额预算；默认配置不需要单价，也不计算费用。
         if rules.max_cost is not None and (
             self.cost.known_cost >= rules.max_cost or self.cost.unknown_requests
@@ -214,7 +222,12 @@ class RoutedProvider:
                     thinking_mode=profile.thinking_mode,
                     thinking_format=profile.thinking_format,
                     profile_name=profile.name,
-                    timeout=profile.timeout_seconds,
+                    timeout=(
+                        self.control.limit_timeout(profile.timeout_seconds)
+                        if self.control is not None
+                        else profile.timeout_seconds
+                    ),
+                    control=self.control,
                 )
             )
             events_method = getattr(provider, "events", None)
@@ -250,6 +263,8 @@ class RoutedProvider:
             if callable(close):
                 close()
         self.cost.add(profile, reply.usage)
+        if self.control is not None:
+            self.control.checkpoint()
         return replace(reply, tool_call=None, source_profile=profile_name)
 
     def _classify_task(self) -> Iterator[ProviderEvent]:
@@ -270,6 +285,8 @@ class RoutedProvider:
             if complexity == "simple" and require_strong(self.task):
                 complexity, source = "complex", "host_guard"
             reason = "轻量模型判定简单任务" if complexity == "simple" else "复杂任务使用主力模型"
+        except ExecutionStopped:
+            raise
         except Exception:
             self.classification_failures += 1
             complexity, source = "complex", "fallback"

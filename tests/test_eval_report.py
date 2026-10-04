@@ -94,6 +94,44 @@ def test_timeout_keeps_denominator_and_marks_missing_semantics(tmp_path):
     assert summary["p95_duration_seconds"] is None
 
 
+def test_request_budget_exhaustion_is_not_provider_unavailability(tmp_path):
+    """本地请求上限是独立停止原因，不能污染模型服务可用性和续跑统计。"""
+    meta = make_trial(tmp_path, final="", status="request_budget_exhausted")
+    with (tmp_path / "trace.jsonl").open("a") as stream:
+        stream.write(
+            json.dumps(
+                {
+                    "run_id": "test-run",
+                    "step": 4,
+                    "event": "request_budget_exhausted",
+                    "payload": {
+                        "error": "已达到本回合模型请求上限",
+                        "stop_reason": "request_budget_exhausted",
+                        "phase": "coding",
+                    },
+                }
+            )
+            + "\n"
+        )
+
+    report = build_report(tmp_path, meta)
+
+    assert next(c for c in report["checks"] if c["name"] == "transport_ok")["passed"]
+    assert report["usage_may_be_incomplete"] is False
+    assert report["stop_reason"] == "request_budget_exhausted"
+    assert report["stop_phase"] == "coding"
+
+
+def test_cancelled_inflight_request_marks_usage_incomplete(tmp_path):
+    """取消时即使已有 usage 字典，也可能缺少被中断请求的服务端 Token。"""
+    meta = make_trial(tmp_path, final="", status="cancelled")
+
+    report = build_report(tmp_path, meta)
+
+    assert report["usage"] == {"total_tokens": 100}
+    assert report["usage_may_be_incomplete"] is True
+
+
 def test_invalid_json_is_contract_failure_not_a_factual_error(tmp_path):
     """格式失败造成语义不可评分：优先归因已知失败，而非 blocked 下游。"""
     meta = make_trial(tmp_path, final="没有 JSON")

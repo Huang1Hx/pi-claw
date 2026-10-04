@@ -8,8 +8,12 @@ from typing import Any
 
 import pytest
 
-from core.schemas import ModelReply
+from core.agent import Agent
+from core.control import ExecutionCancelled, ExecutionControl
+from core.schemas import ModelReply, RunStatus
 from providers import OpenAICompatibleProvider, ProviderError, ScriptedProvider
+from security.policy import WorkspacePolicy
+from tools import ToolExecutor
 
 
 class FakeResponse:
@@ -253,3 +257,73 @@ def test_scripted_provider_exhaustion_and_reset() -> None:
         provider.complete([])
     provider.reset()
     assert provider.complete([]).final_text == "done"
+
+
+def test_retry_observes_shared_cancellation_before_second_http_attempt(monkeypatch) -> None:
+    """重试事件发出后若任务被取消，不得睡眠完再产生第二次网络请求。"""
+    attempts = []
+
+    def fail(*_args, **_kwargs):
+        attempts.append(1)
+        raise urllib.error.URLError("temporary")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail)
+    control = ExecutionControl()
+    provider = OpenAICompatibleProvider(
+        api_key="test-key",
+        model="test-model",
+        max_attempts=3,
+        retry_base_delay=10,
+        max_retry_delay=10,
+        control=control,
+    )
+    events = provider.events([{"role": "user", "content": "hello"}])
+
+    assert next(events).type == "llm_retry"
+    control.cancel()
+    with pytest.raises(ExecutionCancelled):
+        next(events)
+    assert len(attempts) == 1
+
+
+def test_cancellation_during_response_read_does_not_emit_completed(monkeypatch, workspace) -> None:
+    """响应读取期间发生取消时，完整 JSON 也不能覆盖用户取消终态。"""
+    control = ExecutionControl()
+
+    class CancellingResponse(FakeResponse):
+        def read(self, size: int = -1) -> bytes:
+            control.cancel()
+            return super().read(size)
+
+    response = CancellingResponse({"choices": [{"message": {"content": "too late"}}]})
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: response)
+    result = Agent(
+        OpenAICompatibleProvider(api_key="test-key", model="test-model"),
+        ToolExecutor(WorkspacePolicy(workspace)),
+    ).run("task", control=control)
+
+    assert result.status is RunStatus.CANCELLED
+    assert result.final_text is None
+
+
+def test_transport_timeout_after_outer_deadline_is_deadline_not_provider_error(
+    monkeypatch, workspace
+) -> None:
+    """阻塞传输跨过外层截止时间后，应按本地 deadline 归因。"""
+    now = [10.0]
+    control = ExecutionControl(deadline_monotonic=11.0, clock=lambda: now[0])
+
+    def timeout(*_args, **_kwargs):
+        now[0] = 11.0
+        raise TimeoutError("socket timeout")
+
+    monkeypatch.setattr(urllib.request, "urlopen", timeout)
+    result = Agent(
+        OpenAICompatibleProvider(
+            api_key="test-key", model="test-model", max_attempts=1, timeout=30
+        ),
+        ToolExecutor(WorkspacePolicy(workspace)),
+    ).run("task", control=control)
+
+    assert result.status is RunStatus.DEADLINE
+    assert "Provider" not in (result.error or "")

@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from core.agent import Agent
+from core.control import ExecutionControl
 from core.schemas import RunResult
 
 
@@ -128,7 +129,13 @@ class ReadOnlySubagentTeam:
         total["unknown_participants"] = unknown_participants
         return total
 
-    def run(self, task: str, assignments: tuple[SubagentAssignment, ...]) -> TeamRunResult:
+    def run(
+        self,
+        task: str,
+        assignments: tuple[SubagentAssignment, ...],
+        *,
+        control: ExecutionControl | None = None,
+    ) -> TeamRunResult:
         """先并行探索再执行主任务；屏障保证子 Agent 与主 Agent 不会同时改写工作区。"""
         if not isinstance(task, str) or not task.strip():
             raise ValueError("task 必须是非空字符串")
@@ -151,7 +158,7 @@ class ReadOnlySubagentTeam:
                 peak = max(peak, active)
             child_started = time.monotonic()
             try:
-                result = self.subagents[item.name].run(item.task)
+                result = self.subagents[item.name].run(item.task, control=control)
                 return SubagentOutcome(
                     item.name, item.role, result, round(time.monotonic() - child_started, 3)
                 )
@@ -177,7 +184,7 @@ class ReadOnlySubagentTeam:
             "artifacts": [item.artifact(self.max_artifact_chars) for item in outcomes],
         }
         leader_task = task + "\n\n" + json.dumps(handoff, ensure_ascii=False)
-        leader_result = self.leader.run(leader_task)
+        leader_result = self.leader.run(leader_task, control=control)
         return TeamRunResult(
             team_id=team_id,
             leader=leader_result,

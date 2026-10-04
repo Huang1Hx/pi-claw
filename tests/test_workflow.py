@@ -471,8 +471,11 @@ def test_unverified_write_never_enters_review(workspace):
         },
         cfg=cfg,
     )
-    assert result.status is RunStatus.PROVIDER_ERROR and "请求上限" in result.error
+    assert result.status is RunStatus.REQUEST_BUDGET_EXHAUSTED and "请求上限" in result.error
     assert result.routing["requests"] == result.usage["requests"] == 5
+    stopped = next(e for e in events if e.type == "request_budget_exhausted")
+    assert stopped.data["stop_reason"] == "request_budget_exhausted"
+    assert stopped.data["phase"] == "coding"
     assert not any(n == "reviewer" for n, _, _ in requests)
     assert (
         sum(

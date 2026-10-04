@@ -174,12 +174,35 @@ def build_report(folder: Path, metadata: dict) -> dict:
                 for issue in issues
             ]
     semantic_failure = any(c["passed"] is False and c["layer"] == "L2_semantics" for c in checks)
+    terminal = next(
+        (
+            event
+            for event in reversed(events)
+            if event["event"]
+            in {
+                "request_budget_exhausted",
+                "provider_error",
+                "deadline",
+                "cancelled",
+                "loop_detected",
+                "max_steps_reached",
+                "run_unverified",
+                "run_failed",
+                "run_completed",
+            }
+        ),
+        None,
+    )
+    terminal_payload = terminal["payload"] if terminal is not None else {}
     return {
         **metadata,
         "grader_version": GRADER_VERSION,
         "passed": passed,
         "outcome_passed": all(c["passed"] is True for c in outcomes),
         "agent_status": status,
+        "stop_reason": terminal_payload.get("stop_reason") or status,
+        "stop_phase": terminal_payload.get("phase"),
+        "remaining_seconds": terminal_payload.get("remaining_seconds"),
         "failure_category": next(
             (
                 layer
@@ -199,7 +222,8 @@ def build_report(folder: Path, metadata: dict) -> dict:
         "trace_issues": issues,
         "result_issue": result_issue,
         "usage": usage,
-        "usage_may_be_incomplete": status in {"deadline", "provider_error", "harness_error"}
+        "usage_may_be_incomplete": status
+        in {"deadline", "cancelled", "provider_error", "harness_error"}
         or usage is None
         or bool(usage.get("requests_without_usage")),
         "tool_calls": len(tool_results),

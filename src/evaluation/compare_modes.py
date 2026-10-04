@@ -25,6 +25,7 @@ from config import load_settings
 from core.agent import Agent
 from core.completion import ToolEvidenceCompletionVerifier
 from core.context import ContextManager
+from core.control import ExecutionControl
 from core.prompts import build_system_prompt
 from core.team import ReadOnlySubagentTeam, SubagentAssignment
 from evaluation.mode_grading import GRADER_VERSION, calibrate, grade, safe_functions
@@ -687,6 +688,8 @@ def worker(args) -> None:
         },
     )
     started = time.monotonic()
+    # 给结果落盘和父进程清理预留 3 秒；父级 420 秒硬上限保持不变。
+    control = ExecutionControl(deadline_monotonic=started + max(1.0, args.deadline - 3.0))
     writable = _executor(workspace, args.worker, writable=True)
     if args.mode == "single":
         result = _agent(
@@ -695,7 +698,7 @@ def worker(args) -> None:
             folder / "trace-leader.jsonl",
             workspace,
             steps=args.max_steps,
-        ).run(prompt)
+        ).run(prompt, control=control)
         payload = {
             "mode": args.mode,
             "leader": result.to_dict(),
@@ -711,7 +714,7 @@ def worker(args) -> None:
             folder / "trace-leader.jsonl",
             workspace,
             steps=args.max_steps,
-        ).run(prompt)
+        ).run(prompt, control=control)
         payload = {
             "mode": args.mode,
             "leader": result.to_dict(),
@@ -763,6 +766,7 @@ def worker(args) -> None:
                     "高风险边界与回归点；不得写文件或运行命令。",
                 ),
             ),
+            control=control,
         )
         payload = {"mode": args.mode, **result.to_dict()}
     payload["duration_seconds"] = round(time.monotonic() - started, 3)
@@ -1181,6 +1185,8 @@ def run_trial(
         str(args.config.resolve()),
         "--max-steps",
         str(args.max_steps),
+        "--deadline",
+        str(args.deadline),
         "--max-attempts",
         str(args.max_attempts),
         "--retry-base-delay",

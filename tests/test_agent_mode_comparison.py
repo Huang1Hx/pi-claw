@@ -572,6 +572,7 @@ def test_trial_worker_receives_bounded_retry_settings(tmp_path, monkeypatch):
     assert command[command.index("--max-attempts") + 1] == "3"
     assert command[command.index("--retry-base-delay") + 1] == "2.0"
     assert command[command.index("--max-retry-delay") + 1] == "10.0"
+    assert command[command.index("--deadline") + 1] == "420"
 
 
 def test_trial_worker_receives_repair_seed_prompt_and_metadata(tmp_path, monkeypatch):

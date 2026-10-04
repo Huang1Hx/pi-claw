@@ -12,6 +12,10 @@ class ProviderError(RuntimeError):
     """Provider 的可读、已脱敏错误。"""
 
 
+class RequestBudgetExceeded(ProviderError):
+    """宿主配置的模型请求次数已耗尽，不是网络或供应商故障。"""
+
+
 class WorkflowStopped(ProviderError):
     """工作流证据、权限或审查上限不满足；不能当作完成或网络故障。"""
 

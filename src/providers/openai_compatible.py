@@ -11,6 +11,7 @@ import urllib.request
 from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
+from core.control import ExecutionControl
 from core.schemas import ModelReply
 from providers.base import ProviderError
 from providers.events import ProviderEvent
@@ -38,6 +39,7 @@ class OpenAICompatibleProvider:
         thinking_mode: str = "default",
         thinking_format: str = "thinking",
         profile_name: str | None = None,
+        control: ExecutionControl | None = None,
     ) -> None:
         """保存成套连接参数并校验传输预算；sleep 可注入测试替身，构造阶段不发起请求。"""
         # None 才允许回退环境；显式空字符串必须保持为空，避免路由误用另一服务的 Key。
@@ -53,6 +55,7 @@ class OpenAICompatibleProvider:
         self.timeout, self.max_response_bytes = timeout, max_response_bytes
         self.max_attempts, self.retry_base_delay = max_attempts, retry_base_delay
         self.max_retry_delay, self.sleep = max_retry_delay, sleep
+        self._custom_sleep = sleep is not time.sleep
         if max_output_tokens is not None and (
             type(max_output_tokens) is not int or max_output_tokens <= 0
         ):
@@ -72,6 +75,11 @@ class OpenAICompatibleProvider:
             raise ValueError("thinking_format 不受支持")
         self.thinking_mode, self.thinking_format = thinking_mode, thinking_format
         self.profile_name = profile_name
+        self.control = control
+
+    def set_control(self, control: ExecutionControl | None) -> None:
+        """允许直接使用 Provider 的 Agent 也能共享运行截止时间。"""
+        self.control = control
 
     def complete(
         self, messages: Sequence[dict[str, Any]], tools: Sequence[dict[str, Any]] | None = None
@@ -122,16 +130,29 @@ class OpenAICompatibleProvider:
             method="POST",
         )
         for attempt in range(1, self.max_attempts + 1):
+            if self.control is not None:
+                self.control.checkpoint()
             emitted = False
             retry_after = None
             try:
-                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                request_timeout = (
+                    self.control.limit_timeout(self.timeout)
+                    if self.control is not None
+                    else self.timeout
+                )
+                with urllib.request.urlopen(request, timeout=request_timeout) as response:
                     if stream:
                         for event in stream_events(response, self.max_response_bytes):
+                            if self.control is not None:
+                                self.control.checkpoint()
                             emitted = True
                             yield event
+                        if self.control is not None:
+                            self.control.checkpoint()
                     else:
                         body = self._read_limited_body(response, "模型响应")
+                        if self.control is not None:
+                            self.control.checkpoint()
                         try:
                             data = json.loads(body)
                             choice = data["choices"][0]
@@ -143,6 +164,8 @@ class OpenAICompatibleProvider:
                                 "模型响应格式无效：缺少完整 choices[0].message"
                             ) from exc
                         yield ProviderEvent("message_complete", reply=reply)
+                        if self.control is not None:
+                            self.control.checkpoint()
                 return
             except urllib.error.HTTPError as exc:
                 status = exc.code
@@ -151,9 +174,13 @@ class OpenAICompatibleProvider:
                     detail = self._read_limited_body(exc, "模型错误响应")[:1000]
                 finally:
                     exc.close()
+                if self.control is not None:
+                    self.control.checkpoint()
                 error = self._sanitize_error(f"模型服务返回 HTTP {status}：{detail}")
                 retryable = status in self.RETRY_STATUS
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                if self.control is not None:
+                    self.control.checkpoint()
                 error = self._sanitize_error(f"模型请求失败：{exc}")
                 retryable = True
             # 一旦对外发出片段，自动重试会重复候选内容；此时必须失败并交给上层处理。
@@ -170,7 +197,15 @@ class OpenAICompatibleProvider:
                 "llm_retry",
                 {"attempt": attempt, "next_attempt": attempt + 1, "delay_seconds": delay},
             )
-            self.sleep(delay)
+            if self.control is None or self._custom_sleep:
+                self.sleep(delay)
+                if self.control is not None:
+                    self.control.checkpoint()
+            else:
+                delay = self.control.limit_timeout(delay) if delay > 0 else 0
+                if delay > 0:
+                    self.control.cancel_event.wait(delay)
+                self.control.checkpoint()
 
     def reply(
         self, messages: Sequence[dict[str, Any]], tools: Sequence[dict[str, Any]] | None = None
