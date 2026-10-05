@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 from sandbox.models import CommandRequest
@@ -29,11 +30,17 @@ class CommandTools:
         if effective_timeout <= 0 or effective_timeout > self.command_timeout:
             raise ValueError(f"timeout 必须在 0 到 {self.command_timeout} 秒之间")
         execution = self.command_runner.run(
-            CommandRequest(argv, resolved_cwd, effective_timeout),
+            CommandRequest(
+                argv,
+                resolved_cwd,
+                effective_timeout,
+                workspace_root=self.workspace.root,
+            ),
             control=self.execution_control,
         )
+        display_argv = ["python", *argv[1:]] if argv[0] == sys.executable else list(argv)
         return {
-            "argv": argv,
+            "argv": display_argv,
             "cwd": str(resolved_cwd.relative_to(self.workspace.root)) or ".",
             "returncode": execution.returncode,
             "stdout": execution.stdout,
@@ -43,4 +50,5 @@ class CommandTools:
             "timed_out": execution.timed_out,
             "cleanup_failed": execution.cleanup_failed,
             "cancelled": execution.cancelled,
+            "sandbox": execution.metadata,
         }

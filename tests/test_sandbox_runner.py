@@ -45,3 +45,5 @@ def test_tool_executor_reports_host_backend(tmp_path):
     )
     assert result.ok
     assert result.output["backend"] == "host"
+    assert result.output["argv"][0] == "python"
+    assert sys.executable not in repr(result.to_dict())

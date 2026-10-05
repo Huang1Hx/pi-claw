@@ -44,6 +44,8 @@ ITERATION_<三位序号>_<主题>.md
 | [Iteration 020](ITERATION_020_EVAL_TRANSPORT_RETRY.md) | 评测传输有限重试 | 已合并 main | DeepSeek 三次尝试、2/4 秒退避、Kimi 单次、420 秒总上限 |
 | [Iteration 021](ITERATION_021_TRACE_GUIDED_EVAL_REPAIR.md) | Trace 驱动评测合并与候选修复 | 已合并 main | grader 2.2 合并、两轮修复、传输续跑、49/90→78/90、完整成本账本 |
 | [Iteration 022](ITERATION_022_EXECUTION_LIFECYCLE.md) | Agent 与命令生命周期 | 已提交 optimize | 共享 deadline/cancel、进程组清理、有界输出、独立停止原因 |
+| [Iteration 023](ITERATION_023_SANITIZED_WORKSPACE_SNAPSHOT.md) | 无敏感文件的工作区快照 | 已批准待提交 | dir-fd/no-follow、固定排除、manifest、资源上限、竞态拒绝 |
+| [Iteration 024](ITERATION_024_DOCKER_EXECUTION_SANDBOX.md) | Docker 命令执行隔离 | 已批准待提交 | 固定镜像、唯一只读挂载、断网/资源限制、非 root、强制清理 |
 
 Iteration 001–005 保留当时的路径与验证命令，不回写历史记录。当前目录和启动方式以
 [Iteration 006](ITERATION_006_DIRECT_SOURCE_LAYOUT.md)、[架构](../ARCHITECTURE.md) 和

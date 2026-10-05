@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,18 @@ def test_trace_writer_persists_only_redacted_payload(tmp_path: Path) -> None:
     assert "very-secret" not in on_disk
     assert "token-secret" not in on_disk
     assert REDACTED in on_disk
+
+
+def test_trace_redacts_absolute_current_interpreter_from_tool_events(tmp_path: Path) -> None:
+    """合法绝对 Python 解释器用于执行即可，不能暴露到 model/tool JSONL。"""
+    path = tmp_path / "trace.jsonl"
+    writer = TraceWriter(path)
+    for event in ("model_reply", "tool_call", "tool_result"):
+        writer.record(event, {"argv": [sys.executable, "-m", "unittest"]})
+
+    on_disk = path.read_text(encoding="utf-8")
+    assert sys.executable not in on_disk
+    assert '"python"' in on_disk
 
 
 def test_redact_covers_vendor_prefixed_environment_variables() -> None:

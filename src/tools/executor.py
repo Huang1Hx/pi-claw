@@ -150,9 +150,15 @@ class ToolExecutor(
             ok = not (
                 call.name == "run_command"
                 and isinstance(output, dict)
-                and output.get("returncode") != 0
+                and (output.get("returncode") != 0 or output.get("cleanup_failed") is True)
             )
-            error = None if ok else f"命令退出码为 {output.get('returncode')}"
+            error = None
+            if not ok:
+                error = (
+                    "命令或沙箱清理失败"
+                    if output.get("cleanup_failed") is True
+                    else f"命令退出码为 {output.get('returncode')}"
+                )
             return ToolResult(
                 call.id,
                 call.name,
@@ -172,12 +178,18 @@ class ToolExecutor(
                 metadata=policy_metadata,
             )
         except Exception as exc:  # 注册表允许扩展工具，任何普通执行错误都应回传给 Agent。
+            failure_metadata = dict(policy_metadata)
+            if bool(getattr(exc, "cleanup_failed", False)):
+                failure_metadata["sandbox"] = {
+                    "backend": str(getattr(exc, "backend", self.command_runner.backend)),
+                    "cleanup_failed": True,
+                }
             return ToolResult(
                 call.id,
                 call.name,
                 False,
                 error=f"工具执行失败：{exc}",
-                metadata=policy_metadata,
+                metadata=failure_metadata,
             )
         finally:
             self.execution_control = previous_control

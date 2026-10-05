@@ -4,6 +4,12 @@ from config.models import SandboxSettings
 from sandbox.docker import DockerCommandRunner
 from sandbox.host import HostCommandRunner
 from sandbox.models import CommandExecution, CommandRequest
+from sandbox.snapshot import (
+    SnapshotCleanupError,
+    SnapshotViolation,
+    WorkspaceSnapshot,
+    WorkspaceSnapshotBuilder,
+)
 
 
 def create_runner(settings: SandboxSettings, *, max_output_chars: int = 100_000):
@@ -20,5 +26,9 @@ __all__ = [
     "CommandRequest",
     "DockerCommandRunner",
     "HostCommandRunner",
+    "SnapshotCleanupError",
+    "SnapshotViolation",
+    "WorkspaceSnapshot",
+    "WorkspaceSnapshotBuilder",
     "create_runner",
 ]

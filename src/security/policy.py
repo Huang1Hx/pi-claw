@@ -130,10 +130,14 @@ class WorkspacePolicy:
         state = (
             "已启用命令能力，仍需逐次批准" if self.allow_commands else "命令默认关闭，需要显式批准"
         )
+        display_argv = ["python", *argv[1:]] if executable == sys.executable else list(argv)
         return PolicyDecision(
             PolicyAction.ASK,
             state,
-            {"cwd": str(resolved_cwd), "argv": argv},
+            {
+                "cwd": resolved_cwd.relative_to(self.workspace.root).as_posix() or ".",
+                "argv": display_argv,
+            },
         )
 
     def _validate_uv_argv(self, argv: list[str]) -> bool:

@@ -7,6 +7,7 @@ import signal
 import subprocess
 import threading
 import time
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import BinaryIO
@@ -42,10 +43,17 @@ class HostCommandRunner:
 
     backend = "host"
 
-    def __init__(self, *, max_output_chars: int = 100_000) -> None:
+    def __init__(
+        self,
+        *,
+        max_output_chars: int = 100_000,
+        environment: Mapping[str, str] | None = None,
+    ) -> None:
         if max_output_chars <= 0:
             raise ValueError("max_output_chars 必须大于 0")
         self.max_output_chars = max_output_chars
+        # 仅受信调用方可固定子进程环境；普通 Host 命令仍使用下面的最小白名单。
+        self._environment = dict(environment) if environment is not None else None
 
     def run(
         self,
@@ -68,7 +76,11 @@ class HostCommandRunner:
             "WINDIR",
             "PATHEXT",
         }
-        environment = {key: value for key, value in os.environ.items() if key.upper() in allowed}
+        environment = (
+            self._environment
+            if self._environment is not None
+            else {key: value for key, value in os.environ.items() if key.upper() in allowed}
+        )
         process = subprocess.Popen(
             request.argv,
             cwd=request.cwd,

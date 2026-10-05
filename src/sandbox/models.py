@@ -11,6 +11,7 @@ class CommandRequest:
     argv: list[str]
     cwd: Path
     timeout: float
+    workspace_root: Path | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -21,6 +22,8 @@ class CommandRequest:
             raise TypeError("argv 必须是非空字符串数组")
         if not isinstance(self.cwd, Path):
             raise TypeError("cwd 必须是 Path")
+        if self.workspace_root is not None and not isinstance(self.workspace_root, Path):
+            raise TypeError("workspace_root 必须是 Path 或 None")
         if not isinstance(self.timeout, (int, float)) or self.timeout <= 0:
             raise ValueError("timeout 必须大于零")
 

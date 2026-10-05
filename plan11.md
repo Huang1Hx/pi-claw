@@ -14,6 +14,8 @@
 
 ## 全局约束
 
+- 所有变更按风险划分为可独立审核的批次；每批完成后审核、完整验证、提交并推送开发分支，稳定
+  后合并并复验 `main`，具体流程见 `CONTRIBUTING.md`。
 - 不提交 `.env`、`pi-claw.toml`、API Key、Base URL、原始 Session 或原始 Trace。
 - 非产品材料继续放在仓库外；仓库内只保留代码、测试、架构说明和可复现评测证据。
 - 真实评测失败必须进入分母；未知 Token 不按零计算；价格未知时不报告金额。
@@ -29,7 +31,7 @@
 | 0 | 目录重构、评测框架、DeepSeek/Kimi 分工 | 已完成 | `639a322`；536 tests；已推送 `optimize` |
 | 1 | 公开仓库工程化与 CI | 待执行 | GitHub Actions、构建、License、贡献说明 |
 | 2 | 当前模型真实评测基线 | **已完成并合并 main** | grader 2.2 合并后首次 49/90；两轮修复后 78/90 |
-| 3 | Trace 恢复、请求稳定性与执行沙箱 | **进行中；Trace 修复和生命周期已完成，快照与 OS 沙箱待执行** | 49/90→78/90；Task 3.3–3.4 已完成 |
+| 3 | Trace 恢复、请求稳定性与执行沙箱 | **进行中；Task 3.3–3.6 已完成，文件竞态加固待执行** | 49/90→78/90；Host 693/693、Docker 687/687 |
 | 4 | 任务相关的完成验收与抗伪完成 | 待执行 | 无关测试、篡改测试、旧绿灯等攻击用例全部拒绝 |
 | 5 | 路由校准与 Multi-Agent 故障隔离 | 待执行 | 错误降级率、主力调用率、子 Agent 部分失败指标 |
 | 6 | 正式发布 | 待执行 | 沙箱隔离演示、版本标签、两条真实端到端案例 |
@@ -274,7 +276,8 @@ stretch result，不是阶段 3 完成门槛。阶段 3 按下列依赖顺序执
   Agent、workflow、评测报告和 Host Runner 专项回归。
 
 验证证据：648 项离线测试通过；Ruff、format、wheel/sdist 构建、敏感信息签名扫描和
-`git diff --check` 通过。420 秒父级硬上限不变，worker 仅预留最后 3 秒写入脱敏结果和完成清理。
+`git diff --check` 通过。420 秒父级硬上限不变；Task 3.6 接入容器清理后，worker 清理/落盘
+预留由 3 秒校准为 8 秒，避免父级先于进程组、容器和快照清理硬终止。
 
 ### Task 3.5：无敏感文件的临时工作区快照
 
@@ -289,18 +292,22 @@ stretch result，不是阶段 3 完成门槛。阶段 3 按下列依赖顺序执
 - `WorkspaceSnapshotBuilder.build(source: Workspace) -> WorkspaceSnapshot`
 - `WorkspaceSnapshot(path, manifest_sha256, file_count, total_bytes)`
 
-- [ ] 先写失败测试：快照遇到 symlink、FIFO 或设备文件必须整体失败，不能跟随或静默跳过；
+- [x] 先写失败测试：快照遇到 symlink、FIFO 或设备文件必须整体失败，不能跟随或静默跳过；
   `.git`、`.env*`、凭据、`.venv`、`runs` 和 `.pi-claw` 会话目录按固定规则排除，并把相对路径、
   数量和原因写入 manifest；文件数与总字节超过上限必须失败而不是截断后继续。
-- [ ] 每次命令从已审批工作区创建新的临时快照；只复制普通文件并记录相对路径、大小和 SHA256。
-- [ ] Docker 只能把快照只读挂载到 `/input`，不能挂载原始工作区、用户目录、Docker socket 或
+- [x] 每次命令从已审批工作区创建新的临时快照；只复制普通文件并记录相对路径、大小和 SHA256。
+- [x] Docker 只能把快照只读挂载到 `/input`，不能挂载原始工作区、用户目录、Docker socket 或
   其他宿主目录；受信入口把 `/input` 复制到有容量上限的 `/workspace` tmpfs 后再执行命令。
-- [ ] 容器内命令可写 `/workspace` 以生成缓存/临时文件，但结果不回写快照或原工作区；产品修改
+- [x] 容器内命令可写 `/workspace` 以生成缓存/临时文件，但结果不回写快照或原工作区；产品修改
   仍只能走文件工具审批，磁盘洪泛最多耗尽该容器的 tmpfs 上限。
-- [ ] Docker 后端禁止 `uv sync` 等依赖安装命令；依赖必须预装在固定镜像中，运行时不访问包索引。
-- [ ] Docker 运行环境固定 `UV_PROJECT_ENVIRONMENT=/opt/venv`、`UV_OFFLINE=1`、
+- [x] Docker 后端禁止 `uv sync` 等依赖安装命令；依赖必须预装在固定镜像中，运行时不访问包索引。
+- [x] Docker 运行环境固定 `UV_PROJECT_ENVIRONMENT=/opt/venv`、`UV_OFFLINE=1`、
   `UV_NO_SYNC=1`、`UV_NO_ENV_FILE=1`，避免同步、下载或从快照中的 dotenv 注入变量。
-- [ ] 命令结束或异常后清理快照；清理失败进入 Trace 和最终结果，不能伪装为成功。
+- [x] 命令结束或异常后清理快照；清理失败进入 Trace 和最终结果，不能伪装为成功。
+
+验证证据：Host 完整回归 693/693，固定镜像内排除 6 项宿主专属契约后 687/687；初始化失败、
+外部硬链接、复制期竞态、快照路径脱敏和清理失败元数据均有回归测试。独立终审 Ready，真实
+Docker 退出码 0、`cleanup_failed=false`，且无残留容器或快照。
 
 ### Task 3.6：Docker 隔离参数、镜像固定与容器清理
 
@@ -326,14 +333,14 @@ stretch result，不是阶段 3 完成门槛。阶段 3 按下列依赖顺序执
   host PID/network、设备映射、Docker socket 或额外 capability。
 - 容器环境使用固定白名单；不透传宿主 `PATH`、模型 API Key、代理变量或 Docker 配置路径。
 
-- [ ] 先测试完整 argv 与固定顺序，证明用户/模型输入不能插入额外挂载、网络或 capability。
-- [ ] 镜像只包含锁定 Python/uv 与项目测试依赖，基础镜像按 digest 固定；构建过程生成 SBOM/摘要。
-- [ ] macOS 使用 Docker Desktop/Colima 的 Linux VM；Linux 推荐 rootless Docker。控制 Docker daemon
+- [x] 先测试完整 argv 与固定顺序，证明用户/模型输入不能插入额外挂载、网络或 capability。
+- [x] 镜像只包含锁定 Python/uv 与项目测试依赖，基础镜像按 digest 固定；构建过程生成 SBOM/摘要。
+- [x] macOS 使用 Docker Desktop/Colima 的 Linux VM；Linux 推荐 rootless Docker。控制 Docker daemon
   本身属于高权限操作，因此只允许受信 Pi-Claw 宿主进程调用。
-- [ ] 容器启动失败、镜像漂移、资源参数不受支持时返回明确错误，不降级到 Host。
-- [ ] Docker CLI 接入 3.4 的 `ExecutionControl`；容器使用不可预测名称，所有退出路径在 `finally`
+- [x] 容器启动失败、镜像漂移、资源参数不受支持时返回明确错误，不降级到 Host。
+- [x] Docker CLI 接入 3.4 的 `ExecutionControl`；容器使用不可预测名称，所有退出路径在 `finally`
   中强制删除并确认不存在，清理失败返回 `cleanup_failed`。
-- [ ] Trace 记录 backend、image ID、网络模式、mount 数、资源上限和清理状态，不记录宿主绝对路径
+- [x] Trace 记录 backend、image ID、网络模式、mount 数、资源上限和清理状态，不记录宿主绝对路径
   或凭据。
 
 ### Task 3.7：文件竞态加固

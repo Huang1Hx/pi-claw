@@ -73,6 +73,12 @@ PUBLIC_SUMMARY_FIELDS = (
 )
 _PROCESS_LOCK = threading.Lock()
 _ACTIVE_PROCESSES: set[subprocess.Popen] = set()
+WORKER_CLEANUP_RESERVE_SECONDS = 8.0
+
+
+def worker_deadline_seconds(parent_deadline_seconds: float) -> float:
+    """保留进程组、容器、快照和结果落盘窗口，不改变父级硬上限。"""
+    return max(1.0, parent_deadline_seconds - WORKER_CLEANUP_RESERVE_SECONDS)
 
 
 def save_json(path: Path, data) -> None:
@@ -688,8 +694,8 @@ def worker(args) -> None:
         },
     )
     started = time.monotonic()
-    # 给结果落盘和父进程清理预留 3 秒；父级 420 秒硬上限保持不变。
-    control = ExecutionControl(deadline_monotonic=started + max(1.0, args.deadline - 3.0))
+    # 父级 420 秒硬上限保持不变；提前停止新工作，为多层清理和结果落盘预留窗口。
+    control = ExecutionControl(deadline_monotonic=started + worker_deadline_seconds(args.deadline))
     writable = _executor(workspace, args.worker, writable=True)
     if args.mode == "single":
         result = _agent(

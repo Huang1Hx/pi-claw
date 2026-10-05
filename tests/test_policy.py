@@ -149,7 +149,8 @@ def test_safe_commands_still_require_approval(
         call("run_command", argv=argv)
     )
     assert decision.action is PolicyAction.ASK
-    assert decision.metadata["argv"] == argv
+    expected_argv = ["python", *argv[1:]] if argv[0] == sys.executable else argv
+    assert decision.metadata["argv"] == expected_argv
 
 
 def test_policy_denies_command_cwd_outside_workspace(workspace: Path, tmp_path: Path) -> None:

@@ -19,6 +19,7 @@ from evaluation.compare_modes import (
     run_trial,
     select_resume_jobs,
     summarize,
+    worker_deadline_seconds,
 )
 from evaluation.mode_grading import GRADER_VERSION, calibrate, safe_functions
 from evaluation.mode_tasks import TASKS
@@ -38,6 +39,12 @@ STAGE2_TASK_IDS = {
     "window_merge",
     "worker_assignment",
 }
+
+
+def test_worker_deadline_reserves_time_for_docker_and_process_cleanup() -> None:
+    """420 秒父级不变，但协作截止必须给进程组、容器和快照清理留下统一窗口。"""
+    assert worker_deadline_seconds(420) == pytest.approx(412)
+    assert worker_deadline_seconds(5) == pytest.approx(1)
 
 
 def _trial(tmp_path, *, mode="single"):

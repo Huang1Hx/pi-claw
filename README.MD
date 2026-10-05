@@ -196,6 +196,8 @@ Python 导入使用 `from core.agent import Agent`；常用启动命令仍为 `u
 
 ## 开发验证
 
+变更批次的审核、提交、推送和稳定分支集成规则见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
 ```bash
 uv run --frozen ruff format --check src tests
 uv run --frozen ruff check src tests
@@ -216,6 +218,7 @@ uv build --no-config
 - [评测指标](docs/EVALUATION.md)
 - [单 Agent、顺序工作流与主从多 Agent 对照](docs/AGENT_MODE_COMPARISON.md)
 - [项目范围](docs/PROJECT_SCOPE.md)
+- [变更与集成流程](CONTRIBUTING.md)
 - [迭代记录](docs/iterations/README.md)
 
 本轮目录和运行时边界参考 [pichu](https://github.com/yeabwang/pichu) 的模块划分，

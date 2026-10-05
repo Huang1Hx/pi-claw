@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import threading
 import uuid
 from collections.abc import Iterable
@@ -47,7 +48,8 @@ def redact(value: Any, *, key: str | None = None) -> Any:
     if isinstance(value, tuple):
         return [redact(item) for item in value]
     if isinstance(value, str):
-        result = _BEARER_PATTERN.sub(f"Bearer {REDACTED}", value)
+        result = value.replace(sys.executable, "python")
+        result = _BEARER_PATTERN.sub(f"Bearer {REDACTED}", result)
         result = _OPENAI_KEY_PATTERN.sub(REDACTED, result)
         result = _ASSIGNMENT_PATTERN.sub(
             lambda match: f"{match.group(1)}{match.group(2)} {REDACTED}", result

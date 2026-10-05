@@ -26,6 +26,28 @@ class Workspace:
         "id_ed25519",
     }
     _SENSITIVE_SUFFIXES = {".pem", ".p12", ".pfx", ".key"}
+    _SNAPSHOT_EXCLUDED_NAMES = {
+        ".git": "version_control",
+        ".venv": "virtual_environment",
+        "runs": "runtime_artifacts",
+        ".pi-claw": "session_data",
+    }
+    _SNAPSHOT_CREDENTIAL_NAMES = {
+        ".docker",
+        ".credentials",
+        ".git-credentials",
+        ".gitconfig",
+        ".gnupg",
+        ".kube",
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        ".terraform",
+        ".vault-token",
+        ".azure",
+        "auth.json",
+        "terraform.tfstate",
+    }
 
     def __init__(self, root: str | Path) -> None:
         """要求工作区已存在且为目录，并固定其真实路径作为后续访问边界。"""
@@ -74,6 +96,30 @@ class Workspace:
     def relative(self, path: str | Path) -> str:
         """返回工作区内经过验证的相对路径。"""
         return str(self.resolve(path).relative_to(self.root))
+
+    @classmethod
+    def snapshot_exclusion_reason(cls, path: str | Path) -> str | None:
+        """返回 Docker 输入快照的固定排除原因；不读取文件内容做启发式判断。
+
+        规则作用于任意目录层级，避免嵌套仓库、虚拟环境、运行产物或凭据被复制到
+        隔离容器。调用方仍须先用 lstat 拒绝符号链接和其他特殊节点。
+        """
+
+        name = Path(path).name.lower()
+        fixed = cls._SNAPSHOT_EXCLUDED_NAMES.get(name)
+        if fixed is not None:
+            return fixed
+        if name.startswith(".env"):
+            return "dotenv"
+        if name in cls._SNAPSHOT_CREDENTIAL_NAMES:
+            return "credential"
+        if name.endswith((".tfstate", ".tfvars", ".tfvars.json")) or ".tfstate." in name:
+            return "credential"
+        if name in cls._SENSITIVE_PARTS or Path(name).stem in cls._SENSITIVE_PARTS:
+            return "credential"
+        if Path(name).suffix.lower() in cls._SENSITIVE_SUFFIXES:
+            return "credential"
+        return None
 
 
 def ensure_json_object(value: Any, *, name: str = "arguments") -> dict[str, Any]:

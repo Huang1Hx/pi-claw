@@ -20,7 +20,7 @@ Task 3.4 解决此前 Trace 中三类容易混淆的问题：本地请求预算�
 | 终态 | 新增 `request_budget_exhausted`、`deadline`、`cancelled`；Provider 故障保持独立 |
 | 循环诊断 | `loop_detected` 保持兼容，Trace 进一步区分 `semantic_loop` 与 `policy_stall`，记录工具和具体策略原因 |
 | 模型请求 | 每次 HTTP 请求和重试前检查控制对象，单请求超时收紧到剩余时间，取消后禁止第二次尝试 |
-| 团队/评测 | 主 Agent 与全部子 Agent 共享同一截止时间；父级仍在 420 秒硬终止，worker 预留 3 秒落盘和清理 |
+| 团队/评测 | 主 Agent 与全部子 Agent 共享同一截止时间；父级仍在 420 秒硬终止；Task 3.6 接入容器清理后，worker 预留由 3 秒校准为 8 秒 |
 | Host 命令 | 每次命令创建独立进程组；并发排空 stdout/stderr，内存只保留固定前缀；超时/取消 TERM 后最多等 2 秒再 KILL |
 | 会话恢复 | 中断的工具调用补写 `interrupted=true, replay_allowed=false` 的 tool 观察，恢复会话不由宿主自动重放 |
 | 报告 | 本地请求预算不计为 Provider 不可用；报告保存停止原因、阶段和剩余秒数 |
