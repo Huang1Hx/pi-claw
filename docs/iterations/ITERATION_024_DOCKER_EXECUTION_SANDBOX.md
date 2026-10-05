@@ -2,7 +2,7 @@
 
 ## 状态
 
-已批准待提交。代码位于本地 `optimize`，尚未推送远程、尚未合并 `main`。本轮构建并实际运行了
+已提交 optimize。提交 `87e0f1a` 已推送 `origin/optimize`，尚未合并 `main`。本轮构建并实际运行了
 本地固定镜像，没有调用外部模型；SBOM 和本机镜像 ID 保存在被 Git 忽略的 `runs/sandbox-build/`。
 
 ## 目标
