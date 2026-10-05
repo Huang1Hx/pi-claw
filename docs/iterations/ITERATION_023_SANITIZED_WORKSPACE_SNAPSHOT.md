@@ -2,7 +2,8 @@
 
 ## 状态
 
-已提交 optimize。提交 `87e0f1a` 已推送 `origin/optimize`，尚未合并 `main`。本轮只做离线和本地
+已合并 main。功能提交 `87e0f1a` 与状态提交 `4de32ff` 已推送 `origin/optimize` 和
+`origin/main`。本轮只做离线和本地
 Docker 验证，没有调用学校模型或 Kimi，也没有修改 78/90 冻结基线、评分器、权限规则或修复轮数。
 
 ## 目标

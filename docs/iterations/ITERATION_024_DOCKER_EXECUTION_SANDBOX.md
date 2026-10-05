@@ -2,7 +2,8 @@
 
 ## 状态
 
-已提交 optimize。提交 `87e0f1a` 已推送 `origin/optimize`，尚未合并 `main`。本轮构建并实际运行了
+已合并 main。功能提交 `87e0f1a` 与状态提交 `4de32ff` 已推送 `origin/optimize` 和
+`origin/main`。本轮构建并实际运行了
 本地固定镜像，没有调用外部模型；SBOM 和本机镜像 ID 保存在被 Git 忽略的 `runs/sandbox-build/`。
 
 ## 目标
