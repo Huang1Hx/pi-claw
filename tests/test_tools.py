@@ -311,7 +311,7 @@ def test_atomic_replace_failure_preserves_original(
     def fail_replace(*_args: object) -> None:
         raise OSError("boom")
 
-    monkeypatch.setattr("tools.files.os.replace", fail_replace)
+    monkeypatch.setattr("security.secure_fs.os.replace", fail_replace)
     executor = ToolExecutor(
         WorkspacePolicy(tmp_path, allow_write=True),
         approval_callback=lambda *_: True,

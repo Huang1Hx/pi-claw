@@ -1,12 +1,10 @@
-"""有界目录遍历和字面量搜索。"""
+"""基于安全 dir-fd 枚举的有界文件列表和字面量搜索。"""
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
 from typing import Any
 
-from security.workspace import WorkspaceViolation
+from security.secure_fs import SecureFileViolation
 
 _IGNORED_DIRECTORY_NAMES = frozenset(
     {
@@ -32,52 +30,41 @@ class SearchTools:
 
     def list_files(self, path: str = ".") -> dict[str, Any]:
         """按预算枚举工作区内可访问文件。"""
-        base = self.workspace.resolve(path)
-        if base.is_file():
-            return {
-                "files": [str(base.relative_to(self.workspace.root))],
-                "truncated": False,
-                "reason": None,
-            }
-        if not base.is_dir():
-            raise ValueError("path 必须是文件或目录")
-        found: list[str] = []
-        for safe in self._iter_files(base):
-            found.append(str(safe.relative_to(self.workspace.root)))
-            if len(found) >= self.max_files:
-                return {
-                    "files": found,
-                    "truncated": True,
-                    "reason": f"文件数达到上限 {self.max_files}",
-                }
-        return {"files": found, "truncated": False, "reason": None}
+        relative = self.workspace.lexical_relative(path)
+        found, truncated = self.workspace.secure_fs.list_regular_files(
+            relative,
+            max_entries=self.max_files,
+            ignored_directory_names=_IGNORED_DIRECTORY_NAMES,
+            ignored_file_names=_IGNORED_FILE_NAMES,
+            excluded=self.workspace.is_sensitive_relative,
+        )
+        return {
+            "files": [item.as_posix() for item in found],
+            "truncated": truncated,
+            "reason": f"安全枚举达到上限 {self.max_files}" if truncated else None,
+        }
 
     def search_text(self, query: str, path: str = ".") -> dict[str, Any]:
         """按文件数、扫描字节数和匹配数预算执行字面量搜索。"""
         if not isinstance(query, str) or not query:
             raise ValueError("query 必须是非空字符串")
-        base = self.workspace.resolve(path)
-        candidates = [base] if base.is_file() else self._iter_files(base)
+        relative = self.workspace.lexical_relative(path)
+        candidates, traversal_truncated = self.workspace.secure_fs.list_regular_files(
+            relative,
+            max_entries=self.max_files,
+            ignored_directory_names=_IGNORED_DIRECTORY_NAMES,
+            ignored_file_names=_IGNORED_FILE_NAMES,
+            excluded=self.workspace.is_sensitive_relative,
+        )
         matches: list[dict[str, Any]] = []
         scanned_files = 0
         scanned_bytes = 0
         skipped_large_files = 0
         for candidate in candidates:
-            if not candidate.is_file():
-                continue
             try:
-                safe = self.workspace.resolve(candidate)
-                if scanned_files >= self.max_files:
-                    return self._search_result(
-                        matches,
-                        scanned_files,
-                        scanned_bytes,
-                        skipped_large_files,
-                        f"检查文件数达到上限 {self.max_files}",
-                    )
                 # 大文件即使被跳过也计入检查文件数，避免海量大文件造成无界遍历。
                 scanned_files += 1
-                size = safe.stat().st_size
+                size = self.workspace.secure_fs.regular_file_size(candidate)
                 if size > self.max_scan_file_bytes:
                     skipped_large_files += 1
                     continue
@@ -89,15 +76,31 @@ class SearchTools:
                         skipped_large_files,
                         f"总扫描预算达到上限 {self.max_scan_bytes} 字节",
                     )
-                text = safe.read_text(encoding="utf-8")
-            except (WorkspaceViolation, UnicodeDecodeError, OSError):
+                snapshot = self.workspace.secure_fs.read_full(
+                    candidate,
+                    max_bytes=min(
+                        self.max_scan_file_bytes,
+                        self.max_scan_bytes - scanned_bytes,
+                    ),
+                )
+                text = snapshot.content.decode("utf-8")
+                size = snapshot.version.size or 0
+            except UnicodeDecodeError:
                 continue
+            except (SecureFileViolation, OSError) as exc:
+                return self._search_result(
+                    matches,
+                    scanned_files,
+                    scanned_bytes,
+                    skipped_large_files,
+                    f"安全扫描中止：{exc}",
+                )
             scanned_bytes += size
             for line_number, line in enumerate(text.splitlines(), start=1):
                 if query in line:
                     matches.append(
                         {
-                            "path": str(safe.relative_to(self.workspace.root)),
+                            "path": candidate.as_posix(),
                             "line": line_number,
                             "text": line,
                         }
@@ -110,34 +113,14 @@ class SearchTools:
                             skipped_large_files,
                             f"匹配数达到上限 {self.max_matches}",
                         )
-        return self._search_result(matches, scanned_files, scanned_bytes, skipped_large_files)
-
-    def _iter_files(self, base: Path):
-        """逐个产出安全文件，避免 ``sorted(rglob())`` 先把整个仓库载入内存。"""
-
-        for current, directory_names, file_names in os.walk(base, followlinks=False):
-            current_path = Path(current)
-            safe_directories: list[str] = []
-            for name in sorted(directory_names):
-                if name in _IGNORED_DIRECTORY_NAMES:
-                    continue
-                try:
-                    resolved = self.workspace.resolve(current_path / name)
-                except WorkspaceViolation:
-                    continue
-                if resolved.is_dir():
-                    safe_directories.append(name)
-            directory_names[:] = safe_directories
-            for name in sorted(file_names):
-                if name in _IGNORED_FILE_NAMES:
-                    continue
-                candidate = current_path / name
-                try:
-                    resolved = self.workspace.resolve(candidate)
-                except WorkspaceViolation:
-                    continue
-                if resolved.is_file():
-                    yield resolved
+        reason = f"安全枚举达到上限 {self.max_files}" if traversal_truncated else None
+        return self._search_result(
+            matches,
+            scanned_files,
+            scanned_bytes,
+            skipped_large_files,
+            reason,
+        )
 
     @staticmethod
     def _search_result(

@@ -10,16 +10,17 @@ class ReadTools:
 
     def read_file(self, path: str) -> dict[str, Any]:
         """有界读取工作区 UTF-8 文本并标记截断。"""
-        target = self.workspace.resolve(path)
-        if not target.is_file():
-            raise ValueError("path 必须是已存在的文件")
-        with target.open("rb") as stream:
-            raw = stream.read(self.max_read_bytes + 1)
-        truncated = len(raw) > self.max_read_bytes
-        content = raw[: self.max_read_bytes].decode("utf-8", errors="replace")
+        relative = self._relative_path(path)
+        snapshot = self.workspace.secure_fs.read_limited(
+            relative,
+            max_bytes=self.max_read_bytes,
+        )
+        content = snapshot.content[: self.max_read_bytes].decode("utf-8", errors="replace")
         return {
-            "path": str(target.relative_to(self.workspace.root)),
+            "path": relative.as_posix(),
             "content": content,
-            "truncated": truncated,
-            "reason": f"读取量达到上限 {self.max_read_bytes} 字节" if truncated else None,
+            "truncated": snapshot.truncated,
+            "reason": (
+                f"读取量达到上限 {self.max_read_bytes} 字节" if snapshot.truncated else None
+            ),
         }

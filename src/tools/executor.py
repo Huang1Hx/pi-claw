@@ -11,6 +11,7 @@ from core.schemas import PolicyAction, PolicyDecision, ToolCall, ToolResult
 from sandbox.base import CommandRunner
 from sandbox.host import HostCommandRunner
 from security.policy import WorkspacePolicy
+from security.secure_fs import SecureFileVersion
 from tools.builtins import BuiltinTools
 from tools.edit import EditTools
 from tools.files import FileStorage
@@ -74,6 +75,7 @@ class ToolExecutor(
         self.max_output_chars = max_output_chars
         self.command_runner = command_runner or HostCommandRunner(max_output_chars=max_output_chars)
         self.execution_control: ExecutionControl | None = None
+        self._approved_file_version: SecureFileVersion | None = None
         self.max_files = max_files
         self.max_matches = max_matches
         self.max_read_bytes = max_read_bytes
@@ -109,10 +111,11 @@ class ToolExecutor(
                 error=f"策略拒绝：{decision.reason}",
                 metadata=policy_metadata,
             )
-        # 用户确认可能持续较长时间，先记录文件版本，再检查批准时是否仍是同一份内容。
-        prepared_fingerprint = self._write_fingerprint(call)
+        approved_file_version: SecureFileVersion | None = None
         if decision.action is PolicyAction.ASK and not approved:
-            approved, rejection_reason = self._request_approval(call, decision, self.preview(call))
+            # diff、SHA 与审批绑定版本必须来自同一稳定快照，不能分三次读取目标。
+            preview, prepared_version = self._preview_with_version(call)
+            approved, rejection_reason = self._request_approval(call, decision, preview)
             if not approved:
                 return ToolResult(
                     call.id,
@@ -121,7 +124,19 @@ class ToolExecutor(
                     error=f"未获批准：{rejection_reason or decision.reason}",
                     metadata=policy_metadata,
                 )
-            if prepared_fingerprint != self._write_fingerprint(call):
+            if call.name in {"write_or_replace", "apply_patch"} and not isinstance(
+                prepared_version, SecureFileVersion
+            ):
+                return ToolResult(
+                    call.id,
+                    call.name,
+                    False,
+                    error=(
+                        f"审批预览未取得安全文件版本，已 fail closed：{preview or '无可用预览'}"
+                    ),
+                    metadata=policy_metadata,
+                )
+            if prepared_version != self._write_version(call):
                 return ToolResult(
                     call.id,
                     call.name,
@@ -129,6 +144,8 @@ class ToolExecutor(
                     error="审批后目标文件发生变化，已拒绝执行；请重新预览并审批",
                     metadata=policy_metadata,
                 )
+            if isinstance(prepared_version, SecureFileVersion):
+                approved_file_version = prepared_version
 
         # 只有过完策略和审批门槛，才从注册表取出真实函数并展开参数调用。
         # 审批可能阻塞较长时间，必须在任何真实 handler/副作用前重新检查生命周期。
@@ -144,7 +161,9 @@ class ToolExecutor(
                 metadata=policy_metadata,
             )
         previous_control = self.execution_control
+        previous_approved_file_version = self._approved_file_version
         self.execution_control = control
+        self._approved_file_version = approved_file_version
         try:
             output = handler(**call.arguments)
             ok = not (
@@ -193,6 +212,7 @@ class ToolExecutor(
             )
         finally:
             self.execution_control = previous_control
+            self._approved_file_version = previous_approved_file_version
 
     def _request_approval(
         self,

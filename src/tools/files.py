@@ -1,78 +1,43 @@
-"""文件版本指纹和耐久原子写入。"""
+"""文件工具共享的安全相对路径、版本指纹和有界读取辅助。"""
 
 from __future__ import annotations
 
-import hashlib
-import os
-import tempfile
-from contextlib import suppress
 from pathlib import Path
+
+from core.schemas import ToolCall
+from security.secure_fs import SecureFileSnapshot, SecureFileVersion
 
 
 class FileStorage:
     """由 ToolExecutor 组合，复用工作区和资源预算。"""
 
-    @staticmethod
-    def _sha256_file(target: Path) -> str:
-        """分块计算文件正文指纹，避免一次载入整文件；用于发现审批或编辑期间的版本变化。"""
-        digest = hashlib.sha256()
-        with target.open("rb") as stream:
-            while block := stream.read(65_536):
-                digest.update(block)
-        return digest.hexdigest()
+    def _relative_path(self, path: str | Path) -> Path:
+        """只做词法归一化；真实节点访问交由 SecureWorkspaceFS 逐段验证。"""
+        return self.workspace.lexical_relative(path)
 
-    @staticmethod
-    def _write_temporary_text(target: Path, content: str) -> Path:
-        """在目标同目录写入并同步 UTF-8 临时文件，成功返回其路径，异常则清理。"""
-        descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{target.name}-",
-            suffix=".tmp",
-            dir=target.parent,
-        )
-        temporary = Path(temporary_name)
+    def _read_full(self, relative: Path) -> SecureFileSnapshot:
+        """按写入处理预算完整读取并返回绑定 inode/type/preimage 的快照。"""
+        return self.workspace.secure_fs.read_full(relative, max_bytes=self.max_write_bytes)
+
+    def _require_approved_version(self, actual: SecureFileVersion) -> None:
+        """handler 首次读取必须仍是用户看到并批准的同一文件版本。"""
+        approved = self._approved_file_version
+        if approved is not None and actual != approved:
+            raise ValueError("目标文件不再匹配审批预览版本，拒绝执行")
+
+    def _write_version(self, call: ToolCall) -> SecureFileVersion | str | None:
+        """返回审批绑定版本；异常使用稳定标记，不能把宿主路径写进预览。"""
+        if call.name not in {"write_or_replace", "apply_patch"}:
+            return None
+        path = call.arguments.get("path")
+        if not isinstance(path, str):
+            return "invalid"
         try:
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
-                stream.write(content)
-                stream.flush()
-                os.fsync(stream.fileno())
-        except BaseException:
-            with suppress(FileNotFoundError):
-                temporary.unlink()
-            raise
-        return temporary
-
-    @classmethod
-    def _atomic_create_text(cls, target: Path, content: str) -> None:
-        """用同目录临时文件 + 硬链接实现不覆盖已有目标的原子创建。"""
-
-        temporary = cls._write_temporary_text(target, content)
-        try:
-            os.link(temporary, target)
-            cls._fsync_directory(target.parent)
-        finally:
-            with suppress(FileNotFoundError):
-                temporary.unlink()
-
-    @classmethod
-    def _atomic_replace_text(cls, target: Path, content: str) -> None:
-        """完整落盘并 fsync 后再替换，避免进程中断留下半个目标文件。"""
-
-        original_mode = target.stat().st_mode & 0o777
-        temporary = cls._write_temporary_text(target, content)
-        try:
-            temporary.chmod(original_mode)
-            os.replace(temporary, target)
-            cls._fsync_directory(target.parent)
-        except BaseException:
-            with suppress(FileNotFoundError):
-                temporary.unlink()
-            raise
-
-    @staticmethod
-    def _fsync_directory(directory: Path) -> None:
-        """同步创建或替换操作涉及的父目录项，并在退出时关闭文件描述符。"""
-        descriptor = os.open(directory, os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+            relative = self._relative_path(path)
+            return self.workspace.secure_fs.version(
+                relative,
+                allow_missing=True,
+                max_bytes=self.max_write_bytes,
+            )
+        except (OSError, ValueError):
+            return "invalid"

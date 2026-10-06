@@ -21,16 +21,10 @@ class EditTools:
             raise TypeError("path 必须是字符串")
         if not isinstance(edits, list) or not 1 <= len(edits) <= 50:
             raise ValueError("edits 必须包含 1 到 50 个精确替换")
-        target = self.workspace.resolve(path)
-        if not target.is_file():
-            raise ValueError("apply_patch 要求目标文件已存在")
-        if target.stat().st_size > self.max_write_bytes:
-            raise ValueError(f"目标文件超过写入处理上限 {self.max_write_bytes} 字节")
-
-        original_fingerprint = self._sha256_file(target)
-        content = target.read_text(encoding="utf-8")
-        if self._sha256_file(target) != original_fingerprint:
-            raise ValueError("目标文件在读取期间发生变化，拒绝继续")
+        relative = self._relative_path(path)
+        snapshot = self._read_full(relative)
+        self._require_approved_version(snapshot.version)
+        content = snapshot.content.decode("utf-8")
         for index, edit in enumerate(edits, start=1):
             if not isinstance(edit, dict) or set(edit) != {"old", "new"}:
                 raise TypeError(f"第 {index} 个 edit 必须且只能包含 old、new")
@@ -45,11 +39,13 @@ class EditTools:
             if len(content.encode("utf-8")) > self.max_write_bytes:
                 raise ValueError(f"补丁结果超过写入上限 {self.max_write_bytes} 字节")
 
-        if self._sha256_file(target) != original_fingerprint:
-            raise ValueError("目标文件在读取后发生变化，拒绝覆盖")
-        # 所有 edits 校验后只提交一次；原子替换防半写，不提供多进程编辑事务。
-        self._atomic_replace_text(target, content)
+        self.workspace.secure_fs.atomic_replace_text(
+            relative,
+            content,
+            expected=snapshot.version,
+            max_bytes=self.max_write_bytes,
+        )
         return {
-            "path": str(target.relative_to(self.workspace.root)),
+            "path": relative.as_posix(),
             "edits_applied": len(edits),
         }

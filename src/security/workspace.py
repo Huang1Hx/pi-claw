@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from security.secure_fs import SecureWorkspaceFS
+
 
 class WorkspaceViolation(ValueError):
     """路径试图越过工作区或访问敏感文件。"""
@@ -57,6 +59,32 @@ class Workspace:
         if not candidate.is_dir():
             raise ValueError(f"工作区不是目录：{candidate}")
         self.root = candidate.resolve(strict=True)
+        self.secure_fs = SecureWorkspaceFS(self.root)
+
+    def lexical_relative(self, path: str | Path) -> Path:
+        """返回不解析 symlink 的工作区相对路径，供 dir-fd 文件访问使用。"""
+        raw = Path(path).expanduser()
+        if ".." in raw.parts:
+            raise WorkspaceViolation("路径包含不允许的 '..' 穿越片段")
+        if raw.is_absolute():
+            try:
+                relative = raw.relative_to(self.root)
+            except ValueError as exc:
+                raise WorkspaceViolation("路径位于工作区之外") from exc
+        else:
+            relative = raw
+        parts = tuple(part.lower() for part in relative.parts)
+        self._check_sensitive(parts)
+        return relative
+
+    def is_sensitive_relative(self, path: str | Path) -> bool:
+        """供安全目录 walker 在不解析路径时跳过任意层级的敏感名称。"""
+        parts = tuple(part.lower() for part in Path(path).parts)
+        try:
+            self._check_sensitive(parts)
+        except WorkspaceViolation:
+            return True
+        return False
 
     def resolve(self, path: str | Path = ".", *, allow_missing: bool = False) -> Path:
         """解析路径，并拒绝显式穿越、符号链接越界和敏感路径。"""

@@ -21,19 +21,17 @@ class WriteTools:
             raise ValueError(f"old 超过写入处理上限 {self.max_write_bytes} 字节")
         if len(new.encode("utf-8")) > self.max_write_bytes:
             raise ValueError(f"new 超过写入上限 {self.max_write_bytes} 字节")
-        target = self.workspace.resolve(path, allow_missing=True)
+        relative = self._relative_path(path)
         if old == "":
-            target.parent.mkdir(parents=True, exist_ok=True)
-            self._atomic_create_text(target, new)
-            return {"path": str(target.relative_to(self.workspace.root)), "created": True}
-        if not target.is_file():
-            raise ValueError("精确替换要求目标文件已存在")
-        if target.stat().st_size > self.max_write_bytes:
-            raise ValueError(f"目标文件超过写入处理上限 {self.max_write_bytes} 字节")
-        original_fingerprint = self._sha256_file(target)
-        content = target.read_text(encoding="utf-8")
-        if self._sha256_file(target) != original_fingerprint:
-            raise ValueError("目标文件在读取期间发生变化，拒绝继续")
+            expected = self.workspace.secure_fs.version(relative, allow_missing=True)
+            self._require_approved_version(expected)
+            if expected.exists:
+                raise ValueError("创建目标已经存在")
+            self.workspace.secure_fs.atomic_create_text(relative, new, expected=expected)
+            return {"path": relative.as_posix(), "created": True}
+        snapshot = self._read_full(relative)
+        self._require_approved_version(snapshot.version)
+        content = snapshot.content.decode("utf-8")
         count = content.count(old)
         if count == 0:
             raise ValueError("old 文本不存在，未修改文件")
@@ -42,12 +40,14 @@ class WriteTools:
         replaced = content.replace(old, new, 1)
         if len(replaced.encode("utf-8")) > self.max_write_bytes:
             raise ValueError(f"替换结果超过写入上限 {self.max_write_bytes} 字节")
-        if self._sha256_file(target) != original_fingerprint:
-            raise ValueError("目标文件在读取后发生变化，拒绝覆盖")
-        # 指纹检查能发现多数并发编辑，但检查与替换并非原子 CAS，不等于跨进程文件锁。
-        self._atomic_replace_text(target, replaced)
+        self.workspace.secure_fs.atomic_replace_text(
+            relative,
+            replaced,
+            expected=snapshot.version,
+            max_bytes=self.max_write_bytes,
+        )
         return {
-            "path": str(target.relative_to(self.workspace.root)),
+            "path": relative.as_posix(),
             "created": False,
             "replacements": 1,
         }
