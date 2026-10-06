@@ -46,7 +46,7 @@ ITERATION_<三位序号>_<主题>.md
 | [Iteration 022](ITERATION_022_EXECUTION_LIFECYCLE.md) | Agent 与命令生命周期 | 已提交 optimize | 共享 deadline/cancel、进程组清理、有界输出、独立停止原因 |
 | [Iteration 023](ITERATION_023_SANITIZED_WORKSPACE_SNAPSHOT.md) | 无敏感文件的工作区快照 | 已合并 main | dir-fd/no-follow、固定排除、manifest、资源上限、竞态拒绝 |
 | [Iteration 024](ITERATION_024_DOCKER_EXECUTION_SANDBOX.md) | Docker 命令执行隔离 | 已合并 main | 固定镜像、唯一只读挂载、断网/资源限制、非 root、强制清理 |
-| [Iteration 025](ITERATION_025_SECURE_FILE_RACES.md) | Host 文件工具竞态加固 | 已提交 optimize | root dir-fd、版本绑定审批、安全枚举、原子提交与 fail closed |
+| [Iteration 025](ITERATION_025_SECURE_FILE_RACES.md) | Host 文件工具竞态加固 | 已合并 main | root dir-fd、版本绑定审批、安全枚举、原子提交与 fail closed |
 
 Iteration 001–005 保留当时的路径与验证命令，不回写历史记录。当前目录和启动方式以
 [Iteration 006](ITERATION_006_DIRECT_SOURCE_LAYOUT.md)、[架构](../ARCHITECTURE.md) 和
