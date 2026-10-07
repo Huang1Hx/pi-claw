@@ -2,7 +2,7 @@
 
 ## 状态与边界
 
-状态：开发中（Task 3.8 的离线安全部分完成；远程 CI、模型诊断复测、90-trial 和 holdout 待完成）。
+状态：开发中（Task 3.8 的离线安全和远程 CI 完成；模型诊断复测、90-trial 和 holdout 待完成）。
 
 本轮不调用 DeepSeek 或 Kimi，不修改 grader、权限白名单、420 秒模型 deadline、24 steps、最多两轮
 修复或 Iteration 021 的 `78/90` 冻结基线。原始本地报告保存在 Git 忽略的 `runs/`，不提交 argv、
@@ -101,7 +101,13 @@ Moonshot Key、学校 Key 和学校 Base URL 均未命中 tracked/new 文件或�
 
 ## 尚未完成
 
-- `optimize` push 后确认 GitHub Actions `sandbox-security` 首次运行成功，才能勾选 CI 门；
 - 只复测 Iteration 021 冻结的 12 个未恢复身份，不替换 `78/90`；
 - 同协议完整 90-trial 回归和至少 27-trial 新 holdout；
 - 最终覆盖率与 Stage 3 总结。真实模型步骤只能在上述离线门和远程 CI 都通过后开始。
+
+## 远程 CI 证据
+
+`optimize` 的提交 `f66dada` 触发 GitHub Actions `sandbox-security` run `37567045236`：镜像构建、
+强制 Docker integration 和零残留容器检查均通过，job 用时 58 秒。首次运行提示旧官方 Action 的
+Node 20 声明已弃用，随后把 checkout/setup-python 升到各自官方最新发布对应的不可变 commit；
+下一次远程运行继续验证该维护修复。
