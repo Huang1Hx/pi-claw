@@ -23,9 +23,12 @@ class _BoundedBytes:
     limit: int
     value: bytearray = field(default_factory=bytearray)
     truncated: bool = False
+    first_append_monotonic: float | None = None
 
     def append(self, chunk: bytes) -> None:
         """保留前缀并记录是否丢弃了超限字节。"""
+        if chunk and self.first_append_monotonic is None:
+            self.first_append_monotonic = time.monotonic()
         remaining = self.limit - len(self.value)
         if remaining > 0:
             self.value.extend(chunk[:remaining])
@@ -64,6 +67,7 @@ class HostCommandRunner:
         """并发排空输出；超时或取消时清理整个进程组后再返回或抛出。"""
         if control is not None:
             control.checkpoint()
+        started = time.monotonic()
         allowed = {
             "PATH",
             "LANG",
@@ -111,6 +115,7 @@ class HostCommandRunner:
         deadline = time.monotonic() + request.timeout
         timed_out = False
         cleanup_failed = False
+        cleanup_started: float | None = None
         stopped: ExecutionCancelled | ExecutionDeadlineExceeded | None = None
         interrupted: BaseException | None = None
         try:
@@ -119,6 +124,7 @@ class HostCommandRunner:
                     control.checkpoint()
                 if time.monotonic() >= deadline:
                     timed_out = True
+                    cleanup_started = time.monotonic()
                     cleanup_failed = self._terminate_group(process)
                     break
                 time.sleep(0.02)
@@ -150,6 +156,24 @@ class HostCommandRunner:
         if stopped is not None:
             stopped.cleanup_failed = cleanup_failed
             raise stopped
+        finished = time.monotonic()
+        first_output_candidates = [
+            timestamp
+            for timestamp in (stdout.first_append_monotonic, stderr.first_append_monotonic)
+            if timestamp is not None
+        ]
+        metadata: dict[str, str | int | float | bool] = {
+            "duration_seconds": round(finished - started, 6),
+            "captured_output_bytes": len(stdout.value) + len(stderr.value),
+            "output_buffer_limit_bytes": self.max_output_chars * 2,
+        }
+        if first_output_candidates:
+            metadata["first_output_seconds"] = round(
+                min(first_output_candidates) - started,
+                6,
+            )
+        if cleanup_started is not None:
+            metadata["cleanup_seconds"] = round(finished - cleanup_started, 6)
         return CommandExecution(
             process.returncode if process.returncode is not None else -signal.SIGKILL,
             stdout.text(),
@@ -158,6 +182,7 @@ class HostCommandRunner:
             timed_out=timed_out,
             cleanup_failed=cleanup_failed,
             backend=self.backend,
+            metadata=metadata,
         )
 
     @staticmethod

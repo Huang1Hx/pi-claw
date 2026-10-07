@@ -97,6 +97,18 @@ def test_host_runner_bounds_both_output_streams_without_deadlock(tmp_path: Path)
     assert len(result.stderr) <= 1100
 
 
+def test_host_runner_reports_safe_latency_and_buffer_metrics(tmp_path: Path) -> None:
+    """评测只需要数值型时延/缓冲指标，不能把命令或宿主路径写入元数据。"""
+    result = HostCommandRunner(max_output_chars=128).run(
+        CommandRequest([sys.executable, "-c", "print('ready')"], tmp_path, 2)
+    )
+
+    assert 0 <= result.metadata["first_output_seconds"] <= result.metadata["duration_seconds"]
+    assert result.metadata["captured_output_bytes"] == len(b"ready\n")
+    assert result.metadata["output_buffer_limit_bytes"] == 256
+    assert all(str(tmp_path) not in repr(value) for value in result.metadata.values())
+
+
 def test_independent_host_runners_execute_concurrently(tmp_path: Path) -> None:
     """并发命令拥有独立进程组和输出缓冲，结果不能串线。"""
     runner = HostCommandRunner(max_output_chars=1024)
@@ -141,6 +153,7 @@ def test_host_runner_escalates_to_kill_for_sigterm_ignoring_process(tmp_path: Pa
     assert pid_file.is_file()
     assert result.timed_out is True
     assert result.cleanup_failed is False
+    assert 0 <= result.metadata["cleanup_seconds"] <= 3.5
     assert time.monotonic() - started < 3.5
 
 

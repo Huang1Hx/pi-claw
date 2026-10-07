@@ -30,7 +30,8 @@ core.schemas、core.events、core.usage 是低层数据协议。providers 和 se
 | config | workspace.py | 启动目录/projects 默认工作区、显式覆盖、符号链接拒绝 |
 | routing | classifier.py、intent.py、router.py、cost.py | 轻量分类、复杂度分流、升级与请求上限、分模型用量 |
 | routing | workflow.py、workflow_protocol.py | 规划/编码/审查状态机、结构化产物、阶段私有对话与有界返工 |
-| security | policy.py、approval.py、workspace.py | 权限规则、人工授权和路径边界 |
+| security | policy.py、approval.py、workspace.py、secure_fs.py | 权限规则、人工授权、路径边界和 Host dir-fd 竞态防护 |
+| sandbox | host.py、docker.py、snapshot.py、models.py | Host 进程组生命周期、Docker 固定隔离参数、去敏快照和执行指标 |
 | providers | base.py、scripted.py | 模型协议与确定性离线实现 |
 | providers | openai_compatible.py、streaming.py、events.py | HTTP 重试、SSE 分片聚合和传输事件 |
 | persistence | session_store.py、models.py | 会话门面和元数据 |
@@ -38,6 +39,7 @@ core.schemas、core.events、core.usage 是低层数据协议。providers 和 se
 | persistence | trace.py、usage.py | 审计轨迹与按 run_id 幂等的用量账本 |
 | evaluation | runner.py、cases.json、routing.py | 独立工作区离线验收、复杂度分流与调用分布对照 |
 | evaluation | compare_modes.py、mode_tasks.py、mode_task_catalog.py、mode_cases.py、mode_grading.py | 十任务、三种 Agent 架构、重复真实模型评测与分模型核算 |
+| evaluation | sandbox_cases.py | 11 类确定性攻击、30 次连续运行、Host/Docker 一致性与脱敏聚合报告 |
 | interfaces | cli.py、repl.py | 参数解析、终端显示和会话交互 |
 | interfaces | terminal_input.py、rendering.py | 注册表驱动斜杠菜单、TTY 降级、流式和最终显示去重 |
 
@@ -78,7 +80,8 @@ Router 按 profile.model 填写请求；共享连接时不更换 Key，独立连
 不可信的公开结论交给唯一可写主 Agent。子 Agent 禁止命令和写入；各自使用独立 Provider、上下文
 和 Trace，总 Token 汇总主从及返工。该能力不是跨机器分布式调度。
 Eval 使用本机线程并发独立 case。SessionStore 文件锁只覆盖本地存储临界区，
-不在等待模型时持有。当前没有分布式调度或 OS 沙箱。
+不在等待模型时持有。当前没有分布式调度。命令执行可显式选择 Docker 隔离后端，但 Docker
+不是虚拟机；Host 兼容后端不提供 OS 沙箱。
 
 ## 稳定性与兼容
 

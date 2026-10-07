@@ -8,6 +8,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -201,6 +202,7 @@ class DockerCommandRunner:
 
     def run(self, request: CommandRequest, *, control: object | None = None) -> CommandExecution:
         """在一次性容器中运行批准命令，所有退出路径都删除容器与输入快照。"""
+        run_started = time.monotonic()
         if self._docker_binary is None or self._image_id is None:
             self.preflight()
         self.assert_image_unchanged()
@@ -218,9 +220,12 @@ class DockerCommandRunner:
         pending: BaseException | None = None
         cleanup_failed = False
         cleanup_interrupted: BaseException | None = None
+        host_started: float | None = None
+        outer_cleanup_seconds = 0.0
         try:
             container_name = self._new_container_name()
             argv = self.build_run_argv(request, snapshot, container_name)
+            host_started = time.monotonic()
             execution = self._host_runner.run(
                 CommandRequest(argv, snapshot.path.parent, request.timeout),
                 control=control,
@@ -228,6 +233,7 @@ class DockerCommandRunner:
         except BaseException as exc:
             pending = exc
         finally:
+            outer_cleanup_started = time.monotonic()
             if container_name is not None:
                 try:
                     cleanup_failed = self._remove_container(container_name)
@@ -238,6 +244,7 @@ class DockerCommandRunner:
                 snapshot.cleanup()
             except SnapshotCleanupError:
                 cleanup_failed = True
+            outer_cleanup_seconds = time.monotonic() - outer_cleanup_started
         if pending is None and cleanup_interrupted is not None:
             pending = cleanup_interrupted
         if pending is not None:
@@ -252,7 +259,45 @@ class DockerCommandRunner:
             raise pending
         if execution is None:
             raise RuntimeError("Docker 命令未产生执行结果")
+        # 只透传底层 Runner 明确定义的数值指标，避免未来新增的宿主细节误入 Trace。
+        timing_fields = {
+            name: execution.metadata[name]
+            for name in (
+                "duration_seconds",
+                "first_output_seconds",
+                "captured_output_bytes",
+                "output_buffer_limit_bytes",
+                "cleanup_seconds",
+            )
+            if name in execution.metadata
+        }
+        # Docker 总耗时包含镜像复核、快照、容器运行和最终清理；首输出也补上宿主前置耗时。
+        inner_duration = timing_fields.get("duration_seconds")
+        total_duration = time.monotonic() - run_started
+        if isinstance(inner_duration, (int, float)) and not isinstance(inner_duration, bool):
+            timing_fields["duration_seconds"] = round(max(float(inner_duration), total_duration), 6)
+        first_output = timing_fields.get("first_output_seconds")
+        if (
+            host_started is not None
+            and isinstance(first_output, (int, float))
+            and not isinstance(first_output, bool)
+        ):
+            timing_fields["first_output_seconds"] = round(
+                host_started - run_started + float(first_output),
+                6,
+            )
+        inner_cleanup = timing_fields.get("cleanup_seconds")
+        if (
+            execution.timed_out
+            and isinstance(inner_cleanup, (int, float))
+            and not isinstance(inner_cleanup, bool)
+        ):
+            timing_fields["cleanup_seconds"] = round(
+                float(inner_cleanup) + outer_cleanup_seconds,
+                6,
+            )
         metadata: dict[str, str | int | float | bool] = {
+            **timing_fields,
             "image_id": self._image_id,
             "network": self.settings.network,
             "mount_count": 1,

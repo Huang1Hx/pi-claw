@@ -128,9 +128,21 @@ uv run --frozen pi-claw chat --config pi-claw.toml --route auto --max-steps 24
 | 离线评测 | 真实工具链、独立工作区并发、机器可读报告和脱敏 Trace |
 | 模型路由 | 轻量模型分类、按复杂度分流、失败升级、固定 profile、分模型 Token 与请求上限 |
 | 多模型工作流 | DeepSeek 规划/编码/常规审查、按风险升级 Kimi、高级只读隔离和结构化产物持久化 |
+| Docker 命令隔离 | 去敏只读快照、断网非 root 容器、资源硬限制、强制清理和 11 类攻击回归 |
 
-完成验收是最低证据检查，不保证任务业务正确。应用层权限检查不等于 OS 沙箱；
-获批测试会执行仓库代码。详细边界见 [安全说明](docs/SECURITY.md)。
+完成验收是最低证据检查，不保证任务业务正确。默认 Host 后端不提供 OS 沙箱；显式 Docker 后端
+显著加强命令隔离，但容器仍不是虚拟机。详细边界见 [安全说明](docs/SECURITY.md)。
+
+构建本地固定沙箱镜像并运行确定性安全评测：
+
+```bash
+./scripts/build-sandbox-image.sh
+uv run --frozen pi-claw chat --config pi-claw.toml --route auto --sandbox docker
+uv run --frozen python -m evaluation.sandbox_cases \
+  --output runs/stage3-sandbox-eval.json --trials 30
+```
+
+评测报告只保存聚合安全/性能指标，不保存 argv、stdout、宿主路径、canary、API Key 或 Base URL。
 
 ## 会话与命令
 
@@ -202,6 +214,7 @@ Python 导入使用 `from core.agent import Agent`；常用启动命令仍为 `u
 uv run --frozen ruff format --check src tests
 uv run --frozen ruff check src tests
 uv run --frozen pytest
+uv run --frozen pytest -m docker_integration tests/test_docker_sandbox_integration.py
 uv run --frozen pi-claw eval --workers 4
 uv build --no-config
 ```

@@ -8,6 +8,32 @@
 `/exit` 为唯一退出命令；`/model` 列出实际模型 ID 与角色映射，并可通过唯一 ID 选择已有配置。
 `/status` 默认简明中文输出，`--verbose` 保留原始 JSON 供调试；这不是机器 API 的格式变更。
 
+## 命令执行后端
+
+`chat`/`run` 默认使用 `host` 兼容后端，只适合可信工作区；可通过配置 `[sandbox]` 或本次启动的
+`--sandbox docker` 显式选择 Docker。Docker 必须先有本地 `pi-claw-sandbox:local` 镜像，启动时
+解析其不可变 image ID，后续每次命令都复核 tag 未漂移。Docker 不可用、镜像缺失或参数不受支持
+时直接失败，不回退 Host。
+
+Docker 命令先以 dir-fd/no-follow 规则构造去敏只读快照，再由固定 CLI argv 启动非 root、断网、
+只读 rootfs 的一次性容器。容器只挂载 `/input:ro`；entrypoint 把它复制到 256 MiB 的私有
+`/workspace` tmpfs，因此测试写入不会回写原工作区。默认上限为 512 MiB、1 CPU、128 PIDs，
+单条工具命令默认最多 30 秒。所有返回、异常、deadline 和取消路径都强制删除并二次确认容器，
+快照也在 `finally` 清理；失败以 `cleanup_failed` 进入结果和 Trace。
+
+Runner 的元数据只暴露数值型 `duration_seconds`、`first_output_seconds`、捕获缓冲大小，以及 image
+ID、网络模式、mount 数和资源上限，不包含命令、输出、宿主路径或凭据。`first_output_seconds`
+从 Docker Runner 开始计时，包含镜像复核和快照前置耗时；`duration_seconds` 还包含最终清理。
+确定性攻击评测命令为：
+
+```bash
+uv run --frozen python -m evaluation.sandbox_cases \
+  --output runs/stage3-sandbox-eval.json --trials 30
+```
+
+Docker 缺失时带 `docker_integration` 标记的测试会 skip；GitHub Actions 的专用任务设置强制变量，
+Docker/镜像不可用时必须失败，不能把 skip 当成发布证据。
+
 `interfaces/rendering.py` 仅记录当前显示缓冲和已展示的完成候选，精确相同正文不再重印。
 编码正文已展示时，审查完成只补充审查结论；审查工具读取不会丢失去重状态。
 最终回复有修订时仍展示完整新版本；无 SSE 时正常打印一次。失败状态不因去重被隐藏。

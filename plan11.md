@@ -32,7 +32,7 @@ Trace 驱动修复仍冻结为 78/90。Task 3.7 的完整回归为 Host 719 项�
 | 0 | 目录重构、评测框架、DeepSeek/Kimi 分工 | 已完成 | `639a322`；536 tests；已推送 `optimize` |
 | 1 | 公开仓库工程化与 CI | 待执行 | GitHub Actions、构建、License、贡献说明 |
 | 2 | 当前模型真实评测基线 | **已完成并合并 main** | grader 2.2 合并后首次 49/90；两轮修复后 78/90 |
-| 3 | Trace 恢复、请求稳定性与执行沙箱 | **进行中；Task 3.3–3.7 已完成，Task 3.8 待执行** | Task 3.7 复审 Ready；Host 719/719、Docker 兼容集 713/713（另有 6 项宿主专属契约） |
+| 3 | Trace 恢复、请求稳定性与执行沙箱 | **进行中；Task 3.3–3.7 已完成，Task 3.8 离线安全门已通过，模型复测待执行** | 11/11 攻击阻断、30/30 连续运行、Host/Docker parity 通过；远程 CI 首跑待确认 |
 | 4 | 任务相关的完成验收与抗伪完成 | 待执行 | 无关测试、篡改测试、旧绿灯等攻击用例全部拒绝 |
 | 5 | 路由校准与 Multi-Agent 故障隔离 | 待执行 | 错误降级率、主力调用率、子 Agent 部分失败指标 |
 | 6 | 正式发布 | 待执行 | 沙箱隔离演示、版本标签、两条真实端到端案例 |
@@ -370,19 +370,19 @@ Docker 退出码 0、`cleanup_failed=false`，且无残留容器或快照。
 - 新增 `src/evaluation/mode_holdout_tasks.py`
 - 新增 `tests/test_agent_mode_holdout.py`
 - 修改 `docs/SECURITY.md`、`docs/RUNTIME.md`、`docs/ARCHITECTURE.md`、`README.MD`
-- 新增 `docs/iterations/ITERATION_022_EXECUTION_SANDBOX.md`
+- 新增 `docs/iterations/ITERATION_026_SANDBOX_ATTACK_EVAL.md`
 - 修改 `docs/iterations/README.md` 和本文件阶段状态
 
-- [ ] 使用确定性恶意 fixture 验证：读取宿主文件、读取 `.env`、外联网络、写原工作区、访问
+- [x] 使用确定性恶意 fixture 验证：读取宿主文件、读取 `.env`、外联网络、写原工作区、访问
   Docker socket、fork bomb、内存膨胀、磁盘洪泛、无限循环、后台子进程和输出洪泛。
-- [ ] 必须达到：宿主/凭据泄漏 0、网络成功 0、原工作区命令副作用 0、逃逸成功 0、残留容器/
+- [x] 必须达到：宿主/凭据泄漏 0、网络成功 0、原工作区命令副作用 0、逃逸成功 0、残留容器/
   进程 0、攻击用例阻断率 100%。
-- [ ] 超时后 5 秒内完成进程组和容器清理；默认硬限制为 512 MiB、1 CPU、128 PIDs、30 秒。
-- [ ] 连续运行至少 30 个 sandbox trial，报告完成率、清理率、P50/P95 启动与总耗时、峰值输出
+- [x] 超时后 5 秒内完成进程组和容器清理；默认硬限制为 512 MiB、1 CPU、128 PIDs、30 秒。
+- [x] 连续运行至少 30 个 sandbox trial，报告完成率、清理率、P50/P95 启动与总耗时、峰值输出
   缓冲、拒绝原因分布；性能只作参考，安全指标是硬门槛。
 - [ ] Docker 缺失时单元测试照常运行，integration 标记为 skip；发布/CI 的 sandbox job 必须有
   Docker 且不得 skip。若 CI 尚未落地，阶段 3 不能标记全部完成。
-- [ ] 比较 host/docker 的确定性任务结果；允许耗时不同，不允许评分、文件结果或审批语义漂移。
+- [x] 比较 host/docker 的确定性任务结果；允许耗时不同，不允许评分、文件结果或审批语义漂移。
 - [ ] **诊断复测：**只运行 Iteration 021 冻结的 12 个未恢复身份，每项最多一次，保持原模型、
   420 秒 deadline、24 steps、grader 2.2 和权限策略；单独生成 Stage 3 报告，不替换 78/90 基线。
 - [ ] 诊断复测要求：请求预算耗尽误记为 Provider 错误为 0；deadline + loop 从原 10/12 明显下降，
@@ -395,7 +395,7 @@ Docker 退出码 0、`cleanup_failed=false`，且无残留容器或快照。
 - [ ] `90/90` 只能作为 stretch result；阶段完成由确定性安全硬门槛、生命周期目标、原 90 项
   不回归和 holdout 证据共同决定，不能只展示最好的一次模型结果。
 - [ ] 完整运行 pytest、Ruff、format、覆盖率、wheel/sdist 构建和敏感信息扫描。
-- [ ] 明确发布边界：Docker 显著加强命令隔离，但容器仍不是虚拟机，也不能消除内核/daemon、
+- [x] 明确发布边界：Docker 显著加强命令隔离，但容器仍不是虚拟机，也不能消除内核/daemon、
   镜像供应链或宿主配置风险。
 
 ## 阶段 4：语义完成验收

@@ -274,6 +274,41 @@ def test_docker_run_cleans_container_and_snapshot_and_returns_safe_metadata(
     assert str(request.workspace_root) not in repr(result.metadata)
 
 
+def test_docker_result_preserves_safe_host_timing_metrics(tmp_path: Path, monkeypatch) -> None:
+    """Docker 元数据要保留底层计时，但不得让底层字段覆盖沙箱安全事实。"""
+    runner, request, snapshot = _prepared_runner(tmp_path)
+    monkeypatch.setattr(runner, "prepare_snapshot", lambda _request: snapshot)
+    monkeypatch.setattr(runner, "assert_image_unchanged", lambda: None)
+    monkeypatch.setattr(runner, "_new_container_name", lambda: "pi-claw-test")
+    monkeypatch.setattr(runner, "_remove_container", lambda _name: False)
+    monkeypatch.setattr(
+        runner._host_runner,
+        "run",
+        lambda inner, control=None: CommandExecution(
+            0,
+            "ready\n",
+            "",
+            False,
+            metadata={
+                "duration_seconds": 0.25,
+                "first_output_seconds": 0.1,
+                "captured_output_bytes": 6,
+                "output_buffer_limit_bytes": 2048,
+                "cleanup_seconds": 0.05,
+                "network": "host",
+            },
+        ),
+    )
+
+    result = runner.run(request)
+
+    assert result.metadata["duration_seconds"] >= 0.25
+    assert result.metadata["first_output_seconds"] >= 0.1
+    assert result.metadata["captured_output_bytes"] == 6
+    assert result.metadata["cleanup_seconds"] >= 0.05
+    assert result.metadata["network"] == "none"
+
+
 def test_docker_result_redacts_private_snapshot_paths(tmp_path: Path, monkeypatch) -> None:
     """daemon 挂载错误即使回显 src，也不能把宿主临时路径送入模型或 Trace。"""
     runner, request, snapshot = _prepared_runner(tmp_path)

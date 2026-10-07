@@ -12,7 +12,7 @@
 | pi-mono coding-agent | 多 Provider、会话、工具选择、Skills/扩展、事件拦截和运行时切换 | 有 OpenAI-compatible Provider、会话和固定工具注册表 | 不立即做任意扩展加载；先保住 Policy 边界 |
 | Aider | Repo map、ask/code/architect 模式、可配置 lint/test | 只有两层目录和入口文档上下文；有受限测试命令 | 先采用写入后验证思想；符号级 repo map 后置 |
 | OpenCode | Plan/Build Agent、按工具和模式配置权限、只读 Explore Subagent | 当前用统一 Agent + Policy/Approval | 暂不引入多 Agent 模式；未来可用只读 profile 扩展 |
-| OpenHands | EventStream 与隔离 Runtime；Docker Runtime 执行任意代码并控制资源 | 当前是应用级 Workspace/Policy，不是 OS Sandbox | 不安装 Docker，不把白名单命令称为沙箱 |
+| OpenHands | EventStream 与隔离 Runtime；Docker Runtime 执行任意代码并控制资源 | 可选 Docker 命令后端；去敏快照、断网/非 root/资源限制和强制清理；Host 仍是可信兼容模式 | 保留 Policy/Approval，在其外增加 fail-closed Docker Adapter，不把容器称为虚拟机 |
 
 ## 本轮采用：宿主侧完成验收
 
@@ -58,14 +58,18 @@ Aider 的 repo map 会选取重要类、函数、类型和签名，为大型仓�
 
 ### Subagent/Agent Team
 
-Kimi CLI 和 OpenCode 都公开了隔离上下文的专用 Subagent。Pi-Claw 当前只有本地并发 Eval，尚无
-真实 Subagent Runtime。只有在单 Agent 基线稳定，并且同一 Eval 证明成功率或上下文利用得到提升
-时再加入。
+Kimi CLI 和 OpenCode 都公开了隔离上下文的专用 Subagent。Pi-Claw 已有单宿主
+`ReadOnlySubagentTeam`：子 Agent 独立上下文、只读工具和 Token 账本，经等待屏障向唯一可写主
+Agent 交接有界结论。它不是跨机器分布式系统；更复杂的子 Agent 工具权限仍要由同题 Eval 证明
+收益后再扩展。
 
-### Docker Runtime
+### 已采用：受限 Docker 命令 Runtime
 
-OpenHands 使用 Docker Runtime 隔离任意代码。Pi-Claw 的 Policy、Approval 和路径限制只是应用层
-控制，不等于容器。Docker 仍由用户自行安装；未来 Sandbox Adapter 也不能替代应用层授权。
+OpenHands 使用 Docker Runtime 隔离任意代码。Pi-Claw 现以更小边界实现 `DockerCommandRunner`：
+宿主只传固定 CLI argv，工作区先转为去敏只读快照，命令在一次性断网非 root 容器的有界 tmpfs
+执行；所有退出路径强制清理。Docker 仍由用户自行安装，Adapter 不替代 Policy/Approval，容器也
+不能消除宿主内核、daemon、镜像供应链和配置风险。量化攻击结果见
+[Iteration 026](iterations/ITERATION_026_SANDBOX_ATTACK_EVAL.md)。
 
 ## 官方来源
 
