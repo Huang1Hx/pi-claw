@@ -30,7 +30,12 @@ from core.prompts import build_system_prompt
 from core.team import ReadOnlySubagentTeam, SubagentAssignment
 from evaluation.mode_diagnostic import (
     build_diagnostic_prompt,
+    load_diagnostic_grade_subset,
+    merge_diagnostic_rows,
+    merge_post_repair_diagnostic_rows,
     select_diagnostic_jobs,
+    select_failed_diagnostic_jobs,
+    summarize_diagnostic_acquisition,
     summarize_diagnostic_results,
 )
 from evaluation.mode_grading import GRADER_VERSION, calibrate, grade, safe_functions
@@ -39,6 +44,7 @@ from evaluation.mode_repair import (
     build_repair_evidence,
     build_repair_prompt,
     is_transient_provider_error,
+    materialize_post_repair_rows,
     select_repair_jobs,
     summarize_repairs,
 )
@@ -526,6 +532,272 @@ def run_diagnostic_report(source_root: Path, args) -> dict:
     if load_report_root(baseline_path.parent)[2] != baseline_digest:
         raise RuntimeError("诊断期间 baseline report.json 发生变化")
     report = {**manifest, "diagnostic": diagnostic, "trials": rows}
+    save_json(args.output / "report.json", report)
+    save_json(args.output / "public-summary.json", build_public_summary(report))
+    return report
+
+
+def _load_post_repair_lineage(source: dict) -> dict[str, object]:
+    """沿诊断血缘读取修复报告、账本和 90 项基线，并复核三重指纹。"""
+    lineage = source.get("diagnostic_lineage")
+    if not isinstance(lineage, dict):
+        raise ValueError("诊断报告缺少 diagnostic_lineage")
+    repair_value = lineage.get("source_report")
+    ledger_value = lineage.get("source_ledger")
+    if not isinstance(repair_value, str) or not isinstance(ledger_value, str):
+        raise ValueError("诊断血缘缺少修复报告或账本路径")
+    repair_path = Path(repair_value).resolve()
+    repair, resolved_repair_path, repair_digest = load_report_root(repair_path.parent)
+    if resolved_repair_path != repair_path or repair_digest != lineage.get("source_report_sha256"):
+        raise ValueError("诊断血缘中的修复报告路径或指纹不一致")
+    ledger_path = Path(ledger_value).resolve()
+    ledger, ledger_digest = _load_json_with_digest(ledger_path, "repair-ledger.json")
+    if ledger_digest != lineage.get("source_ledger_sha256"):
+        raise ValueError("诊断血缘中的 repair ledger 指纹不一致")
+    entries = ledger.get("entries")
+    if not isinstance(entries, list):
+        raise ValueError("repair-ledger.json 缺少 entries")
+
+    repair_source = repair.get("repair_source")
+    if not isinstance(repair_source, dict) or not isinstance(repair_source.get("report"), str):
+        raise ValueError("修复报告缺少 baseline 血缘")
+    baseline_path = Path(repair_source["report"]).resolve()
+    baseline, resolved_baseline_path, baseline_digest = load_report_root(baseline_path.parent)
+    if resolved_baseline_path != baseline_path or baseline_digest != repair_source.get(
+        "report_sha256"
+    ):
+        raise ValueError("修复报告中的 baseline 路径或指纹不一致")
+    ledger_source = ledger.get("source_report")
+    if not isinstance(ledger_source, str) or Path(ledger_source).resolve() != baseline_path:
+        raise ValueError("修复账本与报告指向不同 baseline")
+    if ledger.get("source_report_sha256") != baseline_digest:
+        raise ValueError("修复账本的 baseline 指纹不一致")
+    return {
+        "repair": repair,
+        "repair_path": repair_path,
+        "repair_digest": repair_digest,
+        "ledger": ledger,
+        "ledger_path": ledger_path,
+        "ledger_digest": ledger_digest,
+        "entries": entries,
+        "baseline": baseline,
+        "baseline_path": baseline_path,
+        "baseline_digest": baseline_digest,
+    }
+
+
+def _settings_models(args) -> tuple[dict[str, str], str | None]:
+    """读取工作流模型 ID；连接地址和 Key 不进入返回值或评测报告。"""
+    settings = load_settings(config_path=args.config.resolve(), cwd=args.config.resolve().parent)
+    roles = {settings.workflow.planner, settings.workflow.coder, settings.workflow.reviewer}
+    if not settings.workflow.enabled or not roles <= set(settings.profiles):
+        raise ValueError("诊断续跑需要已启用且模型完整的 planner/coder/reviewer 配置")
+    models = {
+        role: settings.profiles[getattr(settings.workflow, role)].model
+        for role in ("planner", "coder", "reviewer")
+    }
+    premium_profile = settings.workflow.premium_reviewer
+    premium_model = settings.profiles[premium_profile].model if premium_profile else None
+    return models, premium_model
+
+
+def run_diagnostic_continuation(
+    source_root: Path,
+    replacement_root: Path,
+    args,
+) -> dict:
+    """接续部分诊断结果，只跑当前失败项，并物化独立的派生 90-trial 报告。"""
+    source, source_path, source_digest = load_report_root(source_root.resolve())
+    if source.get("grader_version") != GRADER_VERSION:
+        raise ValueError("诊断续跑必须沿用 grader 2.2")
+    source_rows = source.get("trials")
+    if not isinstance(source_rows, list):
+        raise ValueError("诊断续跑来源缺少 trials")
+    prior_rows, prior_digest = load_diagnostic_grade_subset(replacement_root)
+    if len(prior_rows) != args.expected_diagnostic_replacements:
+        raise ValueError(
+            "部分重跑数量漂移："
+            f"期望 {args.expected_diagnostic_replacements}，实际 {len(prior_rows)}"
+        )
+    current_rows = merge_diagnostic_rows(source_rows, prior_rows)
+    jobs = select_failed_diagnostic_jobs(
+        current_rows,
+        expected_count=args.expected_diagnostic_failures,
+    )
+
+    if source.get("workers") != 1:
+        raise ValueError("诊断续跑来源必须使用 workers=1")
+    deadline = source.get("deadline_seconds")
+    max_steps = source.get("max_steps")
+    if type(deadline) is not int or not 30 <= deadline <= 1800:
+        raise ValueError("诊断续跑 deadline 必须为 30–1800 秒")
+    if type(max_steps) is not int or not 4 <= max_steps <= 40:
+        raise ValueError("诊断续跑 max_steps 必须为 4–40")
+    transport = source.get("transport")
+    if not isinstance(transport, dict):
+        raise ValueError("诊断续跑来源缺少传输协议")
+    protocol = (
+        transport.get("max_attempts_per_request"),
+        transport.get("retry_base_delay_seconds"),
+        transport.get("max_retry_delay_seconds"),
+    )
+    if protocol != (3, 2.0, 10.0):
+        raise ValueError("诊断续跑必须保持 3 次尝试与 2/10 秒退避协议")
+    models, premium_model = _settings_models(args)
+    if source.get("models") != models or source.get("premium_model") != premium_model:
+        raise ValueError("诊断续跑必须沿用来源报告中的 DeepSeek/Kimi 模型分配")
+    lineage = _load_post_repair_lineage(source)
+    repair = lineage["repair"]
+    baseline = lineage["baseline"]
+    entries = lineage["entries"]
+    if (
+        not isinstance(repair, dict)
+        or not isinstance(baseline, dict)
+        or not isinstance(entries, list)
+    ):
+        raise ValueError("诊断血缘解析结果类型无效")
+    post_repair_rows = materialize_post_repair_rows(baseline, entries)
+    post_repair_successes = sum(row.get("passed") is True for row in post_repair_rows)
+    if post_repair_successes != 78:
+        raise ValueError(f"诊断续跑要求冻结 78/90，实际物化为 {post_repair_successes}/90")
+    repair_metrics = repair.get("repair")
+    if not isinstance(repair_metrics, dict) or not isinstance(
+        repair_metrics.get("total_acquisition_cost"), dict
+    ):
+        raise ValueError("修复报告缺少历史总成本")
+    historical_cost = repair_metrics["total_acquisition_cost"]
+
+    args.workers = 1
+    args.deadline = deadline
+    args.max_steps = max_steps
+    args.max_attempts = 3
+    args.retry_base_delay = 2.0
+    args.max_retry_delay = 10.0
+    calibration = calibrate()
+    if not calibration["passed"]:
+        raise RuntimeError("评分器校准失败，停止诊断续跑")
+    args.output = args.output.resolve()
+    args.output.mkdir(parents=True, exist_ok=False)
+    save_json(args.output / "grader-calibration.json", calibration)
+    private_lineage = {
+        "kind": "stage3_diagnostic_continuation_derived_90",
+        "merge_into_frozen_baseline": False,
+        "source_diagnostic": str(source_path),
+        "source_diagnostic_sha256": source_digest,
+        "prior_replacements": str(replacement_root.resolve()),
+        "prior_replacements_sha256": prior_digest,
+        "repair_report": str(lineage["repair_path"]),
+        "repair_report_sha256": lineage["repair_digest"],
+        "repair_ledger": str(lineage["ledger_path"]),
+        "repair_ledger_sha256": lineage["ledger_digest"],
+        "baseline_report": str(lineage["baseline_path"]),
+        "baseline_report_sha256": lineage["baseline_digest"],
+    }
+    manifest = {
+        "schema_version": 6,
+        "grader_version": GRADER_VERSION,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "real_model": True,
+        "network_used": True,
+        "source_sha256": _code_fingerprint(),
+        "modes": baseline["modes"],
+        "tasks": baseline["tasks"],
+        "trials_per_task": baseline["trials_per_task"],
+        "workers": 1,
+        "deadline_seconds": deadline,
+        "max_steps": max_steps,
+        "transport": dict(transport),
+        "models": models,
+        "premium_model": premium_model,
+        "accounting": "保留 78/90 历史总成本，并累计 12 项诊断、6 项部分重跑和本次 5 项重跑",
+        "diagnostic_lineage": private_lineage,
+    }
+    save_json(args.output / "manifest.json", manifest)
+    retry_rows = execute_diagnostic_jobs(
+        jobs,
+        args,
+        expected_count=args.expected_diagnostic_failures,
+    )
+    latest_diagnostic_rows = merge_diagnostic_rows(current_rows, retry_rows)
+    diagnostic = summarize_diagnostic_results(latest_diagnostic_rows)
+    merged_rows = merge_post_repair_diagnostic_rows(
+        post_repair_rows,
+        latest_diagnostic_rows,
+    )
+    diagnostic_acquisition = summarize_diagnostic_acquisition(
+        [
+            ("source_diagnostic", source_rows),
+            ("prior_replacements", prior_rows),
+            ("retry", retry_rows),
+        ]
+    )
+    acquisition = {
+        "historical_stage2": dict(historical_cost),
+        "diagnostic": diagnostic_acquisition,
+        "total_known_tokens": int(historical_cost.get("known_tokens", 0))
+        + int(diagnostic_acquisition["total_known_tokens"]),
+        "total_duration_seconds": round(
+            float(historical_cost.get("duration_seconds", 0))
+            + float(diagnostic_acquisition["total_duration_seconds"]),
+            3,
+        ),
+        "unknown_usage_trials": int(historical_cost.get("unknown_usage_trials", 0))
+        + int(diagnostic_acquisition["unknown_usage_trials"]),
+        "note": "历史 78/90 与三段诊断尝试全部计入；派生 90 行只表示每个身份的最新结果",
+    }
+    derived_successes = sum(row.get("passed") is True for row in merged_rows)
+    continuation = {
+        "source_post_repair_successes": post_repair_successes,
+        "source_diagnostic_successes": sum(row.get("passed") is True for row in source_rows),
+        "prior_replacement_runs": len(prior_rows),
+        "selected_retry_runs": len(retry_rows),
+        "derived_successes": derived_successes,
+        "derived_failures": len(merged_rows) - derived_successes,
+        "frozen_78_of_90_unchanged": True,
+    }
+    by_mode = {
+        mode: summarize(
+            [row for row in merged_rows if row["mode"] == mode],
+            premium_model=premium_model,
+        )
+        for mode in baseline["modes"]
+    }
+    by_mode_and_task = {
+        mode: {
+            task_id: summarize(
+                [row for row in merged_rows if row["mode"] == mode and row["task"] == task_id],
+                premium_model=premium_model,
+            )
+            for task_id in baseline["tasks"]
+        }
+        for mode in baseline["modes"]
+    }
+
+    if load_report_root(source_path.parent)[2] != source_digest:
+        raise RuntimeError("诊断续跑期间来源 report.json 发生变化")
+    if load_diagnostic_grade_subset(replacement_root)[1] != prior_digest:
+        raise RuntimeError("诊断续跑期间部分重跑 grade.json 发生变化")
+    if load_report_root(Path(lineage["repair_path"]).parent)[2] != lineage["repair_digest"]:
+        raise RuntimeError("诊断续跑期间修复 report.json 发生变化")
+    if (
+        _load_json_with_digest(Path(lineage["ledger_path"]), "repair-ledger.json")[1]
+        != lineage["ledger_digest"]
+    ):
+        raise RuntimeError("诊断续跑期间 repair-ledger.json 发生变化")
+    if load_report_root(Path(lineage["baseline_path"]).parent)[2] != lineage["baseline_digest"]:
+        raise RuntimeError("诊断续跑期间 baseline report.json 发生变化")
+
+    report = {
+        **manifest,
+        "continuation": continuation,
+        "acquisition": acquisition,
+        "repair": repair_metrics,
+        "diagnostic": diagnostic,
+        "by_mode": by_mode,
+        "by_mode_and_task": by_mode_and_task,
+        "trials": merged_rows,
+    }
+    save_json(args.output / "retry-results.json", retry_rows)
     save_json(args.output / "report.json", report)
     save_json(args.output / "public-summary.json", build_public_summary(report))
     return report
@@ -1460,13 +1732,14 @@ def execute_diagnostic_jobs(
     args,
     *,
     runner=None,
+    expected_count: int = 12,
 ) -> list[dict]:
-    """严格串行执行冻结身份，每项恰好一次，避免并发改变原 420 秒协议。"""
+    """严格串行执行指定冻结身份，每项恰好一次，避免并发改变来源协议。"""
     if args.workers != 1:
         raise ValueError("独立诊断必须使用 workers=1")
     identities = [job.identity for job in jobs]
-    if len(identities) != 12 or len(set(identities)) != 12:
-        raise ValueError("独立诊断必须恰好包含 12 个不重复冻结身份")
+    if len(identities) != expected_count or len(set(identities)) != expected_count:
+        raise ValueError(f"独立诊断必须恰好包含 {expected_count} 个不重复冻结身份")
     runner = runner or run_diagnostic_trial
     return [runner(job, args) for job in jobs]
 
@@ -1621,6 +1894,18 @@ def main() -> int:
         type=Path,
         help="独立复测冻结的 12 个最终失败候选；不生成第三修复轮、不回写 78/90",
     )
+    parser.add_argument(
+        "--continue-diagnostic-from",
+        type=Path,
+        help="接续完整诊断报告，只重跑合并部分结果后仍失败的身份",
+    )
+    parser.add_argument(
+        "--diagnostic-replacements-from",
+        type=Path,
+        help="诊断续跑前已经完成的部分 grade.json 根目录",
+    )
+    parser.add_argument("--expected-diagnostic-failures", type=int)
+    parser.add_argument("--expected-diagnostic-replacements", type=int)
     parser.add_argument("--repair-rounds", type=int, default=2, help="每个候选最多修复 1–2 轮")
     parser.add_argument("--trials", type=int, default=2)
     parser.add_argument("--workers", type=int, default=2)
@@ -1657,6 +1942,50 @@ def main() -> int:
         args.mode = args.mode[0]
         worker(args)
         return 0
+    continuation_requested = any(
+        value is not None
+        for value in (
+            args.continue_diagnostic_from,
+            args.diagnostic_replacements_from,
+            args.expected_diagnostic_failures,
+            args.expected_diagnostic_replacements,
+        )
+    )
+    if continuation_requested:
+        if not args.live:
+            parser.error("诊断续跑必须与 --live 一起使用")
+        if (
+            args.continue_diagnostic_from is None
+            or args.diagnostic_replacements_from is None
+            or args.expected_diagnostic_failures is None
+            or args.expected_diagnostic_replacements is None
+        ):
+            parser.error("诊断续跑必须提供来源、部分替换目录和两个期望数量")
+        competing = (
+            args.diagnostic_from,
+            args.resume_from,
+            args.merge_from,
+            args.replace_from,
+            args.replace_origin,
+            args.repair_from,
+            args.resume_repair_from,
+            args.mode,
+            args.task,
+        )
+        if any(value is not None for value in competing):
+            parser.error("诊断续跑不能与普通诊断、续跑、合并、修复或身份筛选混用")
+        if args.expected_diagnostic_failures < 1 or args.expected_diagnostic_replacements < 1:
+            parser.error("诊断续跑的期望数量必须为正整数")
+        try:
+            summary = run_diagnostic_continuation(
+                args.continue_diagnostic_from,
+                args.diagnostic_replacements_from,
+                args,
+            )
+        except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError) as error:
+            parser.error(f"无法执行诊断续跑：{error}")
+        print(json.dumps(summary["continuation"], ensure_ascii=False), flush=True)
+        return 0 if summary["continuation"]["derived_failures"] == 0 else 1
     if args.diagnostic_from:
         if not args.live:
             parser.error("--diagnostic-from 必须与 --live 一起使用")

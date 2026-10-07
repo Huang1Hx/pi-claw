@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from hashlib import sha256
 from pathlib import Path
 from typing import Final
 
@@ -126,6 +127,157 @@ def select_diagnostic_jobs(source: dict, ledger: dict) -> list[RepairJob]:
             )
         )
     return jobs
+
+
+def load_diagnostic_grade_subset(root: Path) -> tuple[list[dict], str]:
+    """读取部分重跑的 grade.json，并对相对路径与原始字节生成稳定指纹。"""
+    root = root.resolve()
+    if not root.is_dir():
+        raise ValueError("诊断部分重跑目录不存在")
+    paths = sorted(path for path in root.rglob("grade.json") if path.is_file())
+    if not paths:
+        raise ValueError("诊断部分重跑目录没有 grade.json")
+    digest = sha256()
+    rows = []
+    for path in paths:
+        if path.is_symlink():
+            raise ValueError("诊断 grade.json 不能是符号链接")
+        raw = path.read_bytes()
+        try:
+            row = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"诊断 grade.json 无效：{path.name}") from error
+        if not isinstance(row, dict):
+            raise ValueError("诊断 grade.json 顶层必须是对象")
+        trial_identity(row)
+        relative = path.relative_to(root).as_posix().encode()
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        digest.update(len(raw).to_bytes(8, "big"))
+        digest.update(raw)
+        rows.append(row)
+    order = {item[:3]: index for index, item in enumerate(FROZEN_STAGE3_FAILURES)}
+    try:
+        rows.sort(key=lambda row: order[trial_identity(row)])
+    except KeyError as error:
+        raise ValueError("诊断 grade.json 身份不在冻结 12 项中") from error
+    return rows, digest.hexdigest()
+
+
+def merge_diagnostic_rows(source_rows: list[dict], replacements: list[dict]) -> list[dict]:
+    """按稳定身份覆盖部分诊断结果；来源顺序与来源对象保持不变。"""
+    expected = {item[:3] for item in FROZEN_STAGE3_FAILURES}
+    source_identities = [trial_identity(row) for row in source_rows]
+    if (
+        len(source_rows) != 12
+        or len(set(source_identities)) != 12
+        or set(source_identities) != expected
+    ):
+        raise ValueError("诊断来源必须恰好覆盖冻结 12 项")
+    replacement_map = {}
+    for row in replacements:
+        identity = trial_identity(row)
+        if identity in replacement_map:
+            raise ValueError("诊断替换结果包含重复身份")
+        if identity not in expected:
+            raise ValueError("诊断替换身份不在来源中")
+        replacement_map[identity] = row
+    return [
+        dict(replacement_map.get(identity, row))
+        for identity, row in zip(source_identities, source_rows, strict=True)
+    ]
+
+
+def select_failed_diagnostic_jobs(rows: list[dict], *, expected_count: int) -> list[RepairJob]:
+    """从最新诊断视图选择仍失败的候选，包括 deadline 与瞬时 Provider 错误。"""
+    merged = merge_diagnostic_rows(rows, [])
+    failed = [row for row in merged if row.get("passed") is not True]
+    if len(failed) != expected_count:
+        raise ValueError(f"诊断失败项数量漂移：期望 {expected_count}，实际 {len(failed)}")
+    jobs = []
+    for row in failed:
+        mode, task, trial = trial_identity(row)
+        workspace_value = row.get("workspace")
+        traces_value = row.get("traces")
+        if not isinstance(workspace_value, str):
+            raise ValueError(f"诊断失败项缺少工作区：{(mode, task, trial)}")
+        if not isinstance(traces_value, list) or not all(
+            isinstance(value, str) for value in traces_value
+        ):
+            raise ValueError(f"诊断失败项 traces 无效：{(mode, task, trial)}")
+        workspace = Path(workspace_value).resolve()
+        if not (workspace / "solution.py").is_file():
+            raise ValueError(f"诊断失败项缺少 solution.py：{(mode, task, trial)}")
+        jobs.append(
+            RepairJob(
+                mode=mode,
+                task=task,
+                trial=trial,
+                source_workspace=workspace,
+                source_traces=tuple(Path(value).resolve() for value in traces_value),
+                source_row=dict(row),
+            )
+        )
+    return jobs
+
+
+def summarize_diagnostic_acquisition(
+    stages: list[tuple[str, list[dict]]],
+) -> dict[str, object]:
+    """累计每次诊断尝试的已知成本，替换结果也不能抹掉先前调用。"""
+    labels = [label for label, _rows in stages]
+    if not stages or len(labels) != len(set(labels)):
+        raise ValueError("诊断成本阶段必须非空且名称唯一")
+    stage_rows = []
+    for label, rows in stages:
+        stage_rows.append(
+            {
+                "name": label,
+                "trial_runs": len(rows),
+                "known_tokens": sum(
+                    int((row.get("usage") or {}).get("total_tokens", 0)) for row in rows
+                ),
+                "unknown_usage_trials": sum(
+                    bool(row.get("usage_may_be_incomplete")) for row in rows
+                ),
+                "duration_seconds": round(
+                    sum(float(row.get("duration_seconds", 0)) for row in rows), 3
+                ),
+            }
+        )
+    return {
+        "stages": stage_rows,
+        "total_trial_runs": sum(stage["trial_runs"] for stage in stage_rows),
+        "total_known_tokens": sum(stage["known_tokens"] for stage in stage_rows),
+        "unknown_usage_trials": sum(stage["unknown_usage_trials"] for stage in stage_rows),
+        "total_duration_seconds": round(sum(stage["duration_seconds"] for stage in stage_rows), 3),
+        "note": "包含来源诊断、先前部分重跑和本次重跑的全部调用；替换行不删除历史成本",
+    }
+
+
+def merge_post_repair_diagnostic_rows(
+    post_repair_rows: list[dict], diagnostic_rows: list[dict]
+) -> list[dict]:
+    """将冻结 12 项最新诊断覆盖到修复后 90 行，生成独立派生结果。"""
+    if len(post_repair_rows) != 90:
+        raise ValueError("修复后来源必须包含 90 个 trial")
+    identities = [trial_identity(row) for row in post_repair_rows]
+    if len(set(identities)) != 90:
+        raise ValueError("修复后 90 项包含重复身份")
+    frozen = {item[:3] for item in FROZEN_STAGE3_FAILURES}
+    failed = {
+        identity
+        for identity, row in zip(identities, post_repair_rows, strict=True)
+        if row.get("passed") is not True
+    }
+    if failed != frozen:
+        raise ValueError("修复后来源失败身份与冻结 12 项不一致")
+    diagnostics = merge_diagnostic_rows(diagnostic_rows, [])
+    diagnostic_map = {trial_identity(row): row for row in diagnostics}
+    return [
+        dict(diagnostic_map.get(identity, row))
+        for identity, row in zip(identities, post_repair_rows, strict=True)
+    ]
 
 
 def build_diagnostic_prompt(job: RepairJob, evidence: dict) -> str:

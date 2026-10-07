@@ -254,6 +254,41 @@ def build_repair_prompt(job: RepairJob, evidence: dict, round_number: int) -> st
     )
 
 
+def materialize_post_repair_rows(baseline: dict, ledger: list[dict]) -> list[dict]:
+    """按基线顺序用账本最终轮次替换失败行，生成可继续合并的完整结果集。"""
+    baseline_rows = baseline.get("trials")
+    if not isinstance(baseline_rows, list) or not baseline_rows:
+        raise ValueError("物化修复结果需要非空 baseline trials")
+    identities = [trial_identity(row) for row in baseline_rows]
+    if len(identities) != len(set(identities)):
+        raise ValueError("baseline 包含重复 trial 身份")
+    baseline_map = dict(zip(identities, baseline_rows, strict=True))
+    expected = {identity for identity, row in baseline_map.items() if row.get("passed") is not True}
+    replacements: dict[tuple[str, str, int], dict] = {}
+    for entry in ledger:
+        if not isinstance(entry, dict):
+            raise ValueError("repair ledger 项无效")
+        identity = trial_identity(entry.get("identity", {}))
+        if identity in replacements or identity not in expected:
+            raise ValueError("repair ledger 身份重复或不属于 baseline 失败项")
+        rounds = entry.get("rounds")
+        if not isinstance(rounds, list) or not 1 <= len(rounds) <= 2:
+            raise ValueError("repair ledger 每项必须包含 1–2 轮")
+        final_row = rounds[-1]
+        if not isinstance(final_row, dict) or trial_identity(final_row) != identity:
+            raise ValueError("repair ledger 最终轮次身份不一致")
+        final_passed = entry.get("final_passed")
+        if type(final_passed) is not bool or final_passed != (final_row.get("passed") is True):
+            raise ValueError("repair ledger final_passed 与最终轮次不一致")
+        replacements[identity] = dict(final_row)
+    if set(replacements) != expected:
+        raise ValueError("repair ledger 未完整覆盖 baseline 失败项")
+    return [
+        dict(replacements.get(identity, row))
+        for identity, row in zip(identities, baseline_rows, strict=True)
+    ]
+
+
 def _known_cost(rows: list[dict]) -> dict:
     """核算一组 trial 的已知 Token、耗时和显式未知用量。"""
     return {

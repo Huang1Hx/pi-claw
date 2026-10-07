@@ -18,6 +18,7 @@ from evaluation.mode_repair import (
     build_repair_evidence,
     build_repair_prompt,
     is_transient_provider_error,
+    materialize_post_repair_rows,
     prepare_repair_workspace,
     select_repair_jobs,
     summarize_repairs,
@@ -576,6 +577,68 @@ def test_resume_repair_transport_does_not_retry_non_transient_provider_error(tmp
     )
 
     assert resumed == ledger
+
+
+def test_materialize_post_repair_rows_replaces_every_ledger_identity_once(tmp_path):
+    """物化后的 90 行必须使用每个修复身份的最终轮次，且不改变基线顺序。"""
+    workspace = _candidate(tmp_path)
+    failed = _row(workspace)
+    retained = {
+        **failed,
+        "mode": "single",
+        "trial": 1,
+        "passed": True,
+        "failure_checks": [],
+    }
+    recovered = {
+        **failed,
+        "passed": True,
+        "leader_status": "completed",
+        "failure_checks": [],
+    }
+    still_failed = {
+        **failed,
+        "mode": "team",
+        "trial": 3,
+        "leader_status": "deadline",
+    }
+    baseline = {"trials": [retained, failed, {**failed, "mode": "team", "trial": 3}]}
+    ledger = [
+        {
+            "identity": {"mode": "workflow", "task": "dependency_order", "trial": 2},
+            "rounds": [recovered],
+            "final_passed": True,
+        },
+        {
+            "identity": {"mode": "team", "task": "dependency_order", "trial": 3},
+            "rounds": [still_failed],
+            "final_passed": False,
+        },
+    ]
+
+    rows = materialize_post_repair_rows(baseline, ledger)
+
+    assert [compare_modes.trial_identity(row) for row in rows] == [
+        ("single", "dependency_order", 1),
+        ("workflow", "dependency_order", 2),
+        ("team", "dependency_order", 3),
+    ]
+    assert [row["passed"] for row in rows] == [True, True, False]
+
+
+def test_materialize_post_repair_rows_rejects_inconsistent_final_flag(tmp_path):
+    """账本声明与最终行评分矛盾时必须 fail closed，不能生成虚假的成功结果。"""
+    failed = _row(_candidate(tmp_path))
+    ledger = [
+        {
+            "identity": {"mode": "workflow", "task": "dependency_order", "trial": 2},
+            "rounds": [{**failed, "passed": True, "failure_checks": []}],
+            "final_passed": False,
+        }
+    ]
+
+    with pytest.raises(ValueError, match="final_passed"):
+        materialize_post_repair_rows({"trials": [failed]}, ledger)
 
 
 def test_repair_cli_requires_explicit_live_flag(tmp_path, monkeypatch):
