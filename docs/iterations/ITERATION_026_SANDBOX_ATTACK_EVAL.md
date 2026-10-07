@@ -110,4 +110,4 @@ Moonshot Key、学校 Key 和学校 Base URL 均未命中 tracked/new 文件或�
 `optimize` 的提交 `f66dada` 触发 GitHub Actions `sandbox-security` run `37567045236`：镜像构建、
 强制 Docker integration 和零残留容器检查均通过，job 用时 58 秒。首次运行提示旧官方 Action 的
 Node 20 声明已弃用，随后把 checkout/setup-python 升到各自官方最新发布对应的不可变 commit；
-下一次远程运行继续验证该维护修复。
+提交 `347dd45` 触发的 run `37567167352` 再次通过，job 用时 53 秒，旧 Node 告警不再出现。
