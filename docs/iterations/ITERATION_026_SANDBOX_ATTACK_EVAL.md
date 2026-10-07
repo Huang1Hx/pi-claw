@@ -2,7 +2,7 @@
 
 ## 状态与边界
 
-状态：开发中（Task 3.8 的离线安全和远程 CI 完成；模型诊断复测、90-trial 和 holdout 待完成）。
+状态：已合并 main（Task 3.8 的离线安全子批次完成；模型诊断复测、90-trial 和 holdout 待完成）。
 
 本轮不调用 DeepSeek 或 Kimi，不修改 grader、权限白名单、420 秒模型 deadline、24 steps、最多两轮
 修复或 Iteration 021 的 `78/90` 冻结基线。原始本地报告保存在 Git 忽略的 `runs/`，不提交 argv、
@@ -111,3 +111,4 @@ Moonshot Key、学校 Key 和学校 Base URL 均未命中 tracked/new 文件或�
 强制 Docker integration 和零残留容器检查均通过，job 用时 58 秒。首次运行提示旧官方 Action 的
 Node 20 声明已弃用，随后把 checkout/setup-python 升到各自官方最新发布对应的不可变 commit；
 提交 `347dd45` 触发的 run `37567167352` 再次通过，job 用时 53 秒，旧 Node 告警不再出现。
+快进合并后的 `main` run `37567315925` 同样通过，job 用时 50 秒。
