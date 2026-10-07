@@ -28,6 +28,11 @@ from core.context import ContextManager
 from core.control import ExecutionControl
 from core.prompts import build_system_prompt
 from core.team import ReadOnlySubagentTeam, SubagentAssignment
+from evaluation.mode_diagnostic import (
+    build_diagnostic_prompt,
+    select_diagnostic_jobs,
+    summarize_diagnostic_results,
+)
 from evaluation.mode_grading import GRADER_VERSION, calibrate, grade, safe_functions
 from evaluation.mode_repair import (
     RepairJob,
@@ -68,6 +73,7 @@ PUBLIC_SUMMARY_FIELDS = (
     "continuation",
     "acquisition",
     "repair",
+    "diagnostic",
     "by_mode",
     "by_mode_and_task",
 )
@@ -406,6 +412,123 @@ def _load_json_with_digest(path: Path, label: str) -> tuple[dict, str]:
     if not isinstance(value, dict):
         raise ValueError(f"{label} 顶层必须是 JSON 对象")
     return value, sha256(raw).hexdigest()
+
+
+def run_diagnostic_report(source_root: Path, args) -> dict:
+    """独立复测冻结 12 个失败身份，不创建第三修复轮，也不改写 78/90 基线。"""
+    source_root = source_root.resolve()
+    source, source_path, source_digest = load_report_root(source_root)
+    ledger_path = (source_root / "repair-ledger.json").resolve()
+    ledger, ledger_digest = _load_json_with_digest(ledger_path, "repair-ledger.json")
+    if source.get("grader_version") != GRADER_VERSION:
+        raise ValueError(
+            f"诊断来源评分器必须是 {GRADER_VERSION}，当前为 {source.get('grader_version')}"
+        )
+    if source.get("workers") != 1:
+        raise ValueError("冻结诊断来源必须使用 workers=1")
+    if source.get("deadline_seconds") != 420 or source.get("max_steps") != 24:
+        raise ValueError("冻结诊断来源必须保持 deadline=420、max_steps=24")
+    transport = source.get("transport")
+    if not isinstance(transport, dict):
+        raise ValueError("诊断来源缺少传输重试协议")
+    protocol = (
+        transport.get("max_attempts_per_request"),
+        transport.get("retry_base_delay_seconds"),
+        transport.get("max_retry_delay_seconds"),
+    )
+    if protocol != (3, 2.0, 10.0):
+        raise ValueError("冻结诊断来源必须保持 3 次尝试与 2/10 秒退避协议")
+
+    repair_source = source.get("repair_source")
+    if not isinstance(repair_source, dict):
+        raise ValueError("诊断来源缺少 repair_source 血缘")
+    baseline_value = repair_source.get("report")
+    if not isinstance(baseline_value, str):
+        raise ValueError("诊断来源缺少 baseline report 路径")
+    baseline_path = Path(baseline_value).resolve()
+    _baseline, resolved_baseline_path, baseline_digest = load_report_root(baseline_path.parent)
+    if resolved_baseline_path != baseline_path:
+        raise ValueError("诊断来源 baseline report 路径不一致")
+    if baseline_digest != repair_source.get("report_sha256"):
+        raise ValueError("诊断来源 baseline report 指纹不一致")
+    ledger_source = ledger.get("source_report")
+    if not isinstance(ledger_source, str) or Path(ledger_source).resolve() != baseline_path:
+        raise ValueError("诊断账本与报告指向不同 baseline")
+    if ledger.get("source_report_sha256") != baseline_digest:
+        raise ValueError("诊断账本的 baseline 指纹不一致")
+    jobs = select_diagnostic_jobs(source, ledger)
+
+    settings = load_settings(config_path=args.config.resolve(), cwd=args.config.resolve().parent)
+    roles = {settings.workflow.planner, settings.workflow.coder, settings.workflow.reviewer}
+    if not settings.workflow.enabled or not roles <= set(settings.profiles):
+        raise ValueError("诊断需要已启用且模型完整的 planner/coder/reviewer 工作流配置")
+    models = {
+        role: settings.profiles[getattr(settings.workflow, role)].model
+        for role in ("planner", "coder", "reviewer")
+    }
+    premium_profile = settings.workflow.premium_reviewer
+    premium_model = settings.profiles[premium_profile].model if premium_profile else None
+    if source.get("models") != models or source.get("premium_model") != premium_model:
+        raise ValueError("诊断必须沿用来源报告中的 DeepSeek/Kimi 模型分配")
+
+    # 诊断协议完全继承冻结来源；命令行同名默认值不能悄悄改变可比性。
+    args.workers = 1
+    args.deadline = 420
+    args.max_steps = 24
+    args.max_attempts = 3
+    args.retry_base_delay = 2.0
+    args.max_retry_delay = 10.0
+    calibration = calibrate()
+    if not calibration["passed"]:
+        raise RuntimeError("评分器校准失败，停止独立诊断")
+    args.output = args.output.resolve()
+    args.output.mkdir(parents=True, exist_ok=False)
+    save_json(args.output / "grader-calibration.json", calibration)
+    lineage = {
+        "kind": "independent_stage3_diagnostic",
+        "merge_into_baseline": False,
+        "third_repair_round": False,
+        "source_report": str(source_path),
+        "source_report_sha256": source_digest,
+        "source_ledger": str(ledger_path),
+        "source_ledger_sha256": ledger_digest,
+        "baseline_report": str(baseline_path),
+        "baseline_report_sha256": baseline_digest,
+    }
+    manifest = {
+        "schema_version": 5,
+        "grader_version": GRADER_VERSION,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "real_model": True,
+        "network_used": True,
+        "source_sha256": _code_fingerprint(),
+        "modes": list(dict.fromkeys(job.mode for job in jobs)),
+        "tasks": list(dict.fromkeys(job.task for job in jobs)),
+        "workers": 1,
+        "deadline_seconds": 420,
+        "max_steps": 24,
+        "transport": dict(transport),
+        "models": models,
+        "premium_model": premium_model,
+        "accounting": (
+            "12 个独立诊断 trial 的主 Agent、子 Agent、工作流与返工全部计入；不回写 78/90"
+        ),
+        "diagnostic_lineage": lineage,
+    }
+    save_json(args.output / "manifest.json", manifest)
+    rows = execute_diagnostic_jobs(jobs, args)
+    diagnostic = summarize_diagnostic_results(rows)
+
+    if load_report_root(source_path.parent)[2] != source_digest:
+        raise RuntimeError("诊断期间来源 report.json 发生变化")
+    if _load_json_with_digest(ledger_path, "repair-ledger.json")[1] != ledger_digest:
+        raise RuntimeError("诊断期间来源 repair-ledger.json 发生变化")
+    if load_report_root(baseline_path.parent)[2] != baseline_digest:
+        raise RuntimeError("诊断期间 baseline report.json 发生变化")
+    report = {**manifest, "diagnostic": diagnostic, "trials": rows}
+    save_json(args.output / "report.json", report)
+    save_json(args.output / "public-summary.json", build_public_summary(report))
+    return report
 
 
 def run_repair_continuation(source_root: Path, args) -> dict:
@@ -1152,8 +1275,14 @@ def run_trial(
     seed_solution: str | None = None,
     prompt: str | None = None,
     trial_metadata: dict | None = None,
+    trial_metadata_label: str = "repair",
+    prompt_filename: str = "repair-prompt.txt",
 ) -> dict:
     """父进程提供 trial 墙钟期限；超时清理整个 worker 进程组并保留失败证据。"""
+    if trial_metadata_label not in {"repair", "diagnostic"}:
+        raise ValueError("trial 元数据标签只能是 repair 或 diagnostic")
+    if prompt_filename not in {"repair-prompt.txt", "diagnostic-prompt.txt"}:
+        raise ValueError("trial 提示文件名不在白名单")
     folder = folder or args.output / mode / f"{task_id}-{number}"
     folder.mkdir(parents=True)
     workspace = folder / "workspace"
@@ -1169,12 +1298,12 @@ def run_trial(
             "task": task_id,
             "title": TASKS[task_id].title,
             "prompt": task_prompt,
-            **({"repair": trial_metadata} if trial_metadata is not None else {}),
+            **({trial_metadata_label: trial_metadata} if trial_metadata is not None else {}),
         },
     )
     prompt_file = None
     if prompt is not None:
-        prompt_file = folder / "repair-prompt.txt"
+        prompt_file = folder / prompt_filename
         prompt_file.write_text(prompt)
     print(f"[开始] mode={mode} task={task_id} trial={number}", flush=True)
     command = [
@@ -1215,6 +1344,18 @@ def run_trial(
                 timed_out = True
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
+            except BaseException:
+                # 串行诊断会在主线程等待 worker；Ctrl-C 等异常必须在移出活动集前清理进程组。
+                if process.poll() is None:
+                    with suppress(ProcessLookupError):
+                        os.killpg(process.pid, signal.SIGTERM)
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        with suppress(ProcessLookupError):
+                            os.killpg(process.pid, signal.SIGKILL)
+                        process.wait()
+                raise
         finally:
             with _PROCESS_LOCK:
                 _ACTIVE_PROCESSES.discard(process)
@@ -1282,6 +1423,52 @@ def run_repair_round(job: RepairJob, round_number: int, args) -> dict:
         prompt=prompt,
         trial_metadata=metadata,
     )
+
+
+def run_diagnostic_trial(job: RepairJob, args) -> dict:
+    """从冻结最终候选启动一次独立复测；目录与提示均不进入修复账本。"""
+    evidence = build_repair_evidence(job.source_row)
+    prompt = build_diagnostic_prompt(job, evidence)
+    seed = job.source_solution.read_text()
+    folder = args.output / "trials" / job.mode / f"{job.task}-{job.trial}"
+    metadata = {
+        "kind": "independent_stage3_diagnostic",
+        "merge_into_baseline": False,
+        "parent_identity": {
+            "mode": job.mode,
+            "task": job.task,
+            "trial": job.trial,
+        },
+        "parent_solution_sha256": sha256(seed.encode()).hexdigest(),
+    }
+    return run_trial(
+        job.mode,
+        job.task,
+        job.trial,
+        args,
+        folder=folder,
+        seed_solution=seed,
+        prompt=prompt,
+        trial_metadata=metadata,
+        trial_metadata_label="diagnostic",
+        prompt_filename="diagnostic-prompt.txt",
+    )
+
+
+def execute_diagnostic_jobs(
+    jobs: list[RepairJob],
+    args,
+    *,
+    runner=None,
+) -> list[dict]:
+    """严格串行执行冻结身份，每项恰好一次，避免并发改变原 420 秒协议。"""
+    if args.workers != 1:
+        raise ValueError("独立诊断必须使用 workers=1")
+    identities = [job.identity for job in jobs]
+    if len(identities) != 12 or len(set(identities)) != 12:
+        raise ValueError("独立诊断必须恰好包含 12 个不重复冻结身份")
+    runner = runner or run_diagnostic_trial
+    return [runner(job, args) for job in jobs]
 
 
 def execute_repair_rounds(
@@ -1429,6 +1616,11 @@ def main() -> int:
         type=Path,
         help="从已有修复报告只续跑 Trace 证明为瞬时故障的 provider_error",
     )
+    parser.add_argument(
+        "--diagnostic-from",
+        type=Path,
+        help="独立复测冻结的 12 个最终失败候选；不生成第三修复轮、不回写 78/90",
+    )
     parser.add_argument("--repair-rounds", type=int, default=2, help="每个候选最多修复 1–2 轮")
     parser.add_argument("--trials", type=int, default=2)
     parser.add_argument("--workers", type=int, default=2)
@@ -1465,6 +1657,33 @@ def main() -> int:
         args.mode = args.mode[0]
         worker(args)
         return 0
+    if args.diagnostic_from:
+        if not args.live:
+            parser.error("--diagnostic-from 必须与 --live 一起使用")
+        competing = (
+            args.resume_from,
+            args.merge_from,
+            args.replace_from,
+            args.replace_origin,
+            args.repair_from,
+            args.resume_repair_from,
+            args.mode,
+            args.task,
+        )
+        if any(value is not None for value in competing):
+            parser.error("独立诊断不能与续跑、合并、修复、--mode 或 --task 混用")
+        try:
+            summary = run_diagnostic_report(args.diagnostic_from, args)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError) as error:
+            parser.error(f"无法执行独立诊断：{error}")
+        diagnostic = summary["diagnostic"]
+        print(json.dumps(diagnostic, ensure_ascii=False), flush=True)
+        return (
+            0
+            if diagnostic["deadline_or_loop_target_met"]
+            and diagnostic["provider_classification_target_met"]
+            else 1
+        )
     merge_requested = any(
         value is not None for value in (args.merge_from, args.replace_from, args.replace_origin)
     )

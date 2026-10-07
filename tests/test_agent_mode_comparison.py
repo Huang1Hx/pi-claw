@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import evaluation.compare_modes as compare_modes
 from core.schemas import ToolCall
 from evaluation.compare_modes import (
     VERIFY_ARGV,
@@ -580,6 +581,49 @@ def test_trial_worker_receives_bounded_retry_settings(tmp_path, monkeypatch):
     assert command[command.index("--retry-base-delay") + 1] == "2.0"
     assert command[command.index("--max-retry-delay") + 1] == "10.0"
     assert command[command.index("--deadline") + 1] == "420"
+
+
+def test_trial_interrupt_terminates_worker_process_group(tmp_path, monkeypatch):
+    """串行诊断收到 Ctrl-C 时也必须终止当前 worker，不能遗留模型请求。"""
+    killed = []
+
+    class InterruptedProcess:
+        pid = 4321
+        returncode = None
+
+        def __init__(self, _command, **_kwargs):
+            pass
+
+        def wait(self, timeout=None):
+            if not killed:
+                raise KeyboardInterrupt
+            self.returncode = -15
+            return self.returncode
+
+        def poll(self):
+            return self.returncode
+
+    monkeypatch.setattr(subprocess, "Popen", InterruptedProcess)
+    monkeypatch.setattr(
+        compare_modes.os,
+        "killpg",
+        lambda pid, sig: killed.append((pid, sig)),
+    )
+    args = SimpleNamespace(
+        output=tmp_path,
+        config=tmp_path / "pi-claw.toml",
+        max_steps=24,
+        deadline=420,
+        max_attempts=3,
+        retry_base_delay=2.0,
+        max_retry_delay=10.0,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        run_trial("single", "inventory_reservation", 1, args)
+
+    assert killed == [(4321, compare_modes.signal.SIGTERM)]
+    assert not compare_modes._ACTIVE_PROCESSES
 
 
 def test_trial_worker_receives_repair_seed_prompt_and_metadata(tmp_path, monkeypatch):
