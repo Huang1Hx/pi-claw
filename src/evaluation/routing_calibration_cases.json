@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "name": "pi-claw-routing-calibration",
+  "version": 1,
+  "cases": [
+    {"id": "list_project_files", "task": "列出项目文件", "label": "simple"},
+    {"id": "read_cjk_filename", "task": "读取alpha.txt", "label": "simple"},
+    {"id": "read_readme_with_space", "task": "读取 README", "label": "simple"},
+    {"id": "find_todos", "task": "查找所有 TODO 注释", "label": "simple"},
+    {"id": "search_config_en", "task": "search for config files", "label": "simple"},
+    {"id": "view_alpha", "task": "查看alpha.txt", "label": "simple"},
+    {"id": "show_directory_en", "task": "show me the directory", "label": "simple"},
+    {"id": "readonly_list", "task": "请只读列出目录", "label": "simple"},
+    {"id": "fix_login", "task": "修复登录 bug", "label": "complex"},
+    {"id": "implement_cache", "task": "实现一个缓存层", "label": "complex"},
+    {"id": "delete_logs", "task": "删除过期日志文件", "label": "complex"},
+    {"id": "refactor_team", "task": "重构 team 模块", "label": "complex"},
+    {"id": "run_tests_analyze", "task": "运行测试并分析失败原因", "label": "complex"},
+    {"id": "continue_prev", "task": "继续", "label": "complex"},
+    {"id": "design_concurrency", "task": "设计一个并发任务队列架构", "label": "complex"},
+    {"id": "explain_regex", "task": "解释一下这段正则", "label": "complex"},
+    {"id": "create_module", "task": "创建新模块", "label": "complex"},
+    {"id": "gen_test_file", "task": "生成一个测试文件", "label": "complex"},
+    {"id": "list_and_run_en", "task": "list files and run tests", "label": "complex"},
+    {"id": "refactor_en", "task": "refactor the classifier", "label": "complex"},
+    {"id": "then_edit", "task": "然后修改配置", "label": "complex"},
+    {"id": "read_config_edit_port", "task": "读取配置并修改端口", "label": "complex"},
+    {"id": "multi_step_newline", "task": "列出项目文件\n然后修改配置", "label": "complex"},
+    {"id": "long_task", "task": "请仔细阅读当前仓库里的路由实现，梳理 rules 与 model 两条路径在分类上的差异，并结合最近的提交记录分析可能存在的边界与风险点，最后给出是否需要在宿主侧增加安全兜底的判断依据与理由说明。", "label": "complex"},
+    {"id": "write_output_blind", "task": "读取数据并写入新文件", "label": "complex", "known_downgrade": true, "note": "中文写入/写到不在复杂词表，属已知规则盲点"},
+    {"id": "write_cache_blind", "task": "列出文件并写入缓存", "label": "complex", "known_downgrade": true, "note": "同上：只读动词开头加写入副作用，规则未识别"}
+  ]
+}

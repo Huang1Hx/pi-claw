@@ -35,7 +35,7 @@ Docker 兼容集 713 项（另有 6 项宿主专属契约）。
 | 2 | 当前模型真实评测基线 | **已完成并合并 main** | grader 2.2 合并后首次 49/90；两轮修复后 78/90 |
 | 3 | Trace 恢复、请求稳定性与执行沙箱 | **当前工程里程碑已收尾；Task 3.3–3.7、Task 3.8 离线安全门和诊断续跑已完成，完整 90-trial 与 holdout 列入后续评测** | 11/11 攻击阻断、30/30 连续运行、12 项诊断最新 10/12、派生视图 88/90 |
 | 4 | 任务相关的完成验收与抗伪完成 | 待执行 | 无关测试、篡改测试、旧绿灯等攻击用例全部拒绝 |
-| 5 | 路由校准与 Multi-Agent 故障隔离 | **进行中；Task 5.1 去重、Task 5.2 子 Agent 超时隔离与部分交接已完成，Task 5.3 路由校准待执行** | 任务清单 + `work_key` 去重、发现合并、独立超时与部分交接指标；760 项脱敏 pytest 通过 |
+| 5 | 路由校准与 Multi-Agent 故障隔离 | **已完成；Task 5.1 去重、Task 5.2 超时隔离与部分交接、Task 5.3 离线路由校准均已完成** | 去重/发现合并/独立超时/部分交接指标；带标签 26 样本离线校准，未预期降级 0；767 项脱敏 pytest 通过 |
 | 6 | 正式发布 | 待执行 | 沙箱隔离演示、版本标签、两条真实端到端案例 |
 
 ---
@@ -486,10 +486,36 @@ Agent 都会调用模型、消耗 Token、各自交接，由主 Agent 重复核�
 - [x] 外层取消仍必须同时停止全部子 Agent 与主 Agent（保持既有语义与回归）。
 - [x] 先写失败测试（RED）再实现（GREEN）；完整 `pytest`、Ruff、format、compileall 通过后再提交。
 
-### Task 5.3：路由校准（待细化）
+### Task 5.3：路由校准（simple/complex 数据集与错误降级度量）
 
-- [ ] 建立带标签的 simple/complex 数据集，离线报告分类准确率与复杂任务错误降级率。
-  已完成子 Agent 执行层故障隔离（Task 5.2）；路由校准本身尚未开始。
+**文件：**
+
+- 新增 `src/evaluation/routing_calibration_cases.json`（带标签数据集）
+- 新增 `src/evaluation/routing_calibration.py`（加载与离线评估）
+- 新增 `tests/test_routing_calibration.py`
+- 修改 `src/interfaces/cli.py`（`eval-routing-calibration` 子命令）
+- 修改 `docs/EVALUATION.md`、`docs/ARCHITECTURE.md`、`docs/iterations/README.md`
+- 新增 `docs/iterations/ITERATION_030_ROUTING_CALIBRATION.md`
+- 修改本文件阶段状态
+
+- [x] 数据集：每条含稳定 `id`、`task`、`label∈{simple,complex}`、可选 `note` 与
+  `known_downgrade`；覆盖明确只读的简单任务、多步/副作用/含关键词的复杂任务，以及刻意探测
+  规则边界的对抗样本（如中文“读取数据并写入新文件”）。
+- [x] 加载器 fail closed：`schema_version=1`、非空 `name`、正整数 `version`、非空 `cases`、
+  `id` 唯一且非空、`label` 合法；拒绝重复 `id` 与未知字段类型。
+- [x] 离线评估 `evaluate_routing_calibration(output)`：对每条运行确定性
+  `routing.intent.classify`（rules 策略实际决策）与宿主守卫 `routing.classifier.require_strong`，
+  产出两条决策：`rules_decision`（rules 策略真实行为）与
+  `guarded_decision = complex if require_strong else rules_decision`（叠加安全网的保守决策）。
+- [x] 指标：`rules_accuracy`、`rules_false_downgrades`/`rules_false_downgrade_rate`（complex→simple，
+  安全风险）、`rules_false_escalations`（simple→complex，成本）、`guarded_accuracy`、
+  `guarded_false_downgrades`；逐条 `rows` 保留 `reason`、`host_guard` 供审计。
+- [x] 已知盲点显式化：`known_downgrade` 标记的样本计入 `rules_known_downgrades`，未标记的
+  复杂任务错误降级计入 `rules_unexpected_downgrades`，作为回归门（必须为 0）。
+- [x] 报告显式声明 offline、固定规则，不调用真实模型、不设价格、不报告节省率。
+- [x] 不修改现有分类器行为；校准只度量并暴露盲点（如中文“写入/写到”不在复杂词表），记录为
+  后续候选修复，不在本任务内改判定。
+- [x] 先写失败测试（RED）再实现（GREEN）；完整 `pytest`、Ruff、format、compileall 通过后再提交。
 
 ## 阶段 6：正式发布
 

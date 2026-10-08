@@ -59,3 +59,4 @@ Iteration 001–005 保留当时的路径与验证命令，不回写历史记录
 
 [Iteration 028](ITERATION_028_SUBAGENT_ASSIGNMENT_DEDUP.md)：子 Agent 任务去重与发现合并。
 [Iteration 029](ITERATION_029_SUBAGENT_ISOLATION.md)：子 Agent 独立超时与部分交接。
+[Iteration 030](ITERATION_030_ROUTING_CALIBRATION.md)：离线路由校准与复杂任务错误降级度量。

@@ -37,7 +37,7 @@ core.schemas、core.events、core.usage 是低层数据协议。providers 和 se
 | persistence | session_store.py、models.py | 会话门面和元数据 |
 | persistence | journal.py、checkpoint.py、locking.py、storage.py | 原始日志、活动窗口、并发控制、耐久写入 |
 | persistence | trace.py、usage.py | 审计轨迹与按 run_id 幂等的用量账本 |
-| evaluation | runner.py、cases.json、routing.py | 独立工作区离线验收、复杂度分流与调用分布对照 |
+| evaluation | runner.py、cases.json、routing.py、routing_calibration.py | 独立工作区离线验收、复杂度分流与调用分布对照、带标签的规则分类校准 |
 | evaluation | compare_modes.py、mode_tasks.py、mode_task_catalog.py、mode_cases.py、mode_grading.py | 十任务、三种 Agent 架构、重复真实模型评测与分模型核算 |
 | evaluation | sandbox_cases.py | 11 类确定性攻击、30 次连续运行、Host/Docker 一致性与脱敏聚合报告 |
 | interfaces | cli.py、repl.py | 参数解析、终端显示和会话交互 |
@@ -64,6 +64,10 @@ tools 的工具类由 ToolExecutor 组合，共用 Workspace 和预算。persist
 分类失败转主力；轻量执行仅暴露只读工具，完整响应中的副作用候选仍被拦截并升级。
 `model_routed` 的 purpose 区分分类与执行，`intent_classified/route_escalated/routing_summary`
 记录决策与请求/Token。默认不需要价格；旧配置未设置策略时保留本地规则。
+`intent_strategy="rules"` 的确定性分类（`routing.intent.classify`）与 `require_strong` 安全网可用
+`eval-routing-calibration` 在带标签数据集上离线度量：分类准确率、复杂任务错误降级率与保守
+升级率，并把已知规则盲点（如中文“写入/写到”不在复杂词表）显式标记为 `known_downgrade`，
+未预期降级作为回归门。
 `config.connections.resolve_connection()` 将共享 API 地址/Key 解析到各 ModelProfile，
 Router 按 profile.model 填写请求；共享连接时不更换 Key，独立连接则必须显式配对覆盖。
 `/model` 显式切换时新建 Session，旧会话可恢复。

@@ -128,6 +128,13 @@ def build_parser() -> argparse.ArgumentParser:
         "eval-routing", help="离线复杂度分流、执行边界与全主力调用分布对照"
     )
     routing_eval.add_argument("--output", type=Path, default=Path("runs/routing-eval.json"))
+    routing_calibration = subparsers.add_parser(
+        "eval-routing-calibration",
+        help="离线度量规则分类准确率与复杂任务错误降级率（固定规则，非真实模型）",
+    )
+    routing_calibration.add_argument(
+        "--output", type=Path, default=Path("runs/routing-calibration.json")
+    )
     return parser
 
 
@@ -462,6 +469,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"报告：{args.output.resolve()}"
             )
             return 0 if report["passed_cases"] == report["total_cases"] else 1
+        if args.command == "eval-routing-calibration":
+            from evaluation.routing_calibration import evaluate_routing_calibration
+
+            report = evaluate_routing_calibration(args.output.resolve())
+            print(
+                f"离线路由校准：准确率 {report['rules_accuracy']:.1%}；"
+                f"复杂任务错误降级 {report['rules_false_downgrades']} 例"
+                f"（其中未预期 {report['rules_unexpected_downgrades']} 例，"
+                f"保守升级 {report['rules_false_escalations']} 例）\n"
+                f"报告：{args.output.resolve()}"
+            )
+            return 0 if report["rules_unexpected_downgrades"] == 0 else 1
     except (OSError, TypeError, ValueError, RuntimeError) as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 2

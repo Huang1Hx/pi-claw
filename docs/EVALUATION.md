@@ -138,6 +138,13 @@ auto 与固定 primary，检查分类协议、首次执行模型选择、失败�
 v2 使用预设分类标签及固定 usage，不设单价，不报告费用节省率；`real_model=false`。
 分类请求也计入总数：6 个场景下 auto 为 20 次（含 6 次分类），主力执行 8 次；全主力为 12 次。
 这只能验证分流和执行边界，不能当作真实模型分类准确率、任务成功率或成本结果。
+`pi-claw eval-routing-calibration` 在同一批带人工标签的 simple/complex 数据集上离线度量确定性
+`routing.intent.classify`（rules 策略真实决策）与宿主 `require_strong` 安全网（guarded 决策）：
+报告 `rules_accuracy`、`rules_false_downgrades`（complex→simple，安全风险）、
+`rules_false_escalations`（simple→complex，成本）、`guarded_accuracy` 和
+`guarded_false_downgrades`。已知规则盲点用 `known_downgrade` 显式标记并计入
+`rules_known_downgrades`；未标记的错误降级计入 `rules_unexpected_downgrades`，作为必须为 0 的
+回归门。数据集与判定固定，不调用真实模型、不设价格、不报告节省率。
 配置、指标解释和命令见 [配置与模型路由](CONFIGURATION_AND_ROUTING.md)。
 
 ## 评测要回答什么
