@@ -726,6 +726,101 @@ def test_diagnostic_continuation_reruns_exact_five_and_builds_derived_90(tmp_pat
     assert "traces" not in serialized and "workspace" not in serialized
 
 
+def test_diagnostic_continuation_can_chain_without_losing_acquisition(tmp_path, monkeypatch):
+    """派生报告可继续只跑剩余失败项，并继承所有已发生的诊断成本。"""
+    source_root, retry_root, _source_path, diagnostic_rows = _continuation_tree(tmp_path)
+    settings = SimpleNamespace(
+        workflow=SimpleNamespace(
+            enabled=True,
+            planner="planner",
+            coder="coder",
+            reviewer="reviewer",
+            premium_reviewer="premium",
+        ),
+        profiles={
+            "planner": SimpleNamespace(model="deepseek-flash"),
+            "coder": SimpleNamespace(model="deepseek-flash"),
+            "reviewer": SimpleNamespace(model="deepseek-flash"),
+            "premium": SimpleNamespace(model="kimi-k3"),
+        },
+    )
+    remaining = {compare_modes.trial_identity(diagnostic_rows[index]) for index in (1, 3, 8)}
+    calls = []
+
+    def execute(jobs, _args, *, expected_count=12):
+        calls.append([job.identity for job in jobs])
+        assert len(jobs) == expected_count
+        rows = []
+        for job in jobs:
+            source = dict(job.source_row)
+            passed = len(calls) == 2 or job.identity not in remaining
+            source.update(
+                {
+                    "passed": passed,
+                    "leader_status": "completed" if passed else "provider_error",
+                    "failure_checks": [] if passed else [{"layer": "L0_execution"}],
+                    "usage": {"total_tokens": 300 if len(calls) == 1 else 400},
+                    "usage_may_be_incomplete": not passed,
+                    "duration_seconds": 30.0,
+                }
+            )
+            rows.append(source)
+        return rows
+
+    monkeypatch.setattr(compare_modes, "load_settings", lambda **_kwargs: settings)
+    monkeypatch.setattr(compare_modes, "calibrate", lambda: {"passed": True})
+    monkeypatch.setattr(compare_modes, "execute_diagnostic_jobs", execute)
+    monkeypatch.setattr(
+        compare_modes,
+        "summarize",
+        lambda rows, **_kwargs: {
+            "strict_successes": sum(row.get("passed") is True for row in rows),
+            "strict_failures": sum(row.get("passed") is not True for row in rows),
+        },
+    )
+    first_root = tmp_path / "retry5"
+    first = compare_modes.run_diagnostic_continuation(
+        source_root,
+        retry_root,
+        SimpleNamespace(
+            config=tmp_path / "pi-claw.toml",
+            output=first_root,
+            expected_diagnostic_failures=5,
+            expected_diagnostic_replacements=6,
+        ),
+    )
+    first_digest = sha256((first_root / "report.json").read_bytes()).hexdigest()
+    assert first["continuation"]["derived_successes"] == 87
+    assert first["acquisition"]["diagnostic"]["total_trial_runs"] == 23
+
+    second = compare_modes.run_diagnostic_continuation(
+        first_root,
+        None,
+        SimpleNamespace(
+            config=tmp_path / "pi-claw.toml",
+            output=tmp_path / "retry3",
+            expected_diagnostic_failures=3,
+            expected_diagnostic_replacements=None,
+        ),
+    )
+
+    assert calls[1] == [compare_modes.trial_identity(diagnostic_rows[index]) for index in (1, 3, 8)]
+    assert second["continuation"]["source_diagnostic_successes"] == 9
+    assert second["continuation"]["derived_successes"] == 90
+    assert second["acquisition"]["diagnostic"]["total_trial_runs"] == 26
+    assert [stage["trial_runs"] for stage in second["acquisition"]["diagnostic"]["stages"]] == [
+        12,
+        6,
+        5,
+        3,
+    ]
+    assert sha256((first_root / "report.json").read_bytes()).hexdigest() == first_digest
+    public = json.loads((tmp_path / "retry3" / "public-summary.json").read_text())
+    serialized = json.dumps(public)
+    assert str(tmp_path) not in serialized
+    assert "traces" not in serialized and "workspace" not in serialized
+
+
 def test_diagnostic_continuation_cli_requires_live(tmp_path, monkeypatch):
     source = tmp_path / "source"
     retry = tmp_path / "retry"

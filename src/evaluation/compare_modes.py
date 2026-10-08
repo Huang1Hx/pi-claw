@@ -29,7 +29,9 @@ from core.control import ExecutionControl
 from core.prompts import build_system_prompt
 from core.team import ReadOnlySubagentTeam, SubagentAssignment
 from evaluation.mode_diagnostic import (
+    FROZEN_STAGE3_FAILURES,
     build_diagnostic_prompt,
+    extend_diagnostic_acquisition,
     load_diagnostic_grade_subset,
     merge_diagnostic_rows,
     merge_post_repair_diagnostic_rows,
@@ -542,17 +544,20 @@ def _load_post_repair_lineage(source: dict) -> dict[str, object]:
     lineage = source.get("diagnostic_lineage")
     if not isinstance(lineage, dict):
         raise ValueError("诊断报告缺少 diagnostic_lineage")
-    repair_value = lineage.get("source_report")
-    ledger_value = lineage.get("source_ledger")
+    chained = lineage.get("kind") == "stage3_diagnostic_continuation_derived_90"
+    repair_value = lineage.get("repair_report" if chained else "source_report")
+    ledger_value = lineage.get("repair_ledger" if chained else "source_ledger")
     if not isinstance(repair_value, str) or not isinstance(ledger_value, str):
         raise ValueError("诊断血缘缺少修复报告或账本路径")
     repair_path = Path(repair_value).resolve()
     repair, resolved_repair_path, repair_digest = load_report_root(repair_path.parent)
-    if resolved_repair_path != repair_path or repair_digest != lineage.get("source_report_sha256"):
+    repair_digest_key = "repair_report_sha256" if chained else "source_report_sha256"
+    if resolved_repair_path != repair_path or repair_digest != lineage.get(repair_digest_key):
         raise ValueError("诊断血缘中的修复报告路径或指纹不一致")
     ledger_path = Path(ledger_value).resolve()
     ledger, ledger_digest = _load_json_with_digest(ledger_path, "repair-ledger.json")
-    if ledger_digest != lineage.get("source_ledger_sha256"):
+    ledger_digest_key = "repair_ledger_sha256" if chained else "source_ledger_sha256"
+    if ledger_digest != lineage.get(ledger_digest_key):
         raise ValueError("诊断血缘中的 repair ledger 指纹不一致")
     entries = ledger.get("entries")
     if not isinstance(entries, list):
@@ -572,6 +577,14 @@ def _load_post_repair_lineage(source: dict) -> dict[str, object]:
         raise ValueError("修复账本与报告指向不同 baseline")
     if ledger.get("source_report_sha256") != baseline_digest:
         raise ValueError("修复账本的 baseline 指纹不一致")
+    if chained:
+        declared_baseline = lineage.get("baseline_report")
+        if (
+            not isinstance(declared_baseline, str)
+            or Path(declared_baseline).resolve() != baseline_path
+            or lineage.get("baseline_report_sha256") != baseline_digest
+        ):
+            raise ValueError("链式诊断血缘中的 baseline 路径或指纹不一致")
     return {
         "repair": repair,
         "repair_path": repair_path,
@@ -603,22 +616,38 @@ def _settings_models(args) -> tuple[dict[str, str], str | None]:
 
 def run_diagnostic_continuation(
     source_root: Path,
-    replacement_root: Path,
+    replacement_root: Path | None,
     args,
 ) -> dict:
     """接续部分诊断结果，只跑当前失败项，并物化独立的派生 90-trial 报告。"""
     source, source_path, source_digest = load_report_root(source_root.resolve())
     if source.get("grader_version") != GRADER_VERSION:
         raise ValueError("诊断续跑必须沿用 grader 2.2")
-    source_rows = source.get("trials")
-    if not isinstance(source_rows, list):
+    all_source_rows = source.get("trials")
+    if not isinstance(all_source_rows, list):
         raise ValueError("诊断续跑来源缺少 trials")
-    prior_rows, prior_digest = load_diagnostic_grade_subset(replacement_root)
-    if len(prior_rows) != args.expected_diagnostic_replacements:
-        raise ValueError(
-            "部分重跑数量漂移："
-            f"期望 {args.expected_diagnostic_replacements}，实际 {len(prior_rows)}"
-        )
+    chained = (
+        isinstance(source.get("diagnostic_lineage"), dict)
+        and source["diagnostic_lineage"].get("kind") == "stage3_diagnostic_continuation_derived_90"
+    )
+    if chained:
+        if replacement_root is not None or args.expected_diagnostic_replacements is not None:
+            raise ValueError("链式诊断续跑直接使用派生报告，不能再提供部分替换目录")
+        frozen = {item[:3] for item in FROZEN_STAGE3_FAILURES}
+        source_rows = [row for row in all_source_rows if trial_identity(row) in frozen]
+        merge_diagnostic_rows(source_rows, [])
+        prior_rows: list[dict] = []
+        prior_digest = None
+    else:
+        if replacement_root is None or args.expected_diagnostic_replacements is None:
+            raise ValueError("首次诊断续跑需要部分替换目录和期望数量")
+        source_rows = all_source_rows
+        prior_rows, prior_digest = load_diagnostic_grade_subset(replacement_root)
+        if len(prior_rows) != args.expected_diagnostic_replacements:
+            raise ValueError(
+                "部分重跑数量漂移："
+                f"期望 {args.expected_diagnostic_replacements}，实际 {len(prior_rows)}"
+            )
     current_rows = merge_diagnostic_rows(source_rows, prior_rows)
     jobs = select_failed_diagnostic_jobs(
         current_rows,
@@ -666,6 +695,23 @@ def run_diagnostic_continuation(
     ):
         raise ValueError("修复报告缺少历史总成本")
     historical_cost = repair_metrics["total_acquisition_cost"]
+    previous_acquisition = None
+    if chained:
+        source_acquisition = source.get("acquisition")
+        if not isinstance(source_acquisition, dict) or not isinstance(
+            source_acquisition.get("diagnostic"), dict
+        ):
+            raise ValueError("链式诊断来源缺少完整 acquisition")
+        if source_acquisition.get("historical_stage2") != historical_cost:
+            raise ValueError("链式诊断来源的阶段 2 成本与冻结报告不一致")
+        previous_acquisition = source_acquisition["diagnostic"]
+        # 在校准和真实模型调用前先验证累计账本内部一致性。
+        extend_diagnostic_acquisition(previous_acquisition, "preflight", [])
+    prior_diagnostic_runs = (
+        int(previous_acquisition.get("total_trial_runs", 0))
+        if previous_acquisition is not None
+        else 12 + len(prior_rows)
+    )
 
     args.workers = 1
     args.deadline = deadline
@@ -682,10 +728,6 @@ def run_diagnostic_continuation(
     private_lineage = {
         "kind": "stage3_diagnostic_continuation_derived_90",
         "merge_into_frozen_baseline": False,
-        "source_diagnostic": str(source_path),
-        "source_diagnostic_sha256": source_digest,
-        "prior_replacements": str(replacement_root.resolve()),
-        "prior_replacements_sha256": prior_digest,
         "repair_report": str(lineage["repair_path"]),
         "repair_report_sha256": lineage["repair_digest"],
         "repair_ledger": str(lineage["ledger_path"]),
@@ -693,6 +735,22 @@ def run_diagnostic_continuation(
         "baseline_report": str(lineage["baseline_path"]),
         "baseline_report_sha256": lineage["baseline_digest"],
     }
+    if chained:
+        private_lineage.update(
+            {
+                "source_continuation": str(source_path),
+                "source_continuation_sha256": source_digest,
+            }
+        )
+    else:
+        private_lineage.update(
+            {
+                "source_diagnostic": str(source_path),
+                "source_diagnostic_sha256": source_digest,
+                "prior_replacements": str(replacement_root.resolve()),
+                "prior_replacements_sha256": prior_digest,
+            }
+        )
     manifest = {
         "schema_version": 6,
         "grader_version": GRADER_VERSION,
@@ -709,7 +767,10 @@ def run_diagnostic_continuation(
         "transport": dict(transport),
         "models": models,
         "premium_model": premium_model,
-        "accounting": "保留 78/90 历史总成本，并累计 12 项诊断、6 项部分重跑和本次 5 项重跑",
+        "accounting": (
+            f"保留 78/90 历史总成本，并累计此前 {prior_diagnostic_runs} 次诊断运行"
+            f"和本次 {args.expected_diagnostic_failures} 项重跑"
+        ),
         "diagnostic_lineage": private_lineage,
     }
     save_json(args.output / "manifest.json", manifest)
@@ -724,13 +785,28 @@ def run_diagnostic_continuation(
         post_repair_rows,
         latest_diagnostic_rows,
     )
-    diagnostic_acquisition = summarize_diagnostic_acquisition(
-        [
-            ("source_diagnostic", source_rows),
-            ("prior_replacements", prior_rows),
-            ("retry", retry_rows),
-        ]
-    )
+    if previous_acquisition is None:
+        diagnostic_acquisition = summarize_diagnostic_acquisition(
+            [
+                ("source_diagnostic", source_rows),
+                ("prior_replacements", prior_rows),
+                ("retry", retry_rows),
+            ]
+        )
+    else:
+        existing_labels = {
+            stage.get("name")
+            for stage in previous_acquisition.get("stages", [])
+            if isinstance(stage, dict)
+        }
+        retry_number = 2
+        while f"retry_{retry_number}" in existing_labels:
+            retry_number += 1
+        diagnostic_acquisition = extend_diagnostic_acquisition(
+            previous_acquisition,
+            f"retry_{retry_number}",
+            retry_rows,
+        )
     acquisition = {
         "historical_stage2": dict(historical_cost),
         "diagnostic": diagnostic_acquisition,
@@ -743,13 +819,13 @@ def run_diagnostic_continuation(
         ),
         "unknown_usage_trials": int(historical_cost.get("unknown_usage_trials", 0))
         + int(diagnostic_acquisition["unknown_usage_trials"]),
-        "note": "历史 78/90 与三段诊断尝试全部计入；派生 90 行只表示每个身份的最新结果",
+        "note": "历史 78/90 与全部诊断尝试均计入；派生 90 行只表示每个身份的最新结果",
     }
     derived_successes = sum(row.get("passed") is True for row in merged_rows)
     continuation = {
         "source_post_repair_successes": post_repair_successes,
         "source_diagnostic_successes": sum(row.get("passed") is True for row in source_rows),
-        "prior_replacement_runs": len(prior_rows),
+        "prior_replacement_runs": prior_diagnostic_runs - 12,
         "selected_retry_runs": len(retry_rows),
         "derived_successes": derived_successes,
         "derived_failures": len(merged_rows) - derived_successes,
@@ -775,7 +851,10 @@ def run_diagnostic_continuation(
 
     if load_report_root(source_path.parent)[2] != source_digest:
         raise RuntimeError("诊断续跑期间来源 report.json 发生变化")
-    if load_diagnostic_grade_subset(replacement_root)[1] != prior_digest:
+    if (
+        replacement_root is not None
+        and load_diagnostic_grade_subset(replacement_root)[1] != prior_digest
+    ):
         raise RuntimeError("诊断续跑期间部分重跑 grade.json 发生变化")
     if load_report_root(Path(lineage["repair_path"]).parent)[2] != lineage["repair_digest"]:
         raise RuntimeError("诊断续跑期间修复 report.json 发生变化")
@@ -1897,12 +1976,12 @@ def main() -> int:
     parser.add_argument(
         "--continue-diagnostic-from",
         type=Path,
-        help="接续完整诊断报告，只重跑合并部分结果后仍失败的身份",
+        help="接续完整诊断或派生报告，只重跑最新视图中仍失败的身份",
     )
     parser.add_argument(
         "--diagnostic-replacements-from",
         type=Path,
-        help="诊断续跑前已经完成的部分 grade.json 根目录",
+        help="首次接续诊断报告时，提供已经完成的部分 grade.json 根目录",
     )
     parser.add_argument("--expected-diagnostic-failures", type=int)
     parser.add_argument("--expected-diagnostic-replacements", type=int)
@@ -1954,13 +2033,14 @@ def main() -> int:
     if continuation_requested:
         if not args.live:
             parser.error("诊断续跑必须与 --live 一起使用")
-        if (
-            args.continue_diagnostic_from is None
-            or args.diagnostic_replacements_from is None
-            or args.expected_diagnostic_failures is None
-            or args.expected_diagnostic_replacements is None
-        ):
-            parser.error("诊断续跑必须提供来源、部分替换目录和两个期望数量")
+        if args.continue_diagnostic_from is None or args.expected_diagnostic_failures is None:
+            parser.error("诊断续跑必须提供来源和期望失败数量")
+        replacement_pair = (
+            args.diagnostic_replacements_from is not None,
+            args.expected_diagnostic_replacements is not None,
+        )
+        if replacement_pair[0] != replacement_pair[1]:
+            parser.error("部分替换目录和期望替换数量必须同时提供或同时省略")
         competing = (
             args.diagnostic_from,
             args.resume_from,
@@ -1974,7 +2054,10 @@ def main() -> int:
         )
         if any(value is not None for value in competing):
             parser.error("诊断续跑不能与普通诊断、续跑、合并、修复或身份筛选混用")
-        if args.expected_diagnostic_failures < 1 or args.expected_diagnostic_replacements < 1:
+        if args.expected_diagnostic_failures < 1 or (
+            args.expected_diagnostic_replacements is not None
+            and args.expected_diagnostic_replacements < 1
+        ):
             parser.error("诊断续跑的期望数量必须为正整数")
         try:
             summary = run_diagnostic_continuation(

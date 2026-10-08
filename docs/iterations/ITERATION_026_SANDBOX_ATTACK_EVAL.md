@@ -101,7 +101,8 @@ Moonshot Key、学校 Key 和学校 Base URL 均未命中 tracked/new 文件或�
 
 ## 尚未完成
 
-- 只复测 Iteration 021 冻结的 12 个未恢复身份，不替换 `78/90`；
+- 12 个未恢复身份及失败项的有界续跑后来已在
+  [Iteration 027](ITERATION_027_STAGE3_DIAGNOSTIC_CONTINUATION.md) 完成；`78/90` 冻结基线未被替换；
 - 同协议完整 90-trial 回归和至少 27-trial 新 holdout；
 - 最终覆盖率与 Stage 3 总结。真实模型步骤只能在上述离线门和远程 CI 都通过后开始。
 

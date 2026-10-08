@@ -255,6 +255,54 @@ def summarize_diagnostic_acquisition(
     }
 
 
+def extend_diagnostic_acquisition(
+    previous: dict, label: str, rows: list[dict]
+) -> dict[str, object]:
+    """在已核对的诊断成本账本后追加一批，避免链式续跑抹掉历史调用。"""
+    stages = previous.get("stages")
+    if not isinstance(stages, list) or not stages:
+        raise ValueError("链式诊断来源缺少成本阶段")
+    copied = []
+    labels = set()
+    for stage in stages:
+        if not isinstance(stage, dict) or not isinstance(stage.get("name"), str):
+            raise ValueError("链式诊断成本阶段无效")
+        if stage["name"] in labels:
+            raise ValueError("链式诊断成本阶段名称重复")
+        labels.add(stage["name"])
+        for key in ("trial_runs", "known_tokens", "unknown_usage_trials"):
+            if type(stage.get(key)) is not int or stage[key] < 0:
+                raise ValueError("链式诊断成本计数无效")
+        if not isinstance(stage.get("duration_seconds"), (int, float)):
+            raise ValueError("链式诊断成本耗时无效")
+        copied.append(dict(stage))
+    expected = {
+        "total_trial_runs": sum(item["trial_runs"] for item in copied),
+        "total_known_tokens": sum(item["known_tokens"] for item in copied),
+        "unknown_usage_trials": sum(item["unknown_usage_trials"] for item in copied),
+        "total_duration_seconds": round(sum(item["duration_seconds"] for item in copied), 3),
+    }
+    for key, value in expected.items():
+        observed = previous.get(key)
+        if key == "total_duration_seconds":
+            observed = round(float(observed), 3) if isinstance(observed, (int, float)) else None
+        if observed != value:
+            raise ValueError(f"链式诊断成本汇总不一致：{key}")
+    if not label or label in labels:
+        raise ValueError("链式诊断新增成本阶段名称无效")
+    appended = summarize_diagnostic_acquisition([(label, rows)])["stages"][0]
+    return {
+        "stages": [*copied, appended],
+        "total_trial_runs": expected["total_trial_runs"] + appended["trial_runs"],
+        "total_known_tokens": expected["total_known_tokens"] + appended["known_tokens"],
+        "unknown_usage_trials": expected["unknown_usage_trials"] + appended["unknown_usage_trials"],
+        "total_duration_seconds": round(
+            expected["total_duration_seconds"] + appended["duration_seconds"], 3
+        ),
+        "note": "包含全部诊断尝试；链式替换结果不删除先前调用成本",
+    }
+
+
 def merge_post_repair_diagnostic_rows(
     post_repair_rows: list[dict], diagnostic_rows: list[dict]
 ) -> list[dict]:
