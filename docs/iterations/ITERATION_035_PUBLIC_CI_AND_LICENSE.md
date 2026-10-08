@@ -2,7 +2,8 @@
 
 ## 状态与边界
 
-状态：实现与离线验证已完成；工作流在 GitHub 上的首次真实运行待推送后确认。
+状态：实现与离线验证已完成；工作流在 GitHub 上已首次运行成功（`optimize`/`main` 的 `ci` 与
+`sandbox-security` 均通过）。
 
 本轮补齐阶段 1：为公开仓库添加 MIT `LICENSE` 与包元数据，并新增通用 CI（Lint、格式、编译、
 测试、构建）。它不改变任何运行时行为，沙箱安全门工作流保持不变。
@@ -42,8 +43,11 @@ uv build --no-config                            wheel 含 LICENSE，元数据 Li
 
 RED 证据：先加 3 项回归测试，实现前 `3 failed`（缺 `LICENSE`、缺 `ci.yml`）；实现后全部 GREEN。
 
+首次 CI 运行暴露并修复了一个被本地 deselect 掩盖的问题：Iteration 033 的严格默认验收（写入后
+必跑测试）使 `test_cli_saves_actual_code_inside_selected_workspace` 只跑 `compileall` 的旧脚本
+无法完成，Agent 因脚本回复耗尽而失败。该用例已更新为写入并真实运行单元测试，符合新的验收语义。
+
 ## 尚未完成
 
-- 推送后在 GitHub 上确认 `ci` 工作流首次运行通过（本地无法触发 runner）；
 - 真实 90-trial 回归与 holdout（需代码冻结后运行）；
 - 阶段 6 发布（版本标签、变更日志、端到端演示）。

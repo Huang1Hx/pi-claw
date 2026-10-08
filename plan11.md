@@ -31,7 +31,7 @@ Docker 兼容集 713 项（另有 6 项宿主专属契约）。
 | 阶段 | 目标 | 状态 | 完成证据 |
 |---|---|---|---|
 | 0 | 目录重构、评测框架、DeepSeek/Kimi 分工 | 已完成 | `639a322`；536 tests；已推送 `optimize` |
-| 1 | 公开仓库工程化与 CI | **已完成（LICENSE + 通用 CI；GitHub 首次运行待推送确认）** | MIT `LICENSE`、`.github/workflows/ci.yml`、wheel 元数据 `License-Expression: MIT`；788 项脱敏 pytest 通过 |
+| 1 | 公开仓库工程化与 CI | **已完成（LICENSE + 通用 CI 首次运行通过）** | MIT `LICENSE`、`.github/workflows/ci.yml`、wheel 元数据 `License-Expression: MIT`；完整 794 项 pytest 通过；GitHub `ci`/`sandbox-security` 均 success |
 | 2 | 当前模型真实评测基线 | **已完成并合并 main** | grader 2.2 合并后首次 49/90；两轮修复后 78/90 |
 | 3 | Trace 恢复、请求稳定性与执行沙箱 | **当前工程里程碑已收尾；Task 3.3–3.7、Task 3.8 离线安全门和诊断续跑已完成，完整 90-trial 与 holdout 列入后续评测** | 11/11 攻击阻断、30/30 连续运行、12 项诊断最新 10/12、派生视图 88/90 |
 | 4 | 任务相关的完成验收与抗伪完成 | **已完成（Task 4.1–4.3）；真实 90-trial/holdout 待冻结后运行** | 篡改/必跑缺失/未复测/无关绿灯被拒；默认入口必跑测试，评测保护 `test_target.py` 并强制关联测试；785 项脱敏 pytest 通过 |
