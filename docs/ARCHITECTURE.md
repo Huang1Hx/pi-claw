@@ -65,6 +65,9 @@ tools 的工具类由 ToolExecutor 组合，共用 Workspace 和预算。persist
 模型不能修改它来降低验收门槛；两者都只检查已发生的 ToolResult，不自行执行命令。
 CLI、REPL 与多模型工作流默认使用 `default_completion_verifier()`：写入后必跑测试（test），
 lint/compile/lock 可选，因此“只跑静态检查”不再满足完成验收。
+需要更强保证的宿主用 `plan_for_workspace()`：把运行前已存在的测试设为受保护（拒绝篡改/删除），
+并用 `change_to_tests` 要求变更文件伴随真实运行的关联测试，从而拒绝无关测试绿灯。三种架构对照
+评测即采用该计划（保护 `test_target.py`，`solution.py` → `test_target.py`）。
 
 配置路由时，Agent 在回合开始调用 `RoutedProvider.begin_run(task)`，此时不发请求。
 新模板的 `intent_strategy="model"` 在首次请求前由 economy 只分类 `simple/complex`，

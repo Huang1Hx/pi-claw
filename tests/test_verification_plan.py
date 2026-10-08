@@ -12,6 +12,8 @@ from core.completion import (
     ToolObservation,
     VerificationPlan,
     default_completion_verifier,
+    discover_test_files,
+    plan_for_workspace,
 )
 from core.schemas import ToolCall, ToolResult
 
@@ -155,3 +157,62 @@ def test_default_verifier_used_by_entrypoints_requires_a_test() -> None:
         observations=[write("app.py"), command(["uv", "run", "pytest", "-q"])],
     )
     assert with_test.accepted
+
+
+def test_plan_for_workspace_protects_only_existing_tests(tmp_path) -> None:
+    """只保护运行前已存在的测试文件，既防篡改又不阻止合法的新建测试。"""
+    (tmp_path / "app.py").write_text("x = 1\n")
+    (tmp_path / "test_app.py").write_text("import unittest\n")
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "spec_test.py").write_text("x = 1\n")
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / "__pycache__" / "test_old.py").write_text("x = 1\n")
+    assert discover_test_files(tmp_path) == ("pkg/spec_test.py", "test_app.py")
+    plan = plan_for_workspace(tmp_path)
+    assert plan.is_protected("test_app.py") and plan.is_protected("pkg/spec_test.py")
+    assert not plan.is_protected("app.py")
+    assert not plan.is_protected("test_new.py")
+    check = PlannedCompletionVerifier(plan).verify(
+        task="fix",
+        final_text="done",
+        observations=[
+            write("test_app.py"),
+            command([sys.executable, "-m", "unittest", "test_app.py"]),
+        ],
+    )
+    assert not check.accepted and "受保护" in check.reason
+
+
+def test_eval_plan_requires_related_test_and_protects_target(tmp_path) -> None:
+    """对照评测计划：既有 test_target.py 受保护，且 solution.py 必须跑关联测试。"""
+    (tmp_path / "solution.py").write_text("x = 1\n")
+    (tmp_path / "test_target.py").write_text("x = 1\n")
+    plan = plan_for_workspace(tmp_path, change_to_tests=(("solution.py", ("test_target.py",)),))
+    verifier = PlannedCompletionVerifier(plan)
+    tamper = verifier.verify(
+        task="fix",
+        final_text="done",
+        observations=[
+            write("test_target.py"),
+            command([sys.executable, "-m", "unittest", "test_target.py"]),
+        ],
+    )
+    assert not tamper.accepted and "受保护" in tamper.reason
+    unrelated = verifier.verify(
+        task="fix",
+        final_text="done",
+        observations=[
+            write("solution.py"),
+            command([sys.executable, "-m", "unittest", "test_other.py"]),
+        ],
+    )
+    assert not unrelated.accepted and "关联" in unrelated.reason
+    ok = verifier.verify(
+        task="fix",
+        final_text="done",
+        observations=[
+            write("solution.py"),
+            command([sys.executable, "-m", "unittest", "test_target.py"]),
+        ],
+    )
+    assert ok.accepted

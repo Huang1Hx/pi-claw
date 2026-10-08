@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
@@ -366,3 +367,46 @@ def default_completion_verifier() -> PlannedCompletionVerifier:
     测试绿灯的宿主（如对照评测）应显式构造带 `protected_patterns`/`change_to_tests` 的计划。
     """
     return PlannedCompletionVerifier(DEFAULT_VERIFICATION_PLAN)
+
+
+def discover_test_files(root: Path) -> tuple[str, ...]:
+    """列出工作区内已存在的测试文件（相对 POSIX 路径），不跟随符号链接或 ``__pycache__``。
+
+    只用于把“运行开始前就存在”的测试设为受保护，避免模型改写或删除既有测试；不把尚不存在的
+    测试文件名纳入，从而不阻止合法的测试创建。
+    """
+    root = Path(root)
+    if not root.is_dir():
+        return ()
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        current = Path(dirpath)
+        dirnames[:] = [
+            name for name in dirnames if name != "__pycache__" and not (current / name).is_symlink()
+        ]
+        for name in filenames:
+            if not name.endswith(".py"):
+                continue
+            if not (name.startswith("test_") or name.endswith("_test.py")):
+                continue
+            path = current / name
+            if path.is_symlink():
+                continue
+            found.append(path.relative_to(root).as_posix())
+    return tuple(sorted(found))
+
+
+def plan_for_workspace(
+    root: Path,
+    *,
+    change_to_tests: tuple[tuple[str, tuple[str, ...]], ...] = (),
+    required_kinds: frozenset[str] = frozenset({"test"}),
+    optional_kinds: frozenset[str] = frozenset({"lint", "compile", "lock"}),
+) -> VerificationPlan:
+    """按工作区既有测试构造计划：保护既有测试，并允许宿主声明变更—测试关联。"""
+    return VerificationPlan(
+        required_kinds=required_kinds,
+        optional_kinds=optional_kinds,
+        protected_patterns=discover_test_files(root),
+        change_to_tests=change_to_tests,
+    )

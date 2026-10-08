@@ -63,3 +63,4 @@ Iteration 001–005 保留当时的路径与验证命令，不回写历史记录
 [Iteration 031](ITERATION_031_ROUTING_WRITE_SIDE_EFFECTS.md)：修复中文写入副作用盲点并量化误伤。
 [Iteration 032](ITERATION_032_VERIFICATION_PLAN.md)：宿主侧 VerificationPlan 与语义完成验收。
 [Iteration 033](ITERATION_033_VERIFICATION_WIRING.md)：VerificationPlan 接入 CLI/REPL/工作流。
+[Iteration 034](ITERATION_034_WORKSPACE_TEST_PROTECTION.md)：工作区测试保护与变更—测试关联。

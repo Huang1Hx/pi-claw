@@ -23,7 +23,7 @@ from statistics import median
 
 from config import load_settings
 from core.agent import Agent
-from core.completion import ToolEvidenceCompletionVerifier
+from core.completion import PlannedCompletionVerifier, plan_for_workspace
 from core.context import ContextManager
 from core.control import ExecutionControl
 from core.prompts import build_system_prompt
@@ -1125,7 +1125,12 @@ def _executor(workspace: Path, task_id: str, *, writable: bool) -> ToolExecutor:
 
 
 def _agent(provider, executor, trace: Path, workspace: Path, *, steps: int) -> Agent:
-    """所有模式复用相同 Agent Loop、上下文与完成证据检查。"""
+    """所有模式复用相同 Agent Loop、上下文与完成证据检查。
+
+    验收计划按工作区既有测试生成：既有测试受保护（不得篡改/删除），并要求对 `solution.py` 的
+    改动伴随真实运行 `test_target.py` 的测试绿灯，避免无关测试绿灯被当成完成。
+    """
+    plan = plan_for_workspace(workspace, change_to_tests=(("solution.py", ("test_target.py",)),))
     return Agent(
         provider,
         executor,
@@ -1133,7 +1138,7 @@ def _agent(provider, executor, trace: Path, workspace: Path, *, steps: int) -> A
         trace=TraceWriter(trace),
         system_prompt=build_system_prompt(workspace),
         context_manager=ContextManager(),
-        completion_verifier=ToolEvidenceCompletionVerifier(),
+        completion_verifier=PlannedCompletionVerifier(plan),
         streaming=False,
     )
 

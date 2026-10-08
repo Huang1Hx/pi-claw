@@ -34,7 +34,7 @@ Docker 兼容集 713 项（另有 6 项宿主专属契约）。
 | 1 | 公开仓库工程化与 CI | 待执行 | GitHub Actions、构建、License、贡献说明 |
 | 2 | 当前模型真实评测基线 | **已完成并合并 main** | grader 2.2 合并后首次 49/90；两轮修复后 78/90 |
 | 3 | Trace 恢复、请求稳定性与执行沙箱 | **当前工程里程碑已收尾；Task 3.3–3.7、Task 3.8 离线安全门和诊断续跑已完成，完整 90-trial 与 holdout 列入后续评测** | 11/11 攻击阻断、30/30 连续运行、12 项诊断最新 10/12、派生视图 88/90 |
-| 4 | 任务相关的完成验收与抗伪完成 | **进行中；Task 4.1 VerificationPlan、Task 4.2 接入已完成；工作区级测试保护待做** | 篡改/必跑缺失/未复测/无关绿灯被拒；默认入口强制写后必跑测试；783 项脱敏 pytest 通过 |
+| 4 | 任务相关的完成验收与抗伪完成 | **已完成（Task 4.1–4.3）；真实 90-trial/holdout 待冻结后运行** | 篡改/必跑缺失/未复测/无关绿灯被拒；默认入口必跑测试，评测保护 `test_target.py` 并强制关联测试；785 项脱敏 pytest 通过 |
 | 5 | 路由校准与 Multi-Agent 故障隔离 | **已完成；Task 5.1 去重、Task 5.2 超时隔离与部分交接、Task 5.3 离线路由校准、Task 5.4 写入副作用修复均已完成** | 去重/发现合并/独立超时/部分交接指标；带标签 28 样本离线校准，错误降级 0、误伤 2；773 项脱敏 pytest 通过 |
 | 6 | 正式发布 | 待执行 | 沙箱隔离演示、版本标签、两条真实端到端案例 |
 
@@ -441,6 +441,23 @@ Docker 退出码 0、`cleanup_failed=false`，且无残留容器或快照。
   篡改/无关绿灯检测的宿主显式声明（列入后续）。
 - [x] 回归：工作流“写入后只跑 lint”被拒、补跑测试后完成；完整 `pytest`、Ruff、format、
   compileall 通过后再提交。
+
+### Task 4.3：工作区测试保护与变更—测试关联
+
+**文件：**
+
+- 修改 `src/core/completion.py`（`discover_test_files`、`plan_for_workspace`）
+- 修改 `src/evaluation/compare_modes.py`（对照评测改用按工作区构造的计划）
+- 修改 `tests/test_verification_plan.py`
+- 修改 `docs/ARCHITECTURE.md`、`docs/iterations/README.md`
+- 新增 `docs/iterations/ITERATION_034_WORKSPACE_TEST_PROTECTION.md`
+
+- [x] `discover_test_files` 只列出运行前已存在的 `test_*.py`/`*_test.py`，不跟随符号链接、跳过
+  `__pycache__`；把这些设为受保护，阻止测试篡改/删除，同时不阻止合法的测试创建。
+- [x] `plan_for_workspace` 组合既有测试保护与宿主声明的 `change_to_tests` 映射。
+- [x] 对照评测 `_agent` 启用：保护 `test_target.py`，要求 `solution.py` 改动伴随真实运行
+  `test_target.py`，实现“测试篡改”和“无关测试绿灯”的真实拦截。
+- [x] 先写失败测试（RED）再实现（GREEN）；完整 `pytest`、Ruff、format、compileall 通过后再提交。
 
 ## 阶段 5：路由与 Multi-Agent
 
