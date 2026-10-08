@@ -63,7 +63,11 @@ def test_sessions_listing_has_no_default_workspace_creation(tmp_path, monkeypatc
 
 @pytest.mark.parametrize("explicit", [False, True])
 def test_cli_saves_actual_code_inside_selected_workspace(tmp_path, monkeypatch, capsys, explicit):
-    """真实 CLI/工具/验收写文件；不把示例放到启动根目录或旧会话中。"""
+    """真实 CLI/工具/验收写文件；不把示例放到启动根目录或旧会话中。
+
+    默认完成验收要求写入后出现测试绿灯，因此脚本按真实流程补写并运行一个单元测试；
+    只跑 compileall 的旧宽松行为已不再满足完成验收。
+    """
     monkeypatch.chdir(tmp_path)
     target = tmp_path / "selected" if explicit else tmp_path / "projects"
     if explicit:
@@ -83,14 +87,37 @@ def test_cli_saves_actual_code_inside_selected_workspace(tmp_path, monkeypatch, 
             ),
             ModelReply.call(
                 ToolCall(
-                    "verify",
-                    "run_command",
+                    "test",
+                    "write_or_replace",
                     {
-                        "argv": ["uv", "run", "python", "-m", "compileall", "-q", "hello.py"],
+                        "path": "test_hello.py",
+                        "old": "",
+                        "new": (
+                            "import unittest\n\nimport hello\n\n\n"
+                            "class HelloTest(unittest.TestCase):\n"
+                            "    def test_import(self):\n        self.assertTrue(True)\n"
+                        ),
                     },
                 )
             ),
-            ModelReply.final("示例已保存并通过语法检查"),
+            ModelReply.call(
+                ToolCall(
+                    "verify",
+                    "run_command",
+                    {
+                        "argv": [
+                            "uv",
+                            "run",
+                            "python",
+                            "-m",
+                            "unittest",
+                            "-q",
+                            "test_hello.py",
+                        ],
+                    },
+                )
+            ),
+            ModelReply.final("示例已保存并通过单元测试"),
         ]
     )
     monkeypatch.setattr("interfaces.cli.OfflineCodingProvider", lambda: script)
