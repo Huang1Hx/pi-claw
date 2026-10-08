@@ -24,32 +24,47 @@ def test_default_dataset_reports_accuracy_and_downgrades(tmp_path):
     report = evaluate_routing_calibration(tmp_path / "report.json")
     assert report["suite"] == "routing-calibration-v1"
     assert report["real_model"] is False
-    assert report["total_cases"] == 26
-    assert report["simple_cases"] == 8
-    assert report["complex_cases"] == 18
-    assert report["rules_accuracy"] == round(23 / 26, 6)
-    assert report["rules_false_downgrades"] == 2
-    assert report["rules_known_downgrades"] == 2
+    assert report["total_cases"] == 28
+    assert report["simple_cases"] == 9
+    assert report["complex_cases"] == 19
+    assert report["rules_accuracy"] == round(26 / 28, 6)
+    assert report["rules_false_downgrades"] == 0
+    assert report["rules_known_downgrades"] == 0
     assert report["rules_unexpected_downgrades"] == 0
-    assert report["rules_false_escalations"] == 1
-    assert report["guarded_false_downgrades"] == 2
+    assert report["rules_false_escalations"] == 2
+    assert report["guarded_false_downgrades"] == 0
     assert "cost_reduction_ratio" not in report
     assert (tmp_path / "report.json").exists()
 
 
-def test_report_rows_expose_reason_and_known_blind_spots(tmp_path):
-    """逐条保留可审计原因；已知盲点显式标记为 known 而非未预期降级。"""
+def test_report_rows_expose_reason_and_collateral_cost(tmp_path):
+    """逐条保留可审计原因；写入副作用已修复，只读误伤作为保守升级成本可见。"""
     report = evaluate_routing_calibration(tmp_path / "report.json")
     by_id = {row["id"]: row for row in report["cases"]}
-    blind = by_id["write_output_blind"]
-    assert blind["label"] == "complex"
-    assert blind["rules_decision"] == "simple"
-    assert blind["known_downgrade"] is True
-    assert blind["unexpected_downgrade"] is False
-    assert blind["reason"]
+    fixed = by_id["read_data_write_output"]
+    assert fixed["label"] == "complex"
+    assert fixed["rules_decision"] == "complex"
+    assert fixed["false_downgrade"] is False
+    assert fixed["reason"]
+    assert by_id["view_write_log"]["false_escalation"] is True
     assert by_id["read_readme_with_space"]["false_escalation"] is True
     assert by_id["fix_login"]["guarded_decision"] == "complex"
     assert json.loads((tmp_path / "report.json").read_text(encoding="utf-8")) == report
+
+
+def test_known_downgrade_is_counted_separately_from_unexpected(tmp_path):
+    """带 known_downgrade 标记的规则盲点计入 known，未标记的计入必须为 0 的回归门。"""
+    path = _suite(
+        tmp_path,
+        [
+            {"id": "accepted", "task": "读取文件", "label": "complex", "known_downgrade": True},
+            {"id": "regression", "task": "读取数据", "label": "complex"},
+        ],
+    )
+    report = evaluate_routing_calibration(tmp_path / "custom.json", suite=path)
+    assert report["rules_false_downgrades"] == 2
+    assert report["rules_known_downgrades"] == 1
+    assert report["rules_unexpected_downgrades"] == 1
 
 
 def test_dataset_is_fail_closed_on_duplicate_id(tmp_path):

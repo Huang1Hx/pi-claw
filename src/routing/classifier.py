@@ -4,10 +4,13 @@ import json
 import re
 
 from core.schemas import ModelReply
+from routing.intent import WRITE_SIDE_EFFECTS
 
 MAX_INTENT_CHARS = 4_000
 _RISKY_TASK = re.compile(
     r"修改|修复|编写|写一个|写个|写一段|写段|新建|创建|保存|重构|删除|实现|架构|并发|运行|执行|"
+    + "|".join(WRITE_SIDE_EFFECTS)
+    + r"|"
     r"生成.{0,20}(?:代码|文件|脚本|项目)|"
     r"\b(write|create|save|generate|edit|fix|refactor|delete|implement|architecture|concurrency|run|execute)\b",
     re.I,

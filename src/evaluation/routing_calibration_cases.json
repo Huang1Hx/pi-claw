@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "name": "pi-claw-routing-calibration",
-  "version": 1,
+  "version": 2,
   "cases": [
     {"id": "list_project_files", "task": "列出项目文件", "label": "simple"},
     {"id": "read_cjk_filename", "task": "读取alpha.txt", "label": "simple"},
@@ -11,6 +11,7 @@
     {"id": "view_alpha", "task": "查看alpha.txt", "label": "simple"},
     {"id": "show_directory_en", "task": "show me the directory", "label": "simple"},
     {"id": "readonly_list", "task": "请只读列出目录", "label": "simple"},
+    {"id": "view_write_log", "task": "查看日志中的写入记录", "label": "simple", "note": "只读查询，但含副作用词“写入”，是修复盲点的已知误伤成本"},
     {"id": "fix_login", "task": "修复登录 bug", "label": "complex"},
     {"id": "implement_cache", "task": "实现一个缓存层", "label": "complex"},
     {"id": "delete_logs", "task": "删除过期日志文件", "label": "complex"},
@@ -27,7 +28,8 @@
     {"id": "read_config_edit_port", "task": "读取配置并修改端口", "label": "complex"},
     {"id": "multi_step_newline", "task": "列出项目文件\n然后修改配置", "label": "complex"},
     {"id": "long_task", "task": "请仔细阅读当前仓库里的路由实现，梳理 rules 与 model 两条路径在分类上的差异，并结合最近的提交记录分析可能存在的边界与风险点，最后给出是否需要在宿主侧增加安全兜底的判断依据与理由说明。", "label": "complex"},
-    {"id": "write_output_blind", "task": "读取数据并写入新文件", "label": "complex", "known_downgrade": true, "note": "中文写入/写到不在复杂词表，属已知规则盲点"},
-    {"id": "write_cache_blind", "task": "列出文件并写入缓存", "label": "complex", "known_downgrade": true, "note": "同上：只读动词开头加写入副作用，规则未识别"}
+    {"id": "read_data_write_output", "task": "读取数据并写入新文件", "label": "complex", "note": "中文写入副作用，已由 WRITE_SIDE_EFFECTS 修复"},
+    {"id": "list_files_write_cache", "task": "列出文件并写入缓存", "label": "complex", "note": "同上：只读动词开头加写入副作用"},
+    {"id": "read_config_and_save", "task": "读取配置并保存", "label": "complex", "note": "中文保存副作用，rules 词表此前缺失"}
   ]
 }

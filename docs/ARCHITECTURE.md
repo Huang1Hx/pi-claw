@@ -66,8 +66,9 @@ tools 的工具类由 ToolExecutor 组合，共用 Workspace 和预算。persist
 记录决策与请求/Token。默认不需要价格；旧配置未设置策略时保留本地规则。
 `intent_strategy="rules"` 的确定性分类（`routing.intent.classify`）与 `require_strong` 安全网可用
 `eval-routing-calibration` 在带标签数据集上离线度量：分类准确率、复杂任务错误降级率与保守
-升级率，并把已知规则盲点（如中文“写入/写到”不在复杂词表）显式标记为 `known_downgrade`，
-未预期降级作为回归门。
+升级率。中文写入/保存副作用动词集中在 `routing.intent.WRITE_SIDE_EFFECTS`，由 rules 分类与
+`require_strong` 宿主守卫共用，避免两处词表漂移；已知且接受的规则盲点仍可用 `known_downgrade`
+显式标记，未预期降级作为回归门。
 `config.connections.resolve_connection()` 将共享 API 地址/Key 解析到各 ModelProfile，
 Router 按 profile.model 填写请求；共享连接时不更换 Key，独立连接则必须显式配对覆盖。
 `/model` 显式切换时新建 Session，旧会话可恢复。

@@ -35,7 +35,7 @@ Docker 兼容集 713 项（另有 6 项宿主专属契约）。
 | 2 | 当前模型真实评测基线 | **已完成并合并 main** | grader 2.2 合并后首次 49/90；两轮修复后 78/90 |
 | 3 | Trace 恢复、请求稳定性与执行沙箱 | **当前工程里程碑已收尾；Task 3.3–3.7、Task 3.8 离线安全门和诊断续跑已完成，完整 90-trial 与 holdout 列入后续评测** | 11/11 攻击阻断、30/30 连续运行、12 项诊断最新 10/12、派生视图 88/90 |
 | 4 | 任务相关的完成验收与抗伪完成 | 待执行 | 无关测试、篡改测试、旧绿灯等攻击用例全部拒绝 |
-| 5 | 路由校准与 Multi-Agent 故障隔离 | **已完成；Task 5.1 去重、Task 5.2 超时隔离与部分交接、Task 5.3 离线路由校准均已完成** | 去重/发现合并/独立超时/部分交接指标；带标签 26 样本离线校准，未预期降级 0；767 项脱敏 pytest 通过 |
+| 5 | 路由校准与 Multi-Agent 故障隔离 | **已完成；Task 5.1 去重、Task 5.2 超时隔离与部分交接、Task 5.3 离线路由校准、Task 5.4 写入副作用修复均已完成** | 去重/发现合并/独立超时/部分交接指标；带标签 28 样本离线校准，错误降级 0、误伤 2；773 项脱敏 pytest 通过 |
 | 6 | 正式发布 | 待执行 | 沙箱隔离演示、版本标签、两条真实端到端案例 |
 
 ---
@@ -516,6 +516,23 @@ Agent 都会调用模型、消耗 Token、各自交接，由主 Agent 重复核�
 - [x] 不修改现有分类器行为；校准只度量并暴露盲点（如中文“写入/写到”不在复杂词表），记录为
   后续候选修复，不在本任务内改判定。
 - [x] 先写失败测试（RED）再实现（GREEN）；完整 `pytest`、Ruff、format、compileall 通过后再提交。
+
+### Task 5.4：修复中文写入副作用盲点并量化误伤
+
+**文件：**
+
+- 修改 `src/routing/intent.py`（新增 `WRITE_SIDE_EFFECTS`）、`src/routing/classifier.py`
+- 修改 `tests/test_routing.py`、`tests/test_model_intent_routing.py`
+- 修改 `src/evaluation/routing_calibration_cases.json`（升 v2）与 `tests/test_routing_calibration.py`
+- 修改 `docs/ARCHITECTURE.md`、`docs/EVALUATION.md`、`docs/iterations/README.md`
+- 新增 `docs/iterations/ITERATION_031_ROUTING_WRITE_SIDE_EFFECTS.md`
+
+- [x] 集中定义中文写入/保存副作用动词 `WRITE_SIDE_EFFECTS`，由 rules 分类与宿主 `require_strong`
+  守卫共用，消除两处词表漂移（如 `读取数据并写入新文件`、`读取配置并保存` 此前被判简单）。
+- [x] 扩充规则测试与宿主守卫测试覆盖中文写入/保存副作用任务。
+- [x] 校准数据集升 v2：盲点样本转正、新增只读含“写入”字样的误伤探测样本；指标显示错误降级
+  0、未预期降级 0、保守升级（误伤）2。
+- [x] 先写失败测试（RED，5 项）再实现（GREEN）；完整 `pytest`、Ruff、format、compileall 通过后再提交。
 
 ## 阶段 6：正式发布
 

@@ -103,6 +103,8 @@ def test_complex_task_is_classified_by_light_then_executed_by_strong(workspace):
         "写个示例脚本",
         "新建 hello.py",
         "保存代码到文件",
+        "读取数据并写入新文件",
+        "列出文件并写入缓存",
         "创建一个项目",
         "生成 Python 代码",
         "create hello.py",

@@ -3,12 +3,18 @@
 import re
 
 READ_TOOLS = frozenset({"list_files", "read_file", "search_text"})
+# 明确的写入/保存副作用动词：中文表达远多于既有词表，集中定义供 rules 分类与宿主守卫共用，
+# 避免两处词表漂移导致同一任务在 rules 与 model 路径下判定不一致。
+WRITE_SIDE_EFFECTS = ("写入", "写到", "写出", "写下", "写回", "另存", "保存", "追加", "替换")
+_WRITE = "|".join(WRITE_SIDE_EFFECTS)
 _SIMPLE = re.compile(
     r"^(?:请)?(?:只读)?(?:列出|读取|查找|搜索|查看)(?:文件|目录|项目|README|readme|[\w./-]+)"
 )
 _ENGLISH = re.compile(r"^(?:please\s+)?(?:list|read|find|search|show)\b", re.I)
 _COMPLEX = re.compile(
-    r"修改|修复|编写|创建|重构|删除|实现|设计|优化|运行|执行|测试|安全|并发|架构|分析|总结|解释|以及|然后|并且|\band\b|\bthen\b|\b(write|edit|fix|run|execute|test|refactor|delete|implement|design|analyze|explain)\b",
+    r"修改|修复|编写|创建|新建|重构|删除|实现|设计|优化|运行|执行|测试|安全|并发|架构|分析|总结|解释|"
+    r"以及|然后|并且|" + _WRITE + r"|"
+    r"\band\b|\bthen\b|\b(write|edit|fix|run|execute|test|refactor|delete|implement|design|analyze|explain)\b",
     re.I,
 )
 

@@ -145,6 +145,8 @@ v2 使用预设分类标签及固定 usage，不设单价，不报告费用节�
 `guarded_false_downgrades`。已知规则盲点用 `known_downgrade` 显式标记并计入
 `rules_known_downgrades`；未标记的错误降级计入 `rules_unexpected_downgrades`，作为必须为 0 的
 回归门。数据集与判定固定，不调用真实模型、不设价格、不报告节省率。
+当前 v2 数据集 28 条（simple 9 / complex 19）：规则错误降级 0、未预期降级 0、保守升级 2（其中
+`查看日志中的写入记录` 属只读查询被“写入”副作用词表误伤，是修复盲点的已量化成本）。
 配置、指标解释和命令见 [配置与模型路由](CONFIGURATION_AND_ROUTING.md)。
 
 ## 评测要回答什么
