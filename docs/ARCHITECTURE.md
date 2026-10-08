@@ -19,7 +19,7 @@ core.schemas、core.events、core.usage 是低层数据协议。providers 和 se
 | 模块 | 核心文件 | 职责 |
 |---|---|---|
 | core | agent.py、team.py | 单 Agent 循环；只读子 Agent 并行、交接和唯一写者协调 |
-| core | context.py、completion.py | 活动窗口控制、最低验证证据检查 |
+| core | context.py、completion.py | 活动窗口控制、最低验证证据检查、宿主 `VerificationPlan` 语义验收 |
 | core | events.py、usage.py、loop_detection.py、hooks.py | 事件协议、实际用量、重复检测、扩展回调 |
 | tools | executor.py | 唯一模型工具执行入口，策略、审批、指纹复核、结果归一化 |
 | tools | registry.py、builtins.py | 工具注册与 Schema |
@@ -57,6 +57,12 @@ tools 的工具类由 ToolExecutor 组合，共用 Workspace 和预算。persist
 6. 标准 ToolResult 写入上下文与原始日志，再反馈给模型。
 7. 重复参数和结果达到阈值时停止；模型 final 候选须经过完成验收。
 8. RunResult 返回本回合 usage，REPL 幂等保存到会话用量账本。
+
+完成验收分两层：`ToolEvidenceCompletionVerifier` 要求成功写入后出现受认可的成功验证命令；
+`PlannedCompletionVerifier` 按宿主不可变的 `VerificationPlan` 执行更严的语义验收——区分必跑
+`required_kinds` 与可选 `optional_kinds`、拒绝写入受保护文件（测试篡改/删除）、要求每个必跑类别
+在最后一次成功写入后通过，并在声明 `change_to_tests` 映射时拒绝无关测试绿灯。计划由宿主声明，
+模型不能修改它来降低验收门槛；两者都只检查已发生的 ToolResult，不自行执行命令。
 
 配置路由时，Agent 在回合开始调用 `RoutedProvider.begin_run(task)`，此时不发请求。
 新模板的 `intent_strategy="model"` 在首次请求前由 economy 只分类 `simple/complex`，

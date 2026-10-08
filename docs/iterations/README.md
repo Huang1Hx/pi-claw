@@ -61,3 +61,4 @@ Iteration 001–005 保留当时的路径与验证命令，不回写历史记录
 [Iteration 029](ITERATION_029_SUBAGENT_ISOLATION.md)：子 Agent 独立超时与部分交接。
 [Iteration 030](ITERATION_030_ROUTING_CALIBRATION.md)：离线路由校准与复杂任务错误降级度量。
 [Iteration 031](ITERATION_031_ROUTING_WRITE_SIDE_EFFECTS.md)：修复中文写入副作用盲点并量化误伤。
+[Iteration 032](ITERATION_032_VERIFICATION_PLAN.md)：宿主侧 VerificationPlan 与语义完成验收。

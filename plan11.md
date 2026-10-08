@@ -34,7 +34,7 @@ Docker 兼容集 713 项（另有 6 项宿主专属契约）。
 | 1 | 公开仓库工程化与 CI | 待执行 | GitHub Actions、构建、License、贡献说明 |
 | 2 | 当前模型真实评测基线 | **已完成并合并 main** | grader 2.2 合并后首次 49/90；两轮修复后 78/90 |
 | 3 | Trace 恢复、请求稳定性与执行沙箱 | **当前工程里程碑已收尾；Task 3.3–3.7、Task 3.8 离线安全门和诊断续跑已完成，完整 90-trial 与 holdout 列入后续评测** | 11/11 攻击阻断、30/30 连续运行、12 项诊断最新 10/12、派生视图 88/90 |
-| 4 | 任务相关的完成验收与抗伪完成 | 待执行 | 无关测试、篡改测试、旧绿灯等攻击用例全部拒绝 |
+| 4 | 任务相关的完成验收与抗伪完成 | **进行中；Task 4.1 VerificationPlan 与语义验收已完成，Task 4.2 接入待做** | 篡改测试、必跑缺失、写入后未复测、无关测试绿灯均被拒绝；781 项脱敏 pytest 通过 |
 | 5 | 路由校准与 Multi-Agent 故障隔离 | **已完成；Task 5.1 去重、Task 5.2 超时隔离与部分交接、Task 5.3 离线路由校准、Task 5.4 写入副作用修复均已完成** | 去重/发现合并/独立超时/部分交接指标；带标签 28 样本离线校准，错误降级 0、误伤 2；773 项脱敏 pytest 通过 |
 | 6 | 正式发布 | 待执行 | 沙箱隔离演示、版本标签、两条真实端到端案例 |
 
@@ -411,6 +411,31 @@ Docker 退出码 0、`cleanup_failed=false`，且无残留容器或快照。
 
 新增宿主侧 `VerificationPlan`，区分必跑与可选检查，建立变更文件和测试的关联，检测测试篡改、
 删除、写入后未复测和无关测试绿灯。模型不能自行降低验收要求。
+
+### Task 4.1：宿主侧 `VerificationPlan` 与有计划的完成验收器
+
+**文件：**
+
+- 修改 `src/core/completion.py`（新增 `VerificationPlan` 与 `PlannedCompletionVerifier`，保留
+  `ToolEvidenceCompletionVerifier` 兼容）
+- 新增 `tests/test_verification_plan.py`
+- 修改 `docs/ARCHITECTURE.md`
+- 新增 `docs/iterations/ITERATION_032_VERIFICATION_PLAN.md`
+- 修改 `docs/iterations/README.md` 和本文件阶段状态
+
+- [x] `VerificationPlan` 为宿主声明、不可变：`required_kinds`（必跑，非空）、`optional_kinds`（可选）、
+  `protected_patterns`（受保护文件，fnmatch）、`change_to_tests`（变更文件→关联测试）。
+  校验必跑/可选不相交、类别合法、模式非空字符串、映射键唯一，任何非法组合 fail closed。
+- [x] `PlannedCompletionVerifier.verify` 检查链：无成功写入→无需验收；写入受保护文件→拒绝
+  （测试篡改/删除）；取最后一次成功写入之后的受认可运行；每个 `required_kinds` 必须有成功运行；
+  存在 `change_to_tests` 映射时，每个有映射的变更文件必须有成功测试运行引用其关联测试，否则
+  拒绝（无关测试绿灯）。
+- [x] 保留既有 `ToolEvidenceCompletionVerifier` 行为，不改变现有调用点的默认语义。
+- [x] 先写失败测试（RED）再实现（GREEN）；完整 `pytest`、Ruff、format、compileall 通过后再提交。
+
+### Task 4.2：把 `VerificationPlan` 接入 CLI/REPL/工作流（待细化）
+
+- [ ] 为交互入口与工作流构造默认计划，并显式区分 eval 场景，避免误伤合法测试创建。
 
 ## 阶段 5：路由与 Multi-Agent
 
