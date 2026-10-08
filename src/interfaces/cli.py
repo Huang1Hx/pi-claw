@@ -15,7 +15,7 @@ from pathlib import Path
 from config import load_settings
 from config.workspace import resolve_workspace
 from core.agent import Agent
-from core.completion import ToolEvidenceCompletionVerifier
+from core.completion import default_completion_verifier
 from core.schemas import ModelReply, RunStatus, ToolCall
 from evaluation.runner import EvalRunner, load_eval_suite, write_eval_report
 from interfaces.repl import CodingRepl
@@ -248,7 +248,7 @@ def _run_demo(args: argparse.Namespace) -> int:
             executor,
             trace=trace,
             max_steps=args.max_steps,
-            completion_verifier=ToolEvidenceCompletionVerifier(),
+            completion_verifier=default_completion_verifier(),
         ).run("检查 calculator.py，修复 add，并运行单元测试。")
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
         if args.yes:
@@ -292,7 +292,7 @@ def _run_agent(args: argparse.Namespace) -> int:
         executor,
         trace=trace,
         max_steps=args.max_steps,
-        completion_verifier=ToolEvidenceCompletionVerifier(),
+        completion_verifier=default_completion_verifier(),
     ).run(args.task)
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
     return 0 if result.status is RunStatus.COMPLETED else 1

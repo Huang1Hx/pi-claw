@@ -79,6 +79,11 @@ def check(id="check"):
     return call("run_command", {"argv": [sys.executable, "-m", "unittest", "test_sample.py"]}, id)
 
 
+def lint(id="lint"):
+    """运行静态检查；在宿主默认计划下不满足“必跑测试”，不能单独结束编码阶段。"""
+    return call("run_command", {"argv": ["uv", "run", "ruff", "check", "alpha.txt"]}, id)
+
+
 def settings(**workflow):
     """开启工作流，保持所有 profile 的假 Key/URL 一致。"""
     return Settings(
@@ -484,6 +489,26 @@ def test_unverified_write_never_enters_review(workspace):
         )
         == 2
     )
+
+
+def test_coding_requires_a_test_run_not_only_lint(workspace):
+    """写入后只有 lint 绿灯时不得进入审查，必须补跑必跑测试后才完成。"""
+    result, _, requests, events, _ = execute(
+        workspace,
+        {
+            "planner": [plan()],
+            "primary": [write(), lint(), answer("只跑了 lint"), check(), answer("完成")],
+            "reviewer": [read("r-read"), review()],
+        },
+    )
+    assert result.ok, result.error
+    reasons = [
+        e.data["data"]["reason"]
+        for e in events
+        if e.type == "workflow_artifact" and e.data["kind"] == "verification_rejected"
+    ]
+    assert reasons and any("必跑" in reason for reason in reasons)
+    assert result.routing["workflow"]["verification"]["accepted"] is True
 
 
 def test_write_still_requires_existing_approval(workspace):

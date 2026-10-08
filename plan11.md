@@ -34,7 +34,7 @@ Docker 兼容集 713 项（另有 6 项宿主专属契约）。
 | 1 | 公开仓库工程化与 CI | 待执行 | GitHub Actions、构建、License、贡献说明 |
 | 2 | 当前模型真实评测基线 | **已完成并合并 main** | grader 2.2 合并后首次 49/90；两轮修复后 78/90 |
 | 3 | Trace 恢复、请求稳定性与执行沙箱 | **当前工程里程碑已收尾；Task 3.3–3.7、Task 3.8 离线安全门和诊断续跑已完成，完整 90-trial 与 holdout 列入后续评测** | 11/11 攻击阻断、30/30 连续运行、12 项诊断最新 10/12、派生视图 88/90 |
-| 4 | 任务相关的完成验收与抗伪完成 | **进行中；Task 4.1 VerificationPlan 与语义验收已完成，Task 4.2 接入待做** | 篡改测试、必跑缺失、写入后未复测、无关测试绿灯均被拒绝；781 项脱敏 pytest 通过 |
+| 4 | 任务相关的完成验收与抗伪完成 | **进行中；Task 4.1 VerificationPlan、Task 4.2 接入已完成；工作区级测试保护待做** | 篡改/必跑缺失/未复测/无关绿灯被拒；默认入口强制写后必跑测试；783 项脱敏 pytest 通过 |
 | 5 | 路由校准与 Multi-Agent 故障隔离 | **已完成；Task 5.1 去重、Task 5.2 超时隔离与部分交接、Task 5.3 离线路由校准、Task 5.4 写入副作用修复均已完成** | 去重/发现合并/独立超时/部分交接指标；带标签 28 样本离线校准，错误降级 0、误伤 2；773 项脱敏 pytest 通过 |
 | 6 | 正式发布 | 待执行 | 沙箱隔离演示、版本标签、两条真实端到端案例 |
 
@@ -435,7 +435,12 @@ Docker 退出码 0、`cleanup_failed=false`，且无残留容器或快照。
 
 ### Task 4.2：把 `VerificationPlan` 接入 CLI/REPL/工作流（待细化）
 
-- [ ] 为交互入口与工作流构造默认计划，并显式区分 eval 场景，避免误伤合法测试创建。
+- [x] 新增 `DEFAULT_VERIFICATION_PLAN`（必跑 test、可选 lint/compile/lock）与
+  `default_completion_verifier()`，接入 `cli.py`（demo/run）、`repl.py` 与工作流编码阶段。
+- [x] 默认保持保守：不设 `protected_patterns`/`change_to_tests`，避免误伤合法测试创建；需要
+  篡改/无关绿灯检测的宿主显式声明（列入后续）。
+- [x] 回归：工作流“写入后只跑 lint”被拒、补跑测试后完成；完整 `pytest`、Ruff、format、
+  compileall 通过后再提交。
 
 ## 阶段 5：路由与 Multi-Agent
 

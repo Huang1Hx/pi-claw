@@ -13,7 +13,7 @@ from commands import create_commands
 from commands.model import current_model, model_options, resolve_model_selection
 from config import Settings
 from core.agent import Agent
-from core.completion import ToolEvidenceCompletionVerifier
+from core.completion import default_completion_verifier
 from core.context import ContextManager
 from core.events import AgentEvent
 from core.prompts import build_system_prompt
@@ -162,7 +162,7 @@ class CodingRepl:
             system_prompt=system_prompt,
             context_manager=self.context,
             on_message=self._persist_message,
-            completion_verifier=ToolEvidenceCompletionVerifier(),
+            completion_verifier=default_completion_verifier(),
             on_event=self._on_event,
             streaming=self.streaming,
         )

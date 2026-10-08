@@ -351,3 +351,18 @@ class PlannedCompletionVerifier:
             changed_files,
             tuple(checks),
         )
+
+
+DEFAULT_VERIFICATION_PLAN = VerificationPlan(
+    required_kinds=frozenset({"test"}),
+    optional_kinds=frozenset({"lint", "compile", "lock"}),
+)
+
+
+def default_completion_verifier() -> PlannedCompletionVerifier:
+    """交互入口与工作流默认使用的有计划验收器：写入后必跑测试，静态检查可选。
+
+    默认不声明受保护模式与变更—测试映射，避免误伤合法的测试创建；需要检测测试篡改或无关
+    测试绿灯的宿主（如对照评测）应显式构造带 `protected_patterns`/`change_to_tests` 的计划。
+    """
+    return PlannedCompletionVerifier(DEFAULT_VERIFICATION_PLAN)

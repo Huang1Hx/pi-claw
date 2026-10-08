@@ -63,6 +63,8 @@ tools 的工具类由 ToolExecutor 组合，共用 Workspace 和预算。persist
 `required_kinds` 与可选 `optional_kinds`、拒绝写入受保护文件（测试篡改/删除）、要求每个必跑类别
 在最后一次成功写入后通过，并在声明 `change_to_tests` 映射时拒绝无关测试绿灯。计划由宿主声明，
 模型不能修改它来降低验收门槛；两者都只检查已发生的 ToolResult，不自行执行命令。
+CLI、REPL 与多模型工作流默认使用 `default_completion_verifier()`：写入后必跑测试（test），
+lint/compile/lock 可选，因此“只跑静态检查”不再满足完成验收。
 
 配置路由时，Agent 在回合开始调用 `RoutedProvider.begin_run(task)`，此时不发请求。
 新模板的 `intent_strategy="model"` 在首次请求前由 economy 只分类 `simple/complex`，

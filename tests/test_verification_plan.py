@@ -11,6 +11,7 @@ from core.completion import (
     PlannedCompletionVerifier,
     ToolObservation,
     VerificationPlan,
+    default_completion_verifier,
 )
 from core.schemas import ToolCall, ToolResult
 
@@ -136,3 +137,21 @@ def test_plan_is_immutable() -> None:
     plan = VerificationPlan(frozenset({"test"}))
     with pytest.raises(FrozenInstanceError):
         plan.required_kinds = frozenset({"lint"})
+
+
+def test_default_verifier_used_by_entrypoints_requires_a_test() -> None:
+    """CLI/REPL/工作流共用的默认验收器：写入后 lint 绿灯不足，必须有测试绿灯。"""
+    verifier = default_completion_verifier()
+    assert isinstance(verifier, PlannedCompletionVerifier)
+    lint_only = verifier.verify(
+        task="fix",
+        final_text="done",
+        observations=[write("app.py"), command(["uv", "run", "ruff", "check", "src"])],
+    )
+    assert not lint_only.accepted and "必跑" in lint_only.reason
+    with_test = verifier.verify(
+        task="fix",
+        final_text="done",
+        observations=[write("app.py"), command(["uv", "run", "pytest", "-q"])],
+    )
+    assert with_test.accepted

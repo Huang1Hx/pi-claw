@@ -6,7 +6,7 @@ from dataclasses import replace
 from typing import Any
 
 from config.models import WorkflowSettings
-from core.completion import ToolEvidenceCompletionVerifier, ToolObservation
+from core.completion import ToolObservation, default_completion_verifier
 from core.schemas import ModelReply, RunResult, ToolCall, ToolResult
 from providers import WorkflowStopped
 from providers.events import ProviderEvent
@@ -37,7 +37,7 @@ class WorkflowCoordinator:
         self.reviewed_files: set[str] = set()
         self.premium_reviewed_files: set[str] = set()
         self.verification: dict | None = None
-        self.verifier = ToolEvidenceCompletionVerifier()
+        self.verifier = default_completion_verifier()
         self.terminal_status: str | None = None
 
     def finish_run(self, result: RunResult) -> None:
