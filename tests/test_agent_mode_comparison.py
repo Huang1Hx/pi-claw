@@ -20,6 +20,7 @@ from evaluation.compare_modes import (
     run_trial,
     select_resume_jobs,
     summarize,
+    team_assignments,
     worker_deadline_seconds,
 )
 from evaluation.mode_grading import GRADER_VERSION, calibrate, safe_functions
@@ -74,6 +75,21 @@ def _trial(tmp_path, *, mode="single"):
                 },
                 "duration_seconds": 1.25,
                 "max_parallel_subagents": 2 if mode == "team" else 0,
+                "dispatch": (
+                    {
+                        "scheduled_assignments": ["implementation", "risks"],
+                        "dispatched_assignments": ["implementation", "risks"],
+                        "duplicate_assignments_detected": 0,
+                        "duplicate_assignments_blocked": 0,
+                        "blocked_assignments": [],
+                        "intentional_redundancy_runs": 0,
+                        "intentional_redundancy": [],
+                        "duplicate_findings_collapsed": 0,
+                        "handoff_artifact_count": 2,
+                    }
+                    if mode == "team"
+                    else {}
+                ),
             }
         )
     )
@@ -783,3 +799,62 @@ def test_timed_out_logical_request_is_an_explicit_usage_gap(tmp_path):
     assert report["usage"]["attempted_requests"] == 3
     assert report["usage"]["requests_without_usage"] == 1
     assert report["usage_may_be_incomplete"] is True
+
+
+def test_participants_follow_dispatched_set_not_hardcoded_names(tmp_path):
+    """被去重拦截的子 Agent 不产生 Trace，参与者预期必须按实际派发集合推导。"""
+    result = {
+        "leader": {"status": "completed"},
+        "subagents": [{"name": "implementation"}],
+        "usage": {
+            "prompt_tokens": 20,
+            "completion_tokens": 10,
+            "total_tokens": 30,
+            "requests": 2,
+            "requests_with_usage": 2,
+            "requests_without_usage": 0,
+            "retries": 0,
+            "unknown_participants": 0,
+        },
+        "duration_seconds": 1.0,
+        "max_parallel_subagents": 1,
+        "dispatch": {
+            "scheduled_assignments": ["implementation", "risks"],
+            "dispatched_assignments": ["implementation"],
+            "duplicate_assignments_detected": 1,
+            "duplicate_assignments_blocked": 1,
+            "blocked_assignments": [
+                {"name": "risks", "duplicate_of": "implementation", "work_key": "k"}
+            ],
+            "intentional_redundancy_runs": 0,
+            "intentional_redundancy": [],
+            "duplicate_findings_collapsed": 0,
+            "handoff_artifact_count": 1,
+        },
+    }
+    folder = _trial(tmp_path, mode="team")
+    (folder / "run-result.json").write_text(json.dumps(result))
+    # 只保留 leader 和一个被派发子 Agent 的 Trace；被拦截的 subagent-risks 不存在。
+    (folder / "trace-subagent-risks.jsonl").unlink()
+    report = build_trial_report(
+        folder,
+        {"mode": "team", "task": "inventory_reservation", "trial": 1, "duration_seconds": 1},
+    )
+    assert report["participants"] == 2
+    assert report["trace_issues"] == []
+    assert report["duplicate_assignments_blocked"] == 1
+    assert report["handoff_artifact_count"] == 1
+
+
+def test_builtin_team_assignments_are_not_duplicates():
+    """现有主从任务 scope 相同但交付物不同，去重不得误伤真实分析分工。"""
+    keys = [item.work_key for item in team_assignments()]
+    assert len(set(keys)) == 2
+
+
+def test_dispatched_team_assignments_have_no_duplicates():
+    """派发清单必须与两个已注册子 Agent 一一对应，且不被判定为重复。"""
+    items = team_assignments()
+    assert [item.name for item in items] == ["implementation", "risks"]
+    assert {item.redundancy_policy for item in items} == {"unique"}
+    assert len({item.work_key for item in items}) == len(items)

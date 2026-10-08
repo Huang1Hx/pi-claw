@@ -56,3 +56,5 @@ Iteration 001–005 保留当时的路径与验证命令，不回写历史记录
 
 2026-09-10：用户明确授权 `git commit`，Iteration 001–003 合并为一次本地 `optimize` 提交。
 后续合并 `main` 或推送远程按用户指令执行。
+
+[Iteration 028](ITERATION_028_SUBAGENT_ASSIGNMENT_DEDUP.md)：子 Agent 任务去重与发现合并。

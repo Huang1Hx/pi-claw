@@ -1,7 +1,9 @@
 # 评测设计：工程回归与受限能力评测
 
 同一批中等复杂度任务对照单 Agent、当前规划—编码—审查工作流、主 Agent＋两个独立只读子 Agent，
-并统计严格成功率、重复成功率、端到端耗时、完整 Token、冲突、越权和返工。任务、模型分配、
+并统计严格成功率、重复成功率、端到端耗时、完整 Token、冲突、越权和返工，以及子 Agent
+任务去重的 `duplicate_assignments_detected/blocked`、`intentional_redundancy_runs`、
+`duplicate_findings_collapsed` 和 `handoff_artifact_count`。任务、模型分配、
 公式、复现命令及原始产物结构见 [三种 Agent 架构对照评测](AGENT_MODE_COMPARISON.md)。
 
 三种架构的当前入口为：

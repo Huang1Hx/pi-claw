@@ -2,25 +2,50 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from core.agent import Agent
 from core.control import ExecutionControl
 from core.schemas import RunResult
 
+REDUNDANCY_POLICIES = ("unique", "independent_check")
+
 
 @dataclass(frozen=True, slots=True)
 class SubagentAssignment:
-    """一个独立子 Agent 的名称、职责与具体任务。"""
+    """一个独立子 Agent 的目标、范围、交付物与冗余策略。
+
+    ``objective``/``scope``/``deliverable`` 为可选扩展字段；未提供时退化为
+    ``role``/``task``，保证旧调用点仍然可用。``work_key`` 用于在派发前识别
+    无意重复任务，但不会比较 ``task`` 的自然语言全文。
+    """
 
     name: str
     role: str
     task: str
+    objective: str = ""
+    scope: tuple[str, ...] = ()
+    deliverable: str = ""
+    redundancy_policy: str = "unique"
+
+    def __post_init__(self) -> None:
+        if self.redundancy_policy not in REDUNDANCY_POLICIES:
+            raise ValueError(f"未知 redundancy_policy：{self.redundancy_policy!r}")
+
+    @property
+    def work_key(self) -> str:
+        """稳定工作键：目标、归一化范围、交付物与基础版本；顺序无关。"""
+        objective = self.objective.strip() or self.role.strip()
+        deliverable = self.deliverable.strip() or self.task.strip()
+        normalized_scope = tuple(sorted(item.strip() for item in self.scope))
+        material = "\x1f".join((objective, "\x1e".join(normalized_scope), deliverable))
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,12 +80,14 @@ class TeamRunResult:
     usage: dict
     duration_seconds: float
     max_parallel_subagents: int
+    dispatch: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         """输出可审计汇总；已知 Token 与缺失 usage 参与方分开记录。"""
         return {
             "team_id": self.team_id,
             "leader": self.leader.to_dict(),
+            "dispatch": self.dispatch,
             "subagents": [
                 {
                     "name": item.name,
@@ -129,6 +156,12 @@ class ReadOnlySubagentTeam:
         total["unknown_participants"] = unknown_participants
         return total
 
+    def _record(self, event: str, payload: dict) -> None:
+        """把团队级派发/交接事件写到主 Agent 的 Trace；没有 Trace 时静默跳过。"""
+        trace = getattr(self.leader, "trace", None)
+        if trace is not None:
+            trace.record(event, payload)
+
     def run(
         self,
         task: str,
@@ -144,6 +177,40 @@ class ReadOnlySubagentTeam:
             raise ValueError("assignments 必须与已注册子 Agent 一一对应")
         if any(not item.role.strip() or not item.task.strip() for item in assignments):
             raise ValueError("子 Agent 角色与任务不能为空")
+
+        # 派发前任务清单去重：区分无意重复与显式独立复核。
+        first_seen: dict[str, str] = {}
+        blocked: list[dict] = []
+        intentional: list[dict] = []
+        dispatch_items: list[SubagentAssignment] = []
+        for item in assignments:
+            key = item.work_key
+            if key in first_seen:
+                record = {"name": item.name, "duplicate_of": first_seen[key], "work_key": key}
+                if item.redundancy_policy == "independent_check":
+                    intentional.append(record)
+                    dispatch_items.append(item)
+                else:
+                    blocked.append(record)
+                continue
+            first_seen[key] = item.name
+            dispatch_items.append(item)
+        # 被拦截的子 Agent 不产生 Trace，因此本轮并发集合必须真正排除它们；
+        # 使用局部副本，保持团队实例可重复使用，不被单次派发污染。
+        active_subagents = {item.name: self.subagents[item.name] for item in dispatch_items}
+
+        self._record(
+            "subagent_scheduled",
+            {
+                "scheduled": [item.name for item in assignments],
+                "dispatched": [item.name for item in dispatch_items],
+            },
+        )
+        for record in blocked:
+            self._record("duplicate_assignment_blocked", dict(record))
+        for record in intentional:
+            self._record("intentional_redundancy_allowed", dict(record))
+
         team_id = uuid.uuid4().hex
         started = time.monotonic()
         active = 0
@@ -157,22 +224,47 @@ class ReadOnlySubagentTeam:
                 active += 1
                 peak = max(peak, active)
             child_started = time.monotonic()
+            self._record("subagent_started", {"name": item.name, "role": item.role})
             try:
-                result = self.subagents[item.name].run(item.task, control=control)
-                return SubagentOutcome(
+                result = active_subagents[item.name].run(item.task, control=control)
+                outcome = SubagentOutcome(
                     item.name, item.role, result, round(time.monotonic() - child_started, 3)
                 )
+                self._record(
+                    "subagent_completed",
+                    {"name": item.name, "status": result.status.value, "run_id": result.run_id},
+                )
+                return outcome
             finally:
                 with counter_lock:
                     active -= 1
 
-        ordered = {item.name: item for item in assignments}
+        ordered = {item.name: item for item in dispatch_items}
+        ordered_names = [item.name for item in dispatch_items]
+        effective_workers = min(self.max_workers, len(ordered_names)) if ordered_names else 1
         with ThreadPoolExecutor(
-            max_workers=self.max_workers, thread_name_prefix="pi-claw-subagent"
+            max_workers=effective_workers, thread_name_prefix="pi-claw-subagent"
         ) as pool:
             futures = {name: pool.submit(execute, item) for name, item in ordered.items()}
-            outcomes = tuple(futures[name].result() for name in names)
+            outcomes = tuple(futures[name].result() for name in ordered_names)
 
+        artifacts = []
+        seen_findings: dict[str, str] = {}
+        collapsed = 0
+        for item in outcomes:
+            artifact = item.artifact(self.max_artifact_chars)
+            fingerprint = hashlib.sha256(
+                " ".join(artifact["finding"].split()).encode("utf-8")
+            ).hexdigest()
+            if fingerprint in seen_findings:
+                collapsed += 1
+                self._record(
+                    "duplicate_finding_collapsed",
+                    {"name": item.name, "duplicate_of": seen_findings[fingerprint]},
+                )
+                continue
+            seen_findings[fingerprint] = item.name
+            artifacts.append(artifact)
         handoff = {
             "type": "subagent_handoff",
             "team_id": team_id,
@@ -181,10 +273,25 @@ class ReadOnlySubagentTeam:
                 "以下内容仅是子 Agent 的只读发现。主 Agent 必须自行核对文件，"
                 "权限、测试结果与完成状态仍由宿主决定。"
             ),
-            "artifacts": [item.artifact(self.max_artifact_chars) for item in outcomes],
+            "artifacts": artifacts,
         }
         leader_task = task + "\n\n" + json.dumps(handoff, ensure_ascii=False)
+        self._record(
+            "subagent_handoff_completed",
+            {"team_id": team_id, "artifact_count": len(artifacts), "collapsed": collapsed},
+        )
         leader_result = self.leader.run(leader_task, control=control)
+        dispatch = {
+            "scheduled_assignments": [item.name for item in assignments],
+            "dispatched_assignments": [item.name for item in dispatch_items],
+            "duplicate_assignments_detected": len(blocked) + len(intentional),
+            "duplicate_assignments_blocked": len(blocked),
+            "blocked_assignments": blocked,
+            "intentional_redundancy_runs": len(intentional),
+            "intentional_redundancy": intentional,
+            "duplicate_findings_collapsed": collapsed,
+            "handoff_artifact_count": len(artifacts),
+        }
         return TeamRunResult(
             team_id=team_id,
             leader=leader_result,
@@ -192,4 +299,5 @@ class ReadOnlySubagentTeam:
             usage=self._usage([leader_result, *(item.result for item in outcomes)]),
             duration_seconds=round(time.monotonic() - started, 3),
             max_parallel_subagents=peak,
+            dispatch=dispatch,
         )

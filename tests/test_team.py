@@ -117,3 +117,169 @@ def test_team_shares_outer_cancellation_with_children_and_leader(tmp_path):
     assert result.leader.status is RunStatus.CANCELLED
     assert {item.result.status for item in result.subagents} == {RunStatus.CANCELLED}
     assert result.usage["requests"] == 0
+
+
+def test_assignment_work_key_is_stable_and_field_sensitive():
+    """work_key 必须对 objective/scope/deliverable 敏感，且与 scope 顺序无关。"""
+    base = SubagentAssignment(
+        "a",
+        "分析",
+        "只读分析",
+        objective="分析 solution.py",
+        scope=("SPEC.md", "solution.py"),
+        deliverable="implementation_advice",
+    )
+    same = SubagentAssignment(
+        "b",
+        "分析",
+        "只读分析",
+        objective="分析 solution.py",
+        scope=("solution.py", "SPEC.md"),
+        deliverable="implementation_advice",
+    )
+    other_deliverable = SubagentAssignment(
+        "c",
+        "分析",
+        "只读分析",
+        objective="分析 solution.py",
+        scope=("SPEC.md", "solution.py"),
+        deliverable="risk_and_edge_cases",
+    )
+    other_objective = SubagentAssignment(
+        "d",
+        "分析",
+        "只读分析",
+        objective="分析 test_target.py",
+        scope=("SPEC.md", "solution.py"),
+        deliverable="implementation_advice",
+    )
+    assert base.work_key == same.work_key
+    assert base.work_key != other_deliverable.work_key
+    assert base.work_key != other_objective.work_key
+
+
+def test_legacy_task_only_assignments_share_key_when_identical():
+    """未提供扩展字段时退化为 role/task，两份完全相同的任务必须被判为重复。"""
+    a = SubagentAssignment("a", "role", "same task")
+    b = SubagentAssignment("b", "role", "same task")
+    c = SubagentAssignment("c", "role", "different task")
+    assert a.work_key == b.work_key
+    assert a.work_key != c.work_key
+
+
+def test_duplicate_unique_assignment_is_blocked_before_model_call(tmp_path):
+    """unique 策略下重复任务只运行一个，另一个不得触发模型调用。"""
+    p1 = RecordingProvider("结论一")
+    p2 = RecordingProvider("结论二")
+    lead = RecordingProvider("完成")
+    team = ReadOnlySubagentTeam(
+        make_agent(tmp_path, lead, writable=True),
+        {
+            "a": make_agent(tmp_path, p1),
+            "b": make_agent(tmp_path, p2),
+        },
+    )
+    result = team.run(
+        "task",
+        (
+            SubagentAssignment("a", "role", "同一个只读分析"),
+            SubagentAssignment("b", "role", "同一个只读分析"),
+        ),
+    )
+    assert p1.messages and not p2.messages
+    blocked = result.dispatch["blocked_assignments"]
+    assert blocked == [{"name": "b", "duplicate_of": "a", "work_key": blocked[0]["work_key"]}]
+    assert [item.name for item in result.subagents] == ["a"]
+    assert result.dispatch["duplicate_assignments_blocked"] == 1
+    assert result.usage["total_tokens"] == 30
+
+
+def test_independent_check_policy_allows_intentional_redundancy(tmp_path):
+    """independent_check 允许重复运行，但必须显式记为有意冗余。"""
+    p1 = RecordingProvider("结论一")
+    p2 = RecordingProvider("结论二")
+    lead = RecordingProvider("完成")
+    team = ReadOnlySubagentTeam(
+        make_agent(tmp_path, lead, writable=True),
+        {
+            "a": make_agent(tmp_path, p1),
+            "b": make_agent(tmp_path, p2),
+        },
+    )
+    result = team.run(
+        "task",
+        (
+            SubagentAssignment("a", "role", "同一只读分析"),
+            SubagentAssignment("b", "role", "同一只读分析", redundancy_policy="independent_check"),
+        ),
+    )
+    assert p1.messages and p2.messages
+    assert [item.name for item in result.subagents] == ["a", "b"]
+    intentional = result.dispatch["intentional_redundancy"]
+    assert intentional == [
+        {"name": "b", "duplicate_of": "a", "work_key": intentional[0]["work_key"]}
+    ]
+    assert result.dispatch["duplicate_assignments_blocked"] == 0
+    assert result.dispatch["intentional_redundancy_runs"] == 1
+
+
+def test_team_finding_dedup_collapses_identical_conclusions(tmp_path):
+    """交接阶段折叠完全相同的结论，只保留一条，并报告折叠数量。"""
+    lead = RecordingProvider("完成")
+    team = ReadOnlySubagentTeam(
+        make_agent(tmp_path, lead, writable=True),
+        {
+            "a": make_agent(tmp_path, RecordingProvider("相同结论")),
+            "b": make_agent(tmp_path, RecordingProvider("相同结论  ")),
+        },
+    )
+    result = team.run(
+        "task",
+        (
+            SubagentAssignment("a", "role", "task-a"),
+            SubagentAssignment("b", "role", "task-b"),
+        ),
+    )
+    assert result.dispatch["duplicate_findings_collapsed"] == 1
+    assert result.dispatch["handoff_artifact_count"] == 1
+    assert "相同结论" in lead.messages[0][-1]["content"]
+
+
+def test_team_rejects_unknown_redundancy_policy(tmp_path):
+    """未知策略必须 fail closed，不能默默当成 unique 或 independent_check。"""
+    with pytest.raises(ValueError, match="redundancy_policy"):
+        SubagentAssignment("a", "role", "task", redundancy_policy="whatever")
+
+
+def test_team_emits_dispatch_and_handoff_trace_events(tmp_path):
+    """派发、拦截、发现折叠与交接必须在 leader Trace 上留下可审计事件。"""
+    from evaluation.report import read_trace
+    from persistence.trace import TraceWriter
+
+    trace_path = tmp_path / "trace-leader.jsonl"
+    lead = make_agent(tmp_path, RecordingProvider("完成"), writable=True)
+    lead.trace = TraceWriter(trace_path)
+    team = ReadOnlySubagentTeam(
+        lead,
+        {
+            "a": make_agent(tmp_path, RecordingProvider("相同结论")),
+            "b": make_agent(tmp_path, RecordingProvider("相同结论")),
+            "c": make_agent(tmp_path, RecordingProvider("相同结论")),
+        },
+    )
+    team.run(
+        "task",
+        (
+            SubagentAssignment("a", "role", "same task"),
+            SubagentAssignment("b", "role", "same task"),
+            SubagentAssignment("c", "role", "same task", redundancy_policy="independent_check"),
+        ),
+    )
+    events, _issues = read_trace(trace_path)
+    names = [row["event"] for row in events]
+    assert "subagent_scheduled" in names
+    assert "subagent_completed" in names
+    assert "duplicate_assignment_blocked" in names
+    assert "intentional_redundancy_allowed" in names
+    assert "duplicate_finding_collapsed" in names
+    assert "subagent_handoff_completed" in names

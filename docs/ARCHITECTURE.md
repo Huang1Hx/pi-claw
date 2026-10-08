@@ -79,6 +79,12 @@ Router 按 profile.model 填写请求；共享连接时不更换 Key，独立连
 `ReadOnlySubagentTeam` 可让多个独立子 Agent 在单宿主线程池中并行只读探索，等待屏障后把有界、
 不可信的公开结论交给唯一可写主 Agent。子 Agent 禁止命令和写入；各自使用独立 Provider、上下文
 和 Trace，总 Token 汇总主从及返工。该能力不是跨机器分布式调度。
+
+派发前按任务清单去重：`SubagentAssignment` 可用 `objective`、`scope`、`deliverable` 计算稳定
+`work_key`，相同工作键在 `unique` 策略下只运行一个、其余记 `duplicate_assignment_blocked`，
+不调用模型；显式 `independent_check` 的独立复核被允许并记 `intentional_redundancy_allowed`。
+被拦截的子 Agent 不产生 Trace，因此评测的参与者预期按实际派发集合推导，而不是硬编码名称。
+交接阶段再按 finding 指纹折叠相同结论。去重只减少无意重复，不改并发模型，也不引入共享记忆。
 Eval 使用本机线程并发独立 case。SessionStore 文件锁只覆盖本地存储临界区，
 不在等待模型时持有。当前没有分布式调度。命令执行可显式选择 Docker 隔离后端，但 Docker
 不是虚拟机；Host 兼容后端不提供 OS 沙箱。

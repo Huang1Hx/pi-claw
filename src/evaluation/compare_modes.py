@@ -95,6 +95,34 @@ def worker_deadline_seconds(parent_deadline_seconds: float) -> float:
     return max(1.0, parent_deadline_seconds - WORKER_CLEANUP_RESERVE_SECONDS)
 
 
+def team_assignments() -> tuple[SubagentAssignment, ...]:
+    """主从模式的两份子 Agent 任务清单：scope 相同但交付物不同，因此不是重复任务。
+
+    派发前去重按 ``work_key`` 判定；这里显式给出 ``objective`` 与 ``deliverable``，
+    避免两份分析被误判为无意重复。
+    """
+    return (
+        SubagentAssignment(
+            "implementation",
+            "实现分析",
+            "只读检查 SPEC.md、solution.py 和 test_target.py。定位实现缺陷，"
+            "给主 Agent 一份具体修改建议；不得写文件或运行命令。",
+            objective="分析当前 solution.py 的实现缺陷",
+            scope=("SPEC.md", "solution.py", "test_target.py"),
+            deliverable="implementation_advice",
+        ),
+        SubagentAssignment(
+            "risks",
+            "边界与测试分析",
+            "独立只读检查 SPEC.md、solution.py 和 test_target.py。推导公开测试之外的"
+            "高风险边界与回归点；不得写文件或运行命令。",
+            objective="分析当前 solution.py 的实现缺陷",
+            scope=("SPEC.md", "solution.py", "test_target.py"),
+            deliverable="risk_and_edge_cases",
+        ),
+    )
+
+
 def save_json(path: Path, data) -> None:
     """所有评测产物统一脱敏；Settings、Key 与 URL 不进入报告。"""
     path.write_text(json.dumps(redact(data), ensure_ascii=False, indent=2) + "\n")
@@ -1230,34 +1258,17 @@ def worker(args) -> None:
             {"implementation": implementation, "risks": risks},
             max_workers=2,
         )
-        result = team.run(
-            prompt,
-            (
-                SubagentAssignment(
-                    "implementation",
-                    "实现分析",
-                    "只读检查 SPEC.md、solution.py 和 test_target.py。定位实现缺陷，"
-                    "给主 Agent 一份具体修改建议；不得写文件或运行命令。",
-                ),
-                SubagentAssignment(
-                    "risks",
-                    "边界与测试分析",
-                    "独立只读检查 SPEC.md、solution.py 和 test_target.py。推导公开测试之外的"
-                    "高风险边界与回归点；不得写文件或运行命令。",
-                ),
-            ),
-            control=control,
-        )
+        result = team.run(prompt, team_assignments(), control=control)
         payload = {"mode": args.mode, **result.to_dict()}
     payload["duration_seconds"] = round(time.monotonic() - started, 3)
     save_json(folder / "run-result.json", payload)
 
 
-def _events(folder: Path, mode: str) -> tuple[list[dict], list[dict]]:
+def _events(folder: Path, mode: str, result: dict | None = None) -> tuple[list[dict], list[dict]]:
     """读取所有参与者 Trace，给每条事件补 participant；损坏项不阻断其他 Trace。"""
     events, issues = [], []
     paths = sorted(folder.glob("trace-*.jsonl"))
-    expected = _expected_participants(mode)
+    expected = _expected_participants(mode, result)
     found = {path.stem.removeprefix("trace-") for path in paths}
     for participant in sorted(expected - found):
         issues.append({"participant": participant, "line": None, "error": "trace missing"})
@@ -1275,15 +1286,26 @@ def _events(folder: Path, mode: str) -> tuple[list[dict], list[dict]]:
     return events, issues
 
 
-def _expected_participants(mode: str) -> set[str]:
-    """顺序工作流仍是一个 Agent；主从模式有一个 leader 和两个独立子 Agent。"""
+def _expected_participants(mode: str, result: dict | None = None) -> set[str]:
+    """按实际派发集合推导参与者；被去重拦截的子 Agent 不产生 Trace 也不计入预期。
+
+    单 Agent 与顺序工作流仍只有一个 leader。主从模式优先读取 run-result 的
+    ``dispatch.dispatched_assignments``；缺失时退回 mode 的确定性默认集合，保持
+    旧产物与既有回归兼容。
+    """
     expected = {"leader"}
-    if mode == "team":
+    if mode != "team":
+        return expected
+    dispatch = result.get("dispatch") if isinstance(result, dict) else None
+    dispatched = dispatch.get("dispatched_assignments") if isinstance(dispatch, dict) else None
+    if isinstance(dispatched, list) and all(isinstance(name, str) for name in dispatched):
+        expected |= {f"subagent-{name}" for name in dispatched}
+    else:
         expected |= {"subagent-implementation", "subagent-risks"}
     return expected
 
 
-def _partial_usage(events: list[dict], mode: str) -> dict:
+def _partial_usage(events: list[dict], mode: str, result: dict | None = None) -> dict:
     """worker 被期限/中断终止时，从每个 Trace 最后一次累计值恢复已知 Token。"""
     latest = {}
     for event in events:
@@ -1300,7 +1322,7 @@ def _partial_usage(events: list[dict], mode: str) -> dict:
     )
     total = {key: sum(int(row.get(key, 0)) for row in latest.values()) for key in keys}
     # 没有完整 run-result 就无法确认被终止瞬间的在途请求；未知量绝不按已知零处理。
-    total["unknown_participants"] = len(_expected_participants(mode))
+    total["unknown_participants"] = len(_expected_participants(mode, result))
     return total
 
 
@@ -1414,7 +1436,7 @@ def build_trial_report(folder: Path, metadata: dict) -> dict:
     except (OSError, ValueError, KeyError, TypeError):
         result = {"leader": {"status": "harness_error"}, "usage": None, "subagents": []}
         leader = result["leader"]
-    events, trace_issues = _events(folder, metadata["mode"])
+    events, trace_issues = _events(folder, metadata["mode"], result)
     checks = grade(metadata["task"], folder / "workspace", leader["status"])
     checks.insert(
         2,
@@ -1474,7 +1496,7 @@ def build_trial_report(folder: Path, metadata: dict) -> dict:
     usage = result.get("usage")
     usage_source = "run_result"
     if usage is None:
-        usage = _partial_usage(events, metadata["mode"])
+        usage = _partial_usage(events, metadata["mode"], result)
         usage_source = "partial_trace"
     else:
         usage = _reconcile_usage(result, usage)
@@ -1498,7 +1520,25 @@ def build_trial_report(folder: Path, metadata: dict) -> dict:
         "models_used": models,
         "model_requests": model_requests,
         "model_usage": model_usage,
-        "participants": len(_expected_participants(metadata["mode"])),
+        "participants": len(_expected_participants(metadata["mode"], result)),
+        "dispatch": result.get("dispatch") or {},
+        "duplicate_assignments_detected": int(
+            (result.get("dispatch") or {}).get("duplicate_assignments_detected", 0)
+        ),
+        "duplicate_assignments_blocked": int(
+            (result.get("dispatch") or {}).get("duplicate_assignments_blocked", 0)
+        ),
+        "intentional_redundancy_runs": int(
+            (result.get("dispatch") or {}).get("intentional_redundancy_runs", 0)
+        ),
+        "duplicate_findings_collapsed": int(
+            (result.get("dispatch") or {}).get("duplicate_findings_collapsed", 0)
+        ),
+        "handoff_artifact_count": int(
+            (result.get("dispatch") or {}).get(
+                "handoff_artifact_count", len(result.get("subagents", []))
+            )
+        ),
         "max_parallel_subagents": result.get("max_parallel_subagents", 0),
         "tool_calls": len(tool_results),
         "unauthorized_attempts": len(unauthorized),
@@ -1613,6 +1653,19 @@ def summarize(rows: list[dict], *, premium_model: str | None = None) -> dict:
         "write_conflicts": sum(row["write_conflicts"] for row in rows),
         "rework_events": sum(row["rework_events"] for row in rows),
         "max_parallel_subagents": max(row["max_parallel_subagents"] for row in rows),
+        "duplicate_assignments_detected": sum(
+            row.get("duplicate_assignments_detected", 0) for row in rows
+        ),
+        "duplicate_assignments_blocked": sum(
+            row.get("duplicate_assignments_blocked", 0) for row in rows
+        ),
+        "intentional_redundancy_runs": sum(
+            row.get("intentional_redundancy_runs", 0) for row in rows
+        ),
+        "duplicate_findings_collapsed": sum(
+            row.get("duplicate_findings_collapsed", 0) for row in rows
+        ),
+        "handoff_artifact_count": sum(row.get("handoff_artifact_count", 0) for row in rows),
     }
 
 

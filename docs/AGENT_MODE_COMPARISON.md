@@ -18,7 +18,9 @@ Token 同时属于工作流总消耗，不能重复相加。意图分类在本�
 调用任何模型。
 
 `team` 不是分布式系统：当前实现在单宿主线程池中运行，每个参与者拥有独立 Agent、Provider、
-上下文和 Trace。两个子 Agent 结束后主 Agent 才启动，因此不存在多个写者并发修改。子 Agent
+上下文和 Trace。两个子 Agent 结束后主 Agent 才启动，因此不存在多个写者并发修改。派发前按
+`work_key` 去重，无意重复只运行一次；`implementation` 与 `risks` 范围相同但交付物不同，因此
+不会被误判为重复。子 Agent
 产物按不可信数据交接，单份有字符上限；主 Agent 必须重新核对文件。SessionStore 的文件锁没有
 被用作多 Agent 调度锁，当前也不宣称跨进程/跨机器容错。
 
