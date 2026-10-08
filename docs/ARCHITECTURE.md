@@ -85,6 +85,10 @@ Router 按 profile.model 填写请求；共享连接时不更换 Key，独立连
 不调用模型；显式 `independent_check` 的独立复核被允许并记 `intentional_redundancy_allowed`。
 被拦截的子 Agent 不产生 Trace，因此评测的参与者预期按实际派发集合推导，而不是硬编码名称。
 交接阶段再按 finding 指纹折叠相同结论。去重只减少无意重复，不改并发模型，也不引入共享记忆。
+每个子 Agent 还可派生独立截止时间：`min(外层剩余, now + 超时)`，并共享外层取消信号，因此单个
+子 Agent 超时或失败不会拖垮其余子 Agent。超时/失败时主 Agent 仍收到其余已完成结论（部分交接），
+超时项在交接产物中显式标记 `timed_out`，绝不伪装成正常结论；总 Token 继续含失败/超时项已产生
+的用量。外层取消仍同时停止全部子 Agent 与主 Agent。
 Eval 使用本机线程并发独立 case。SessionStore 文件锁只覆盖本地存储临界区，
 不在等待模型时持有。当前没有分布式调度。命令执行可显式选择 Docker 隔离后端，但 Docker
 不是虚拟机；Host 兼容后端不提供 OS 沙箱。

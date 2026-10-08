@@ -1539,6 +1539,9 @@ def build_trial_report(folder: Path, metadata: dict) -> dict:
                 "handoff_artifact_count", len(result.get("subagents", []))
             )
         ),
+        "subagent_timeouts": int((result.get("dispatch") or {}).get("subagent_timeouts", 0)),
+        "failed_subagents": int((result.get("dispatch") or {}).get("failed_subagents", 0)),
+        "partial_handoff": bool((result.get("dispatch") or {}).get("partial_handoff", False)),
         "max_parallel_subagents": result.get("max_parallel_subagents", 0),
         "tool_calls": len(tool_results),
         "unauthorized_attempts": len(unauthorized),
@@ -1666,6 +1669,9 @@ def summarize(rows: list[dict], *, premium_model: str | None = None) -> dict:
             row.get("duplicate_findings_collapsed", 0) for row in rows
         ),
         "handoff_artifact_count": sum(row.get("handoff_artifact_count", 0) for row in rows),
+        "subagent_timeouts": sum(row.get("subagent_timeouts", 0) for row in rows),
+        "failed_subagents": sum(row.get("failed_subagents", 0) for row in rows),
+        "partial_handoff_trials": sum(1 for row in rows if row.get("partial_handoff")),
     }
 
 

@@ -58,3 +58,4 @@ Iteration 001–005 保留当时的路径与验证命令，不回写历史记录
 后续合并 `main` 或推送远程按用户指令执行。
 
 [Iteration 028](ITERATION_028_SUBAGENT_ASSIGNMENT_DEDUP.md)：子 Agent 任务去重与发现合并。
+[Iteration 029](ITERATION_029_SUBAGENT_ISOLATION.md)：子 Agent 独立超时与部分交接。

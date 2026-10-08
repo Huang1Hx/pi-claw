@@ -858,3 +858,51 @@ def test_dispatched_team_assignments_have_no_duplicates():
     assert [item.name for item in items] == ["implementation", "risks"]
     assert {item.redundancy_policy for item in items} == {"unique"}
     assert len({item.work_key for item in items}) == len(items)
+
+
+def test_partial_handoff_metrics_surface_in_trial_report(tmp_path):
+    """子 Agent 超时/失败与部分交接必须进入报告，而不是被静默吞掉。"""
+    result = {
+        "leader": {"status": "completed"},
+        "subagents": [{"name": "implementation"}, {"name": "risks"}],
+        "usage": {
+            "prompt_tokens": 30,
+            "completion_tokens": 6,
+            "total_tokens": 36,
+            "requests": 3,
+            "requests_with_usage": 3,
+            "requests_without_usage": 0,
+            "retries": 0,
+            "unknown_participants": 0,
+        },
+        "duration_seconds": 2.0,
+        "max_parallel_subagents": 2,
+        "dispatch": {
+            "scheduled_assignments": ["implementation", "risks"],
+            "dispatched_assignments": ["implementation", "risks"],
+            "duplicate_assignments_detected": 0,
+            "duplicate_assignments_blocked": 0,
+            "blocked_assignments": [],
+            "intentional_redundancy_runs": 0,
+            "intentional_redundancy": [],
+            "duplicate_findings_collapsed": 0,
+            "handoff_artifact_count": 2,
+            "subagent_timeouts": 1,
+            "timed_out_assignments": ["risks"],
+            "failed_subagents": 1,
+            "failed_assignments": ["risks"],
+            "partial_handoff": True,
+        },
+    }
+    folder = _trial(tmp_path, mode="team")
+    (folder / "run-result.json").write_text(json.dumps(result))
+    report = build_trial_report(
+        folder,
+        {"mode": "team", "task": "inventory_reservation", "trial": 1, "duration_seconds": 2},
+    )
+    assert report["subagent_timeouts"] == 1
+    assert report["failed_subagents"] == 1
+    assert report["partial_handoff"] is True
+    summary = summarize([report])
+    assert summary["subagent_timeouts"] == 1
+    assert summary["partial_handoff_trials"] == 1

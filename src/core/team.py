@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 from core.agent import Agent
 from core.control import ExecutionControl
-from core.schemas import RunResult
+from core.schemas import RunResult, RunStatus
 
 REDUNDANCY_POLICIES = ("unique", "independent_check")
 
@@ -33,10 +33,17 @@ class SubagentAssignment:
     scope: tuple[str, ...] = ()
     deliverable: str = ""
     redundancy_policy: str = "unique"
+    timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if self.redundancy_policy not in REDUNDANCY_POLICIES:
             raise ValueError(f"未知 redundancy_policy：{self.redundancy_policy!r}")
+        if self.timeout_seconds is not None and (
+            isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, (int, float))
+            or self.timeout_seconds <= 0
+        ):
+            raise ValueError("timeout_seconds 必须是正数或 None")
 
     @property
     def work_key(self) -> str:
@@ -56,6 +63,7 @@ class SubagentOutcome:
     role: str
     result: RunResult
     duration_seconds: float
+    timed_out: bool = False
 
     def artifact(self, max_chars: int) -> dict:
         """构造不可信数据形式的交接产物，并限制单个子 Agent 占用主上下文。"""
@@ -67,6 +75,7 @@ class SubagentOutcome:
             "run_id": self.result.run_id,
             "finding": text[:max_chars],
             "truncated": len(text) > max_chars,
+            "timed_out": self.timed_out,
         }
 
 
@@ -81,6 +90,7 @@ class TeamRunResult:
     duration_seconds: float
     max_parallel_subagents: int
     dispatch: dict = field(default_factory=dict)
+    handoff_artifacts: tuple[dict, ...] = ()
 
     def to_dict(self) -> dict:
         """输出可审计汇总；已知 Token 与缺失 usage 参与方分开记录。"""
@@ -88,6 +98,7 @@ class TeamRunResult:
             "team_id": self.team_id,
             "leader": self.leader.to_dict(),
             "dispatch": self.dispatch,
+            "handoff_artifacts": list(self.handoff_artifacts),
             "subagents": [
                 {
                     "name": item.name,
@@ -113,6 +124,7 @@ class ReadOnlySubagentTeam:
         *,
         max_workers: int = 2,
         max_artifact_chars: int = 6000,
+        subagent_timeout_seconds: float | None = None,
     ) -> None:
         """检查实例、权限与预算；禁止复用同一个 Agent 冒充多个参与者。"""
         if not subagents or len(subagents) > 8:
@@ -121,6 +133,12 @@ class ReadOnlySubagentTeam:
             raise ValueError("max_workers 必须为 1 到子 Agent 数量")
         if type(max_artifact_chars) is not int or not 100 <= max_artifact_chars <= 16000:
             raise ValueError("max_artifact_chars 必须为 100–16000")
+        if subagent_timeout_seconds is not None and (
+            isinstance(subagent_timeout_seconds, bool)
+            or not isinstance(subagent_timeout_seconds, (int, float))
+            or subagent_timeout_seconds <= 0
+        ):
+            raise ValueError("subagent_timeout_seconds 必须是正数或 None")
         agents = [leader, *subagents.values()]
         if len({id(agent) for agent in agents}) != len(agents):
             raise ValueError("主 Agent 与子 Agent 必须是独立实例")
@@ -132,6 +150,7 @@ class ReadOnlySubagentTeam:
         self.subagents = dict(subagents)
         self.max_workers = max_workers
         self.max_artifact_chars = max_artifact_chars
+        self.subagent_timeout_seconds = subagent_timeout_seconds
 
     @staticmethod
     def _usage(results: list[RunResult]) -> dict:
@@ -155,6 +174,26 @@ class ReadOnlySubagentTeam:
                 total[key] += int(result.usage.get(key, 0))
         total["unknown_participants"] = unknown_participants
         return total
+
+    def _child_control(
+        self, parent: ExecutionControl | None, item: SubagentAssignment
+    ) -> ExecutionControl | None:
+        """为子 Agent 派生独立截止时间：min(外层剩余, now + 超时)，共享外层取消信号。"""
+        timeout = (
+            item.timeout_seconds
+            if item.timeout_seconds is not None
+            else self.subagent_timeout_seconds
+        )
+        if timeout is None:
+            return parent
+        clock = time.monotonic
+        deadline = clock() + float(timeout)
+        cancel_event = parent.cancel_event if parent is not None else threading.Event()
+        if parent is not None:
+            remaining = parent.remaining_seconds()
+            if remaining is not None:
+                deadline = min(deadline, clock() + remaining)
+        return ExecutionControl(deadline_monotonic=deadline, cancel_event=cancel_event)
 
     def _record(self, event: str, payload: dict) -> None:
         """把团队级派发/交接事件写到主 Agent 的 Trace；没有 Trace 时静默跳过。"""
@@ -224,11 +263,21 @@ class ReadOnlySubagentTeam:
                 active += 1
                 peak = max(peak, active)
             child_started = time.monotonic()
+            child_control = self._child_control(control, item)
             self._record("subagent_started", {"name": item.name, "role": item.role})
             try:
-                result = active_subagents[item.name].run(item.task, control=control)
+                result = active_subagents[item.name].run(item.task, control=child_control)
+                timed_out = result.status is RunStatus.DEADLINE and (
+                    child_control is not None and (control is None or child_control is not control)
+                )
+                if timed_out:
+                    self._record("subagent_timed_out", {"name": item.name})
                 outcome = SubagentOutcome(
-                    item.name, item.role, result, round(time.monotonic() - child_started, 3)
+                    item.name,
+                    item.role,
+                    result,
+                    round(time.monotonic() - child_started, 3),
+                    timed_out,
                 )
                 self._record(
                     "subagent_completed",
@@ -281,6 +330,9 @@ class ReadOnlySubagentTeam:
             {"team_id": team_id, "artifact_count": len(artifacts), "collapsed": collapsed},
         )
         leader_result = self.leader.run(leader_task, control=control)
+        timeouts = [item.name for item in outcomes if item.timed_out]
+        failed = [item.name for item in outcomes if not item.result.ok]
+        successful = [item.name for item in outcomes if item.result.ok]
         dispatch = {
             "scheduled_assignments": [item.name for item in assignments],
             "dispatched_assignments": [item.name for item in dispatch_items],
@@ -291,6 +343,11 @@ class ReadOnlySubagentTeam:
             "intentional_redundancy": intentional,
             "duplicate_findings_collapsed": collapsed,
             "handoff_artifact_count": len(artifacts),
+            "subagent_timeouts": len(timeouts),
+            "timed_out_assignments": timeouts,
+            "failed_subagents": len(failed),
+            "failed_assignments": failed,
+            "partial_handoff": bool(failed) and bool(successful),
         }
         return TeamRunResult(
             team_id=team_id,
@@ -300,4 +357,5 @@ class ReadOnlySubagentTeam:
             duration_seconds=round(time.monotonic() - started, 3),
             max_parallel_subagents=peak,
             dispatch=dispatch,
+            handoff_artifacts=tuple(artifacts),
         )

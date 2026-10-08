@@ -283,3 +283,56 @@ def test_team_emits_dispatch_and_handoff_trace_events(tmp_path):
     assert "intentional_redundancy_allowed" in names
     assert "duplicate_finding_collapsed" in names
     assert "subagent_handoff_completed" in names
+
+
+class SlowProvider:
+    """按给定秒数阻塞一次，用于确定性触发子 Agent 独立超时。"""
+
+    def __init__(self, text, delay):
+        self.text = text
+        self.delay = delay
+        self.calls = 0
+
+    def complete(self, messages, tools=None):
+        self.calls += 1
+        time.sleep(self.delay)
+        return ModelReply(final_text=self.text, usage=TokenUsage(10, 5, 15))
+
+
+def test_subagent_timeout_is_isolated_and_allows_partial_handoff(tmp_path):
+    """一个子 Agent 超时不拖垮其余：主 Agent 仍运行并收到完成项。"""
+    slow = SlowProvider("太慢", 0.3)
+    fast = RecordingProvider("快速结论")
+    lead = RecordingProvider("完成")
+    team = ReadOnlySubagentTeam(
+        make_agent(tmp_path, lead, writable=True),
+        {
+            "slow": make_agent(tmp_path, slow),
+            "fast": make_agent(tmp_path, fast),
+        },
+        max_workers=2,
+    )
+    result = team.run(
+        "task",
+        (
+            SubagentAssignment("slow", "role", "task-slow", timeout_seconds=0.05),
+            SubagentAssignment("fast", "role", "task-fast"),
+        ),
+    )
+    statuses = {item.name: item.result.status for item in result.subagents}
+    assert statuses["slow"] is RunStatus.DEADLINE
+    assert statuses["fast"] is RunStatus.COMPLETED
+    assert result.leader.ok
+    assert result.dispatch["subagent_timeouts"] == 1
+    assert result.dispatch["partial_handoff"] is True
+    leader_prompt = lead.messages[0][-1]["content"]
+    assert "快速结论" in leader_prompt
+    # 超时项的交接产物必须显式标记，不能伪装成正常结论。
+    timeout_artifact = next(item for item in result.handoff_artifacts if item["name"] == "slow")
+    assert timeout_artifact["timed_out"] is True
+
+
+def test_subagent_timeout_rejects_non_positive_value(tmp_path):
+    """非正超时必须 fail closed，避免 0 或负数被当成无限等待或立即超时。"""
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        SubagentAssignment("a", "role", "task", timeout_seconds=0)
