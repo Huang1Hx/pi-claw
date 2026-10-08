@@ -3,6 +3,8 @@ name = "pi-claw"
 version = "0.1.0"
 description = "可审计、可回放、权限受控的本地 Coding Agent"
 readme = "README.MD"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = ["prompt-toolkit>=3.0.52,<4"]
 

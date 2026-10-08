@@ -234,5 +234,9 @@ uv build --no-config
 - [变更与集成流程](CONTRIBUTING.md)
 - [迭代记录](docs/iterations/README.md)
 
+## 许可证
+
+本项目以 [MIT 许可证](LICENSE) 发布。
+
 本轮目录和运行时边界参考 [pichu](https://github.com/yeabwang/pichu) 的模块划分，
 基于原有 Pi-Claw 实现独立演进，取舍与能力对照见迭代记录。

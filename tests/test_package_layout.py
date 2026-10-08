@@ -63,3 +63,46 @@ def test_module_and_console_help_outside_workspace(tmp_path: Path) -> None:
         assert completed.returncode == 0, completed.stderr
         assert "eval-routing" in completed.stdout
         assert "chat" in completed.stdout
+
+
+def test_repository_declares_mit_license() -> None:
+    """公开仓库必须有 LICENSE 文件，并在包元数据里声明同样的许可证。"""
+    license_file = PROJECT_ROOT / "LICENSE"
+    assert license_file.is_file()
+    text = license_file.read_text(encoding="utf-8")
+    assert "MIT License" in text
+    assert "Permission is hereby granted" in text
+    config = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert config["project"]["license"] == "MIT"
+    assert "LICENSE" in config["project"]["license-files"]
+    assert "## 许可证" in (PROJECT_ROOT / "README.MD").read_text(encoding="utf-8")
+
+
+def test_general_ci_workflow_covers_required_gates() -> None:
+    """通用 CI 必须在推送/PR 上运行 Lint、格式、编译、测试与构建，且权限只读。"""
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    for fragment in (
+        "push:",
+        "pull_request:",
+        "main",
+        "optimize",
+        "uv sync --frozen --all-groups",
+        "ruff check src tests",
+        "ruff format --check src tests",
+        "compileall",
+        "pytest",
+        "uv build --no-config",
+        "permissions:",
+        "contents: read",
+    ):
+        assert fragment in workflow, fragment
+
+
+def test_sandbox_workflow_is_separate_from_general_ci() -> None:
+    """沙箱安全门与通用 CI 分工不同，不能互相吞并导致覆盖缺失。"""
+    workflows = {
+        path.name
+        for path in (PROJECT_ROOT / ".github" / "workflows").iterdir()
+        if path.suffix in {".yml", ".yaml"}
+    }
+    assert {"ci.yml", "sandbox.yml"} <= workflows
