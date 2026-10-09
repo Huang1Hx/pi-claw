@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from evaluation.mode_holdout_tasks import ALL_TASKS
 from evaluation.mode_reports import trial_identity
-from evaluation.mode_tasks import TASKS
 from evaluation.report import read_trace
 from persistence.trace import TRUNCATED, redact
 
@@ -232,7 +232,7 @@ def prepare_repair_workspace(job: RepairJob, destination: Path) -> Path:
     """从任务目录重建 fixture，并且只从父 trial 继承 solution.py。"""
     destination = destination.resolve()
     destination.mkdir(parents=True, exist_ok=False)
-    for name, content in TASKS[job.task].files.items():
+    for name, content in ALL_TASKS[job.task].files.items():
         (destination / name).write_text(content)
     (destination / "solution.py").write_text(job.source_solution.read_text())
     return destination

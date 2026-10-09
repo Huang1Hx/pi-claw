@@ -45,7 +45,7 @@ def _prompt(title: str) -> str:
     )
 
 
-def _build_task(task_id: str, definition: dict) -> ModeTask:
+def build_task(task_id: str, definition: dict) -> ModeTask:
     """从只含静态数据的目录构造任务，并集中补齐公平性提示。"""
     return ModeTask(
         task_id=task_id,
@@ -63,5 +63,5 @@ def _build_task(task_id: str, definition: dict) -> ModeTask:
 
 # 字典顺序即真实评测运行顺序；各模式和各重复试验共享这一顺序。
 TASKS = {
-    task_id: _build_task(task_id, definition) for task_id, definition in TASK_DEFINITIONS.items()
+    task_id: build_task(task_id, definition) for task_id, definition in TASK_DEFINITIONS.items()
 }

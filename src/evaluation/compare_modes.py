@@ -41,6 +41,7 @@ from evaluation.mode_diagnostic import (
     summarize_diagnostic_results,
 )
 from evaluation.mode_grading import GRADER_VERSION, calibrate, grade, safe_functions
+from evaluation.mode_holdout_tasks import ALL_TASKS, HOLDOUT_TASKS
 from evaluation.mode_repair import (
     RepairJob,
     build_repair_evidence,
@@ -1069,7 +1070,7 @@ def combine_resumed_reports(source_report: dict, replacements: list[dict]) -> li
 
 def approval_for(task_id: str, workspace: Path):
     """唯一写者只可修改 solution.py，并仅可执行固定公开测试。"""
-    task = TASKS[task_id]
+    task = ALL_TASKS[task_id]
 
     def approve(call, decision, preview=None):
         """Policy 的 DENY 不会进入回调；这里进一步收窄允许副作用。"""
@@ -1149,7 +1150,7 @@ def worker(args) -> None:
     """在 trial 子进程内运行一种架构；每个 Agent 都有独立 Provider、上下文和 Trace。"""
     folder = args.output.resolve()
     workspace = folder / "workspace"
-    task = TASKS[args.worker]
+    task = ALL_TASKS[args.worker]
     prompt = task.prompt
     if args.worker_prompt_file:
         prompt_path = args.worker_prompt_file.resolve()
@@ -1725,16 +1726,16 @@ def run_trial(
     folder.mkdir(parents=True)
     workspace = folder / "workspace"
     workspace.mkdir()
-    for name, content in TASKS[task_id].files.items():
+    for name, content in ALL_TASKS[task_id].files.items():
         (workspace / name).write_text(content)
     if seed_solution is not None:
         (workspace / "solution.py").write_text(seed_solution)
-    task_prompt = prompt or TASKS[task_id].prompt
+    task_prompt = prompt or ALL_TASKS[task_id].prompt
     save_json(
         folder / "task.json",
         {
             "task": task_id,
-            "title": TASKS[task_id].title,
+            "title": ALL_TASKS[task_id].title,
             "prompt": task_prompt,
             **({trial_metadata_label: trial_metadata} if trial_metadata is not None else {}),
         },
@@ -2095,15 +2096,28 @@ def main() -> int:
         default=10.0,
         help="单次重试等待上限秒数，也用于限制 Retry-After",
     )
-    parser.add_argument("--task", choices=tuple(TASKS), action="append")
+    parser.add_argument("--task", choices=tuple(ALL_TASKS), action="append")
     parser.add_argument("--mode", choices=MODES, action="append")
-    parser.add_argument("--worker", choices=tuple(TASKS), help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--holdout",
+        action="store_true",
+        help="只运行实现冻结后加入的新任务 holdout 集合",
+    )
+    parser.add_argument("--worker", choices=tuple(ALL_TASKS), help=argparse.SUPPRESS)
     parser.add_argument("--worker-prompt-file", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if not 1 <= args.max_attempts <= 10:
         parser.error("max-attempts 为 1–10")
     if not 0 <= args.retry_base_delay <= args.max_retry_delay <= 60:
         parser.error("重试等待须满足 0 <= retry-base-delay <= max-retry-delay <= 60")
+    if args.holdout and (
+        args.resume_from
+        or args.resume_repair_from
+        or args.repair_from
+        or args.diagnostic_from
+        or args.continue_diagnostic_from
+    ):
+        parser.error("--holdout 只能用于全新 live 批次，不能与续跑/修复/诊断组合")
     if args.worker:
         args.mode = args.mode[0]
         worker(args)
@@ -2269,15 +2283,17 @@ def main() -> int:
         args.deadline = int(source_report["deadline_seconds"])
         args.max_steps = int(source_report["max_steps"])
     else:
+        if args.holdout and args.task:
+            parser.error("--holdout 已选定新任务集，不能同时指定 --task")
         modes = list(dict.fromkeys(args.mode or MODES))
-        tasks = list(dict.fromkeys(args.task or TASKS))
+        tasks = list(dict.fromkeys(args.task or (HOLDOUT_TASKS if args.holdout else TASKS)))
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=False)
-    calibration = calibrate()
+    calibration = calibrate(task_ids=tasks)
     save_json(args.output / "grader-calibration.json", calibration)
     if not calibration["passed"]:
         raise RuntimeError("评分器校准失败，停止真实模型请求")
-    print(f"[校准] {len(TASKS)} 项参考实现通过，初始缺陷均被隐藏用例检出。", flush=True)
+    print(f"[校准] {len(tasks)} 项参考实现通过，初始缺陷均被隐藏用例检出。", flush=True)
     if not args.live:
         print("未指定 --live：未调用模型。", flush=True)
         return 0

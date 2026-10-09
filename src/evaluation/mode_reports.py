@@ -7,7 +7,7 @@ from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
 
-from evaluation.mode_tasks import TASKS
+from evaluation.mode_holdout_tasks import ALL_TASKS
 
 MODES = ("single", "workflow", "team")
 COMPATIBILITY_FIELDS = (
@@ -22,7 +22,7 @@ COMPATIBILITY_FIELDS = (
 def trial_identity(row: dict) -> tuple[str, str, int]:
     """解析受信 trial 身份；拒绝路径穿越、未知任务和布尔型 trial。"""
     mode, task, trial = row.get("mode"), row.get("task"), row.get("trial")
-    if mode not in MODES or task not in TASKS or type(trial) is not int or not 1 <= trial <= 5:
+    if mode not in MODES or task not in ALL_TASKS or type(trial) is not int or not 1 <= trial <= 5:
         raise ValueError("无效的 trial 身份")
     return mode, task, trial
 

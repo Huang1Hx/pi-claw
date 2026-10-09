@@ -7,13 +7,14 @@ from copy import deepcopy
 from pathlib import Path
 
 from evaluation.mode_cases import HIDDEN_CASES
+from evaluation.mode_holdout_tasks import ALL_TASKS
 from evaluation.mode_tasks import TASKS
 
 GRADER_VERSION = "agent-modes-2.2"
 ALLOWED_CALLS = {"isinstance", "len", "sorted", "dict", "list", "tuple", "max", "min"}
 ALLOWED_METHODS = {"copy", "get", "items", "append", "sort"}
 EXPECTED_SIGNATURES = {
-    task.function_name: (task.parameters, task.defaults) for task in TASKS.values()
+    task.function_name: (task.parameters, task.defaults) for task in ALL_TASKS.values()
 }
 
 
@@ -224,7 +225,7 @@ def _behavior_cases(task_id: str):
 
 def behavior_checks(task_id: str, source: str) -> list[dict]:
     """先校验语法安全，再运行隐藏用例并检查输入未被修改。"""
-    task = TASKS[task_id]
+    task = ALL_TASKS[task_id]
     cases = _behavior_cases(task_id)
     try:
         function = safe_functions(source, task.function_name)[task.function_name]
@@ -254,7 +255,7 @@ def behavior_checks(task_id: str, source: str) -> list[dict]:
 
 def grade(task_id: str, workspace: Path, agent_status: str) -> list[dict]:
     """评分最终文件、固定夹具和 Agent 终态；不要求特定工具调用顺序。"""
-    task = TASKS[task_id]
+    task = ALL_TASKS[task_id]
     target = workspace / "solution.py"
     fixed = all(
         (workspace / name).is_file()
@@ -284,10 +285,14 @@ def grade(task_id: str, workspace: Path, agent_status: str) -> list[dict]:
     return checks + behavior_checks(task_id, target.read_text())
 
 
-def calibrate() -> dict:
-    """参考实现必须全过，初始缺陷必须被至少一个隐藏用例检出。"""
+def calibrate(task_ids=None) -> dict:
+    """参考实现必须全过，初始缺陷必须被至少一个隐藏用例检出。
+
+    默认只校准核心 10 项；holdout 批次显式传入自己的任务清单。
+    """
+    selected = TASKS if task_ids is None else {task_id: ALL_TASKS[task_id] for task_id in task_ids}
     rows = {}
-    for task_id, task in TASKS.items():
+    for task_id, task in selected.items():
         reference = behavior_checks(task_id, task.reference)
         initial = behavior_checks(task_id, task.initial)
         rows[task_id] = {
