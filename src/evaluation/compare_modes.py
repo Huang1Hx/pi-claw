@@ -2221,8 +2221,10 @@ def main() -> int:
         return 0 if summary["repair"]["post_repair"]["strict_failures"] == 0 else 1
     if not 1 <= args.trials <= 5 or not 1 <= args.workers <= 3:
         parser.error("trials 为 1–5；workers 为 1–3")
-    if not 30 <= args.deadline <= 900 or not 4 <= args.max_steps <= 40:
-        parser.error("deadline 为 30–900 秒；max-steps 为 4–40")
+    if not 30 <= args.deadline <= 1800 or not 4 <= args.max_steps <= 40:
+        # 上限与诊断路径对齐：降级端点下单 trial 请求延迟成倍放大，过窄的上限会把
+        # “慢但正确”误判为 deadline；默认仍是 420，放宽只是允许显式选择。
+        parser.error("deadline 为 30–1800 秒；max-steps 为 4–40")
     source_report = None
     resume_jobs = None
     if args.resume_from:

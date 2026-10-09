@@ -49,6 +49,24 @@ def test_worker_deadline_reserves_time_for_docker_and_process_cleanup() -> None:
     assert worker_deadline_seconds(5) == pytest.approx(1)
 
 
+def test_live_deadline_bound_allows_degraded_endpoint_diagnosis(tmp_path, monkeypatch) -> None:
+    """live 批次允许显式放宽 deadline 到 1800（默认仍 420），超出即拒绝。"""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["compare_modes", "--output", str(tmp_path / "bad"), "--deadline", "1801"],
+    )
+    with pytest.raises(SystemExit):
+        compare_modes.main()
+    # 无 --live 时只做离线校准并返回 0，不调用模型；用于确认新上限被接受。
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["compare_modes", "--output", str(tmp_path / "ok"), "--deadline", "1800"],
+    )
+    assert compare_modes.main() == 0
+
+
 def _trial(tmp_path, *, mode="single"):
     """创建一个无需模型的成功 trial，便于测试外部评分而非模型输出。"""
     folder = tmp_path / mode
