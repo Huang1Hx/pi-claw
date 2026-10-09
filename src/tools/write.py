@@ -28,6 +28,7 @@ class WriteTools:
             if expected.exists:
                 raise ValueError("创建目标已经存在")
             self.workspace.secure_fs.atomic_create_text(relative, new, expected=expected)
+            self._record_write(relative, kind="create", preimage=None, pre_version=expected)
             return {"path": relative.as_posix(), "created": True}
         snapshot = self._read_full(relative)
         self._require_approved_version(snapshot.version)
@@ -45,6 +46,12 @@ class WriteTools:
             replaced,
             expected=snapshot.version,
             max_bytes=self.max_write_bytes,
+        )
+        self._record_write(
+            relative,
+            kind="replace",
+            preimage=content,
+            pre_version=snapshot.version,
         )
         return {
             "path": relative.as_posix(),

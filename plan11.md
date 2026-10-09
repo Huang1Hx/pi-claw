@@ -37,6 +37,7 @@ Docker 兼容集 713 项（另有 6 项宿主专属契约）。
 | 4 | 任务相关的完成验收与抗伪完成 | **已完成（Task 4.1–4.3）；真实 90-trial/holdout 待冻结后运行** | 篡改/必跑缺失/未复测/无关绿灯被拒；默认入口必跑测试，评测保护 `test_target.py` 并强制关联测试；785 项脱敏 pytest 通过 |
 | 5 | 路由校准与 Multi-Agent 故障隔离 | **已完成；Task 5.1 去重、Task 5.2 超时隔离与部分交接、Task 5.3 离线路由校准、Task 5.4 写入副作用修复均已完成** | 去重/发现合并/独立超时/部分交接指标；带标签 28 样本离线校准，错误降级 0、误伤 2；773 项脱敏 pytest 通过 |
 | 6 | 正式发布 | 待执行 | 沙箱隔离演示、版本标签、两条真实端到端案例 |
+| 7 | 执行生命周期增强：显式事务回滚 | 待执行 | 取消后按显式请求撤销宿主写入，外部改动 fail closed |
 
 ---
 
@@ -617,3 +618,59 @@ Agent 都会调用模型、消耗 Token、各自交接，由主 Agent 重复核�
 阶段 3 沙箱硬门槛通过后，准备普通缺陷修复和高风险 Kimi 审查两个端到端演示；演示必须显示
 实际执行后端、镜像 ID、网络与资源限制、审批记录和最终验证证据。随后完成版本标签、变更日志、
 安装文档和公开限制说明；未安装 Docker 的用户继续可选可信 host 模式，但不得把它标为 sandbox。
+
+## 阶段 7：执行生命周期增强：显式事务回滚
+
+取消后**不静默回滚**：只有用户显式请求（CLI `--rollback-on-cancel` 或 REPL `/undo`）才撤销本次
+回合由宿主写入工具产生的改动。回滚只覆盖宿主追踪的写工具，`run_command` 执行代码产生的外部
+副作用（脚本改文件、`__pycache__`、git 操作、网络/进程）无法回滚，必须如实说明。
+
+### Task 7.1：宿主写入日志 `WriteJournal`
+
+**文件：**
+
+- 新增 `src/core/journal.py`（`WriteRecord`、`WriteJournal`）
+- 修改 `src/tools/write.py`、`src/tools/executor.py`
+- 新增 `tests/test_write_journal.py`
+
+- [ ] `WriteJournal` 在每次**成功提交后**记录 `{path, kind(create|replace), preimage, pre_version,
+  post_version}`；策略拒绝、审批拒绝、版本冲突、写入异常都不计入。
+- [ ] 创建记录 `preimage=None`（原本不存在），替换记录替换前正文与版本；有界：单条 ≤
+  `max_write_bytes`、条目数有上限，超限停止记录并标记日志 `incomplete`（不让内存无界增长）。
+- [ ] 单写者语义：子 Agent 只读，只记录主 Agent 提交；顺序即真实提交顺序，供逆序回放。
+
+### Task 7.2：回滚执行与 fail closed
+
+**文件：**
+
+- 修改 `src/security/secure_fs.py`（新增版本校验的删除）、`src/core/journal.py`
+- 修改 `src/core/schemas.py`（`RunResult.rollback`）、`src/core/agent.py`（trace/终态）
+- 新增 `tests/test_rollback.py`
+
+- [ ] 新增 `SecureFileSystem.atomic_delete_file(relative, expected=version)`：基于 dir-fd、no-follow、
+  版本校验的删除，用于撤销 create。
+- [ ] `WriteJournal.rollback(secure_fs)` 逆序恢复：replace → 用 preimage 原子写回（`expected=post_version`）；
+  create → 版本校验后删除；若当前版本与 `post_version` 不一致（外部已改动）→ **跳过并上报**，绝不覆盖。
+- [ ] 返回摘要 `{restored, deleted, skipped, failed}`；`RunResult` 增加 `rollback`，trace 事件
+  `rollback_started/rollback_restored/rollback_deleted/rollback_skipped/rollback_completed/rollback_failed`。
+- [ ] 回滚本身出错不得伪装成功；部分失败要如实计入 `failed` 并保留可审计原因。
+
+### Task 7.3：显式触发接线
+
+**文件：**
+
+- 修改 `src/interfaces/cli.py`、`src/interfaces/repl.py`
+- 修改 `tests/test_terminal_experience.py`、`docs/RUNTIME.md`
+- 新增 `docs/iterations/ITERATION_037_EXPLICIT_ROLLBACK.md`
+
+- [ ] `run` 增加 `--rollback-on-cancel`：仅在本次运行以 `CANCELLED` 结束时回滚并打印摘要。
+- [ ] REPL 增加 `/undo`：撤销当前会话最近一次已提交写入；无日志或全部跳过时给出明确说明。
+- [ ] 无显式标志/命令时保持现状（改动留在工作区），与 `PROJECT_SCOPE.md` 现状一致。
+- [ ] 公开摘要与 trace 不得泄漏文件正文或密钥；只输出路径、数量与结果。
+- [ ] 先写失败测试（RED）再实现（GREEN）；完整 `pytest`、Ruff、format、compileall、构建通过后再提交。
+
+### Task 7.4：边界与文档
+
+- [ ] 在 `docs/PROJECT_SCOPE.md`、`docs/SECURITY.md`、`docs/RUNTIME.md` 更新：回滚是**显式、仅宿主写入**
+  的事务，不是完整文件系统快照，不能撤销命令副作用或外部状态。
+- [ ] 说明“取消立即停工具”的既有保证（进程组 20ms 轮询清理）与本次回滚的边界区别。

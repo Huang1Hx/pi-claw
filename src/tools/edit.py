@@ -25,6 +25,7 @@ class EditTools:
         snapshot = self._read_full(relative)
         self._require_approved_version(snapshot.version)
         content = snapshot.content.decode("utf-8")
+        preimage = content
         for index, edit in enumerate(edits, start=1):
             if not isinstance(edit, dict) or set(edit) != {"old", "new"}:
                 raise TypeError(f"第 {index} 个 edit 必须且只能包含 old、new")
@@ -44,6 +45,12 @@ class EditTools:
             content,
             expected=snapshot.version,
             max_bytes=self.max_write_bytes,
+        )
+        self._record_write(
+            relative,
+            kind="replace",
+            preimage=preimage,
+            pre_version=snapshot.version,
         )
         return {
             "path": relative.as_posix(),

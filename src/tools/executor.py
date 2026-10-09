@@ -7,6 +7,7 @@ import subprocess
 from collections.abc import Callable
 
 from core.control import ExecutionControl, ExecutionStopped
+from core.journal import WriteJournal
 from core.schemas import PolicyAction, PolicyDecision, ToolCall, ToolResult
 from sandbox.base import CommandRunner
 from sandbox.host import HostCommandRunner
@@ -76,6 +77,7 @@ class ToolExecutor(
         self.command_runner = command_runner or HostCommandRunner(max_output_chars=max_output_chars)
         self.execution_control: ExecutionControl | None = None
         self._approved_file_version: SecureFileVersion | None = None
+        self.journal = WriteJournal(max_entries=64, max_bytes=max_write_bytes)
         self.max_files = max_files
         self.max_matches = max_matches
         self.max_read_bytes = max_read_bytes
