@@ -101,6 +101,30 @@ chat 默认请求 `stream_options.include_usage`；不兼容该流协议的服�
 这是无进展启发式，重复读取确有意义的宿主可提高 `repetition_threshold`（不超过默认窗口）。
 每次 Agent.run 重新创建检测器；相同 Agent 的并发/重入调用会报错。
 
+## 取消与显式回滚
+
+用户发起取消（`ExecutionControl.cancel` 或 Ctrl+C）后，Agent 在每次模型请求和工具调用前检查
+checkpoint，Host 命令运行器每 20ms 轮询并在取消时清理整个进程组，因此取消会尽快停止后续工具；
+但已经提交的写入不会自动撤销。
+
+宿主写工具（`write_or_replace`、`apply_patch`）每次**成功提交后**都在 `WriteJournal` 记录
+`{path, kind, preimage, post_version}`，供显式回滚使用；策略拒绝、审批拒绝、版本冲突和写入异常
+都不记录。`run_command` 执行代码产生的外部副作用（脚本改文件、`__pycache__`、git 操作、网络/
+进程）无法回滚。
+
+显式回滚只在用户要求时发生：
+
+- `pi-claw run ... --rollback-on-cancel`：仅当本次运行以 `cancelled` 结束时，逆序撤销本次由宿主
+  写工具提交的改动，并在 JSON 终态与标准输出打印 `{restored, deleted, skipped, failed}` 摘要。
+- REPL `/undo`：撤销当前会话最近一次已提交的宿主写入，可重复执行逐条回退。
+
+回滚是版本绑定的 fail closed：恢复/删除前复核当前文件版本与记录一致，外部改动或文件缺失一律
+**跳过并上报**，绝不覆盖；底层出错计入 `failed` 并保留现场，不伪装成功。日志有界，超出条目或
+字节上限后停止记录并标记 `incomplete`，摘要会提示可能未覆盖全部改动。回滚过程写入 Trace 事件
+`rollback_started/rollback_restored/rollback_deleted/rollback_skipped/rollback_completed/rollback_failed`，
+只含路径、动作与计数，不含文件正文或密钥。没有显式标志/命令时保持现状，与
+`docs/PROJECT_SCOPE.md` 一致。
+
 ## Hooks
 
 Hooks 仅由可信宿主显式注入，不自动加载用户仓库文件、Python 插件或 shell 命令。

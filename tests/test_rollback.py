@@ -176,3 +176,28 @@ def test_multiple_replaces_to_same_path_replay_in_reverse(workspace: Path) -> No
 
     assert summary.restored == 2 and summary.skipped == 0 and summary.failed == 0
     assert (workspace / "alpha.txt").read_text(encoding="utf-8") == "alpha\nneedle one\n"
+
+
+def test_last_only_undo_consumes_one_record(workspace: Path) -> None:
+    """`/undo` 每次只撤销最近一条写入，并消费已处理记录。"""
+    executor_ = executor(workspace)
+    run(executor_, "write_or_replace", {"path": "a.txt", "old": "", "new": "a\n"})
+    run(executor_, "write_or_replace", {"path": "b.txt", "old": "", "new": "b\n"})
+
+    first = executor_.journal.rollback(
+        executor_.workspace.secure_fs, max_bytes=executor_.max_write_bytes, last_only=True
+    )
+    assert first.deleted == 1
+    assert not (workspace / "b.txt").exists() and (workspace / "a.txt").exists()
+
+    second = executor_.journal.rollback(
+        executor_.workspace.secure_fs, max_bytes=executor_.max_write_bytes, last_only=True
+    )
+    assert second.deleted == 1
+    assert not (workspace / "a.txt").exists()
+
+    empty = executor_.journal.rollback(
+        executor_.workspace.secure_fs, max_bytes=executor_.max_write_bytes, last_only=True
+    )
+    assert empty.deleted == 0 and empty.restored == 0 and empty.skipped == 0
+    assert executor_.journal.records == ()

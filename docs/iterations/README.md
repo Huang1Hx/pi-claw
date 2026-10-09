@@ -65,3 +65,4 @@ Iteration 001–005 保留当时的路径与验证命令，不回写历史记录
 [Iteration 033](ITERATION_033_VERIFICATION_WIRING.md)：VerificationPlan 接入 CLI/REPL/工作流。
 [Iteration 034](ITERATION_034_WORKSPACE_TEST_PROTECTION.md)：工作区测试保护与变更—测试关联。
 [Iteration 035](ITERATION_035_PUBLIC_CI_AND_LICENSE.md)：公开仓库许可证与通用 CI。
+[Iteration 037](ITERATION_037_EXPLICIT_ROLLBACK.md)：取消后的显式事务回滚（宿主写入日志 + `/undo`）。

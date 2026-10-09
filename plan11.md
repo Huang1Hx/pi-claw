@@ -37,7 +37,7 @@ Docker 兼容集 713 项（另有 6 项宿主专属契约）。
 | 4 | 任务相关的完成验收与抗伪完成 | **已完成（Task 4.1–4.3）；真实 90-trial/holdout 待冻结后运行** | 篡改/必跑缺失/未复测/无关绿灯被拒；默认入口必跑测试，评测保护 `test_target.py` 并强制关联测试；785 项脱敏 pytest 通过 |
 | 5 | 路由校准与 Multi-Agent 故障隔离 | **已完成；Task 5.1 去重、Task 5.2 超时隔离与部分交接、Task 5.3 离线路由校准、Task 5.4 写入副作用修复均已完成** | 去重/发现合并/独立超时/部分交接指标；带标签 28 样本离线校准，错误降级 0、误伤 2；773 项脱敏 pytest 通过 |
 | 6 | 正式发布 | 待执行 | 沙箱隔离演示、版本标签、两条真实端到端案例 |
-| 7 | 执行生命周期增强：显式事务回滚 | 待执行 | 取消后按显式请求撤销宿主写入，外部改动 fail closed |
+| 7 | 执行生命周期增强：显式事务回滚 | 已完成（待推送 main） | 取消后按显式请求撤销宿主写入，外部改动 fail closed |
 
 ---
 
@@ -663,14 +663,14 @@ Agent 都会调用模型、消耗 Token、各自交接，由主 Agent 重复核�
 - 修改 `tests/test_terminal_experience.py`、`docs/RUNTIME.md`
 - 新增 `docs/iterations/ITERATION_037_EXPLICIT_ROLLBACK.md`
 
-- [ ] `run` 增加 `--rollback-on-cancel`：仅在本次运行以 `CANCELLED` 结束时回滚并打印摘要。
-- [ ] REPL 增加 `/undo`：撤销当前会话最近一次已提交写入；无日志或全部跳过时给出明确说明。
-- [ ] 无显式标志/命令时保持现状（改动留在工作区），与 `PROJECT_SCOPE.md` 现状一致。
-- [ ] 公开摘要与 trace 不得泄漏文件正文或密钥；只输出路径、数量与结果。
-- [ ] 先写失败测试（RED）再实现（GREEN）；完整 `pytest`、Ruff、format、compileall、构建通过后再提交。
+- [x] `run` 增加 `--rollback-on-cancel`：仅在本次运行以 `CANCELLED` 结束时回滚并打印摘要。
+- [x] REPL 增加 `/undo`：撤销当前会话最近一次已提交写入；无日志或全部跳过时给出明确说明。
+- [x] 无显式标志/命令时保持现状（改动留在工作区），与 `PROJECT_SCOPE.md` 现状一致。
+- [x] 公开摘要与 trace 不得泄漏文件正文或密钥；只输出路径、数量与结果。
+- [x] 先写失败测试（RED）再实现（GREEN）；完整 `pytest`、Ruff、format、compileall、构建通过后再提交。
 
 ### Task 7.4：边界与文档
 
-- [ ] 在 `docs/PROJECT_SCOPE.md`、`docs/SECURITY.md`、`docs/RUNTIME.md` 更新：回滚是**显式、仅宿主写入**
+- [x] 在 `docs/PROJECT_SCOPE.md`、`docs/SECURITY.md`、`docs/RUNTIME.md` 更新：回滚是**显式、仅宿主写入**
   的事务，不是完整文件系统快照，不能撤销命令副作用或外部状态。
-- [ ] 说明“取消立即停工具”的既有保证（进程组 20ms 轮询清理）与本次回滚的边界区别。
+- [x] 说明“取消立即停工具”的既有保证（进程组 20ms 轮询清理）与本次回滚的边界区别。

@@ -82,21 +82,29 @@ class WriteJournal:
         self._records.append(WriteRecord(relative_name, kind, preimage, pre_version, post_version))
         return True
 
-    def rollback(self, secure_fs, *, max_bytes: int) -> RollbackSummary:
+    def rollback(self, secure_fs, *, max_bytes: int, last_only: bool = False) -> RollbackSummary:
         """逆序回放已记录的提交，逐路径跟踪期望版本；不一致时跳过并上报，绝不覆盖外部改动。
 
         同一路径可能被多次提交（例如先创建再替换）。回滚后续提交会生成新 inode，
         因此不能拿更早记录的 post_version 直接比对；这里在每次成功回放后重读该路径版本，
         作为下一条更早记录必须先满足的期望版本。对外部改动仍然 fail closed。
+
+        last_only 只处理最近一条记录，供 REPL `/undo` 逐步撤销；已处理（恢复/删除/跳过）的
+        记录会从日志移除，失败记录保留以便审计与重试。
         """
+        indexed = list(enumerate(self._records))
+        if last_only:
+            indexed = indexed[-1:]
         outcomes: list[RollbackOutcome] = []
         restored = deleted = skipped = failed = 0
         expected: dict[str, SecureFileVersion] = {}
         blocked: set[str] = set()
-        for record in reversed(self._records):
+        consumed: set[int] = set()
+        for index, record in reversed(indexed):
             path = Path(record.path)
             if record.path in blocked:
                 skipped += 1
+                consumed.add(index)
                 outcomes.append(RollbackOutcome(record.path, "skipped", "先前回滚失败，跳过"))
                 continue
             exp = expected.get(record.path, record.post_version)
@@ -109,10 +117,12 @@ class WriteJournal:
                 continue
             if not current.exists:
                 skipped += 1
+                consumed.add(index)
                 outcomes.append(RollbackOutcome(record.path, "skipped", "文件已不存在"))
                 continue
             if current != exp:
                 skipped += 1
+                consumed.add(index)
                 outcomes.append(RollbackOutcome(record.path, "skipped", "提交后已被外部改动"))
                 continue
             try:
@@ -132,10 +142,14 @@ class WriteJournal:
                     restored += 1
                     expected[record.path] = secure_fs.version(path, max_bytes=max_bytes)
                     outcomes.append(RollbackOutcome(record.path, "restored"))
+                consumed.add(index)
             except Exception as exc:  # noqa: BLE001 - 逐条失败如实计入 failed
                 failed += 1
                 blocked.add(record.path)
                 outcomes.append(RollbackOutcome(record.path, "failed", _reason(exc)))
+        self._records = [
+            record for index, record in enumerate(self._records) if index not in consumed
+        ]
         return RollbackSummary(restored, deleted, skipped, failed, self.incomplete, tuple(outcomes))
 
     @property

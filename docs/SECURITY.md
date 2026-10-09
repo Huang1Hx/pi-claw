@@ -96,6 +96,9 @@ pytest/unittest 会直接执行仓库代码，只适合可信工作区。Docker 
 synthetic failed ToolResult 只表示“恢复时没有可信的已落盘结果，而且工具没有被自动重放”。
 它不能证明中断前工具绝对没有执行过；涉及副作用时，用户必须先检查目标文件、命令结果和 trace。
 
+显式回滚（`--rollback-on-cancel`/`/undo`）只撤销宿主写工具追踪的单文件提交，且当前版本与
+记录不一致时跳过；它不能撤销命令副作用、其他进程写入或系统级状态，也不是跨文件 ACID 事务。
+
 ## Provider 输入边界不等于网络隔离
 
 OpenAI-compatible 响应体上限防止单个成功或错误响应无界占用内存。Session 中的 Base URL 要求

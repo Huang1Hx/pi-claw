@@ -139,7 +139,11 @@ class Agent:
         """
         return replace(result, rollback=self.rollback(run_id=result.run_id))
 
-    def rollback(self, *, run_id: str | None = None) -> dict[str, Any]:
+    def undo_last(self) -> dict[str, Any]:
+        """撤销最近一次宿主写入，供 REPL `/undo` 逐步回退。"""
+        return self.rollback(last_only=True)
+
+    def rollback(self, *, run_id: str | None = None, last_only: bool = False) -> dict[str, Any]:
         """逆序撤销本次运行记录的宿主写入，并写入回滚 Trace 事件。"""
         journal = getattr(self.tool_executor, "journal", None)
         if journal is None:
@@ -149,6 +153,7 @@ class Agent:
         summary = journal.rollback(
             self.tool_executor.workspace.secure_fs,
             max_bytes=self.tool_executor.max_write_bytes,
+            last_only=last_only,
         )
         events = {
             "restored": "rollback_restored",

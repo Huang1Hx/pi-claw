@@ -331,3 +331,125 @@ def test_real_tty_slash_menu_tab_and_exit(tmp_path):
             process.terminate()
             process.wait(timeout=5)
         os.close(master)
+
+
+def test_repl_undo_restores_last_host_write(tmp_path):
+    """`/undo` 只撤销最近一次宿主写入并如实报告，不静默回滚。"""
+    (tmp_path / "alpha.txt").write_text("original\n", encoding="utf-8")
+    output = io.StringIO()
+    provider = ScriptedProvider(
+        [
+            ModelReply.call(
+                ToolCall(
+                    "w",
+                    "write_or_replace",
+                    {"path": "alpha.txt", "old": "original\n", "new": "changed\n"},
+                )
+            ),
+            ModelReply.final("已修改"),
+        ]
+    )
+    repl = CodingRepl(
+        workspace=tmp_path,
+        provider=provider,
+        store=SessionStore(tmp_path / "sessions"),
+        trace=TraceWriter(tmp_path / "trace.jsonl"),
+        output=output,
+        auto_approve=True,
+        streaming=False,
+        max_steps=2,
+    )
+    repl.run_turn("修改 alpha.txt")
+    assert (tmp_path / "alpha.txt").read_text(encoding="utf-8") == "changed\n"
+
+    assert repl._handle_command("/undo")
+
+    assert (tmp_path / "alpha.txt").read_text(encoding="utf-8") == "original\n"
+    assert "撤销" in output.getvalue()
+    # 无更多记录时给出明确说明，而不是静默成功。
+    assert repl._handle_command("/undo")
+    assert "没有可撤销" in output.getvalue()
+
+
+def test_cli_rollback_on_cancel_restores_host_writes(tmp_path, monkeypatch):
+    """`--rollback-on-cancel` 仅在 cancelled 终态回滚宿主写入。"""
+    from dataclasses import replace as dataclass_replace
+
+    import interfaces.cli as cli
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "alpha.txt").write_text("original\n", encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            ModelReply.call(
+                ToolCall(
+                    "w",
+                    "write_or_replace",
+                    {"path": "alpha.txt", "old": "original\n", "new": "changed\n"},
+                )
+            ),
+            ModelReply.final("已修改"),
+        ]
+    )
+    monkeypatch.setattr(cli, "ScriptedProvider", lambda _replies: provider)
+
+    class CancellingAgent(cli.Agent):
+        def run(self, task, **kwargs):
+            result = super().run(task, **kwargs)
+            return dataclass_replace(result, status=RunStatus.CANCELLED)
+
+    monkeypatch.setattr(cli, "Agent", CancellingAgent)
+    rc = main(
+        [
+            "run",
+            "修改 alpha.txt",
+            "--workspace",
+            str(tmp_path),
+            "--yes",
+            "--rollback-on-cancel",
+            "--max-steps",
+            "2",
+            "--trace",
+            str(tmp_path / "trace.jsonl"),
+        ]
+    )
+
+    assert rc == 1
+    assert (tmp_path / "alpha.txt").read_text(encoding="utf-8") == "original\n"
+
+
+def test_cli_completed_run_is_not_rolled_back(tmp_path, monkeypatch):
+    """没有 cancelled 终态时即使带 --rollback-on-cancel 也保持改动。"""
+    import interfaces.cli as cli
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "alpha.txt").write_text("original\n", encoding="utf-8")
+    provider = ScriptedProvider(
+        [
+            ModelReply.call(
+                ToolCall(
+                    "w",
+                    "write_or_replace",
+                    {"path": "alpha.txt", "old": "original\n", "new": "changed\n"},
+                )
+            ),
+            ModelReply.final("已修改"),
+        ]
+    )
+    monkeypatch.setattr(cli, "ScriptedProvider", lambda _replies: provider)
+    main(
+        [
+            "run",
+            "修改 alpha.txt",
+            "--workspace",
+            str(tmp_path),
+            "--yes",
+            "--rollback-on-cancel",
+            "--max-steps",
+            "2",
+            "--trace",
+            str(tmp_path / "trace.jsonl"),
+        ]
+    )
+
+    assert (tmp_path / "alpha.txt").read_text(encoding="utf-8") == "changed\n"

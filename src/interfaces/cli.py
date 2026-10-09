@@ -98,6 +98,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--max-steps", type=_positive_int, default=8, help="最大模型轮数（默认：8）")
     run.add_argument("--trace", type=Path, help="可选 JSONL 轨迹输出路径")
     run.add_argument(
+        "--rollback-on-cancel",
+        action="store_true",
+        help="仅在本次运行以 cancelled 结束时，显式回滚宿主写入工具的改动",
+    )
+    run.add_argument(
         "--yes",
         action="store_true",
         help="批准策略白名单内的写入和命令；仅对可信工作区使用",
@@ -287,15 +292,31 @@ def _run_agent(args: argparse.Namespace) -> int:
     executor = ToolExecutor(
         policy, approval_callback=_approval(args.yes), command_runner=args.command_runner
     )
-    result = Agent(
+    agent = Agent(
         provider,
         executor,
         trace=trace,
         max_steps=args.max_steps,
         completion_verifier=default_completion_verifier(),
-    ).run(args.task)
+    )
+    result = agent.run(args.task)
+    if args.rollback_on_cancel and result.status is RunStatus.CANCELLED:
+        result = agent.rollback_run(result)
+        _print_rollback(result.rollback)
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
     return 0 if result.status is RunStatus.COMPLETED else 1
+
+
+def _print_rollback(summary: dict | None) -> None:
+    """只输出路径计数与结果，不打印文件正文或密钥。"""
+    if not summary:
+        print("回滚：无记录")
+        return
+    tail = "（写入日志不完整，可能未覆盖全部改动）" if summary.get("incomplete") else ""
+    print(
+        f"回滚：恢复 {summary['restored']}，删除 {summary['deleted']}，"
+        f"跳过 {summary['skipped']}，失败 {summary['failed']}{tail}"
+    )
 
 
 def _run_chat(args: argparse.Namespace) -> int:
