@@ -33,8 +33,8 @@ Docker 兼容集 713 项（另有 6 项宿主专属契约）。
 | 0 | 目录重构、评测框架、DeepSeek/Kimi 分工 | 已完成 | `639a322`；536 tests；已推送 `optimize` |
 | 1 | 公开仓库工程化与 CI | **已完成（LICENSE + 通用 CI 首次运行通过）** | MIT `LICENSE`、`.github/workflows/ci.yml`、wheel 元数据 `License-Expression: MIT`；完整 794 项 pytest 通过；GitHub `ci`/`sandbox-security` 均 success |
 | 2 | 当前模型真实评测基线 | **已完成并合并 main** | grader 2.2 合并后首次 49/90；两轮修复后 78/90 |
-| 3 | Trace 恢复、请求稳定性与执行沙箱 | **当前工程里程碑已收尾；Task 3.3–3.7、Task 3.8 离线安全门、诊断续跑与同协议 90-trial 回归已完成，holdout 列入后续评测** | 11/11 攻击阻断、30/30 连续运行、12 项诊断最新 10/12、同协议回归严格 90/90（模型失败单列） |
-| 4 | 任务相关的完成验收与抗伪完成 | **已完成（Task 4.1–4.3）；真实 90-trial/holdout 待冻结后运行** | 篡改/必跑缺失/未复测/无关绿灯被拒；默认入口必跑测试，评测保护 `test_target.py` 并强制关联测试；785 项脱敏 pytest 通过 |
+| 3 | Trace 恢复、请求稳定性与执行沙箱 | **已完成：Task 3.3–3.7、3.8 离线安全门、诊断续跑、同协议 90-trial 回归与新任务 holdout 基线均已达成** | 11/11 攻击阻断、30/30 连续运行、12 项诊断最新 10/12、同协议回归严格 90/90（模型失败单列）、holdout 27/27 |
+| 4 | 任务相关的完成验收与抗伪完成 | **已完成（Task 4.1–4.3），真实 90-trial 与 holdout 已在阶段 3 收口** | 篡改/必跑缺失/未复测/无关绿灯被拒；默认入口必跑测试，评测保护 `test_target.py` 并强制关联测试；同协议 90/90 与 holdout 27/27 |
 | 5 | 路由校准与 Multi-Agent 故障隔离 | **已完成；Task 5.1 去重、Task 5.2 超时隔离与部分交接、Task 5.3 离线路由校准、Task 5.4 写入副作用修复均已完成** | 去重/发现合并/独立超时/部分交接指标；带标签 28 样本离线校准，错误降级 0、误伤 2；773 项脱敏 pytest 通过 |
 | 6 | 正式发布 | 待执行 | 沙箱隔离演示、版本标签、两条真实端到端案例 |
 | 7 | 执行生命周期增强：显式事务回滚 | 已完成（待推送 main） | 取消后按显式请求撤销宿主写入，外部改动 fail closed |
@@ -406,6 +406,8 @@ Docker 退出码 0、`cleanup_failed=false`，且无残留容器或快照。
 - 新增 `docs/iterations/ITERATION_026_SANDBOX_ATTACK_EVAL.md`
 - 新增 `docs/iterations/ITERATION_027_STAGE3_DIAGNOSTIC_CONTINUATION.md`
 - 新增 `docs/iterations/ITERATION_038_STAGE3_FULL_REGRESSION.md`
+- 新增 `docs/iterations/ITERATION_039_STAGE3_HOLDOUT.md`
+- 新增 `src/evaluation/mode_holdout_tasks.py`、`tests/test_agent_mode_holdout.py`
 - 新增 `scripts/eval_progress.py`、`scripts/materialize_postrepair.py`
 - 新增 `src/evaluation/mode_diagnostic.py`
 - 修改 `src/evaluation/mode_repair.py`、`src/evaluation/compare_modes.py`
@@ -433,16 +435,18 @@ Docker 退出码 0、`cleanup_failed=false`，且无残留容器或快照。
   仅剩的 `single/config_overlay/1` provider_error 并复现成功，得到**严格 90/90**。血缘成本
   6,777,133 tokens / 52,656.7s，增量安全：未授权尝试 10、写冲突 0、返工 0；完整报告保留全部
   首次运行、修复尝试与失败终态（见 Iteration 038）。
-- [ ] **新任务 holdout：**在实现冻结后一次性加入至少 3 个同等难度且未参与本阶段调试的任务，
-  三种模式各重复 3 次（至少 27 trial），报告严格成功率、pass@3、pass³、P50/P95、总 Token 和
-  每成功任务 Token；首次结果作为新基线，不因分数修改任务或删除失败。
+- [x] **新任务 holdout：**实现冻结后一次性加入 3 个未参与调试的新任务
+  （`merge_sorted_streams`/`run_length_encode`/`rolling_max`），三种模式各 3 次共 **27/27**。
+  逐模式 pass@3/pass³ 均 1.0；p50/p95 为 single 30.3/54.9s、workflow 82.1/120.8s、team
+  85.1/125.1s；总 Token 989,977，每成功 Token 分别为 12,203.67/54,918.00/42,875.78。首次结果
+  即基线，未因分数修改任务或删除失败（见 Iteration 039）。
 - [x] `90/90` 只作为 stretch result：本轮同协议回归在降级端点下达成严格 90/90，且模型/端点
   `provider_error` 已从评测分母剔除并单独计数（`gradable_*`/`excluded_model_failure_trials`），
   不再混淆为评测失败。阶段完成仍由确定性安全硬门槛、生命周期目标、原 90 项不回归和 holdout
   证据共同决定。
-- [ ] 在完整 90-trial 与 holdout 完成后，执行阶段 3 最终覆盖率、完整 pytest、Ruff、format、
-  wheel/sdist 构建和敏感信息扫描；诊断续跑批次本身的 753 项 pytest、Ruff、format、compileall、
-  wheel/sdist 和公开摘要脱敏检查已经通过。
+- [x] 在完整 90-trial 与 holdout 完成后，执行阶段 3 最终覆盖率、完整 pytest、Ruff、format、
+  wheel/sdist 构建和敏感信息扫描：820 项 pytest、覆盖率 86%、Ruff/format/compileall、
+  `uv build --no-config` wheel+sdist、凭据签名扫描 0 真实命中、`git diff --check` 均通过。
 - [x] 明确发布边界：Docker 显著加强命令隔离，但容器仍不是虚拟机，也不能消除内核/daemon、
   镜像供应链或宿主配置风险。
 
