@@ -68,6 +68,7 @@ class Agent:
         self.last_messages: list[dict[str, Any]] = []
         self.on_event = on_event
         self.hooks = hooks or HookBus()
+        self._last_run_id: str | None = None
         self.streaming = streaming
         RepetitionGuard(repetition_threshold)
         self.repetition_threshold = repetition_threshold
@@ -97,6 +98,7 @@ class Agent:
             raise ValueError("task 必须是非空字符串")
         self._running = True
         run_id = uuid.uuid4().hex
+        self._last_run_id = run_id
         self.usage = UsageTracker()
         self._event_seq = 0
         self._workflow_generation = 0
@@ -128,6 +130,37 @@ class Agent:
             self._emit("run_end", payload, result.steps if result else 0, run_id)
             self._running = False
             self._control = None
+
+    def rollback_run(self, result: RunResult) -> RunResult:
+        """按运行结果执行显式回滚，并把不含正文的摘要附回 RunResult。
+
+        只撤销本回合宿主写入工具的提交，命令副作用无法撤销；逐条失败与跳过如实计入，
+        不伪装成功，也不改变原有终态。
+        """
+        return replace(result, rollback=self.rollback(run_id=result.run_id))
+
+    def rollback(self, *, run_id: str | None = None) -> dict[str, Any]:
+        """逆序撤销本次运行记录的宿主写入，并写入回滚 Trace 事件。"""
+        journal = getattr(self.tool_executor, "journal", None)
+        if journal is None:
+            raise RuntimeError("当前执行器未启用写入日志，无法回滚")
+        active_run = run_id or self._last_run_id or ""
+        self._record("rollback_started", {"records": len(journal.records)}, 0, active_run)
+        summary = journal.rollback(
+            self.tool_executor.workspace.secure_fs,
+            max_bytes=self.tool_executor.max_write_bytes,
+        )
+        events = {
+            "restored": "rollback_restored",
+            "deleted": "rollback_deleted",
+            "skipped": "rollback_skipped",
+            "failed": "rollback_failed",
+        }
+        for outcome in summary.outcomes:
+            self._record(events[outcome.action], outcome.to_dict(), 0, active_run)
+        payload = summary.to_dict()
+        self._record("rollback_completed", payload, 0, active_run)
+        return payload
 
     def _run(
         self,

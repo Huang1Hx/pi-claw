@@ -204,6 +204,7 @@ class RunResult:
     verification: dict[str, Any] | None = None
     usage: dict[str, Any] | None = None
     routing: dict[str, Any] | None = None
+    rollback: dict[str, Any] | None = None
 
     @property
     def ok(self) -> bool:
@@ -221,4 +222,5 @@ class RunResult:
             "verification": self.verification,
             "usage": self.usage,
             "routing": self.routing,
+            "rollback": self.rollback,
         }

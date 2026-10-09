@@ -633,11 +633,11 @@ Agent 都会调用模型、消耗 Token、各自交接，由主 Agent 重复核�
 - 修改 `src/tools/write.py`、`src/tools/executor.py`
 - 新增 `tests/test_write_journal.py`
 
-- [ ] `WriteJournal` 在每次**成功提交后**记录 `{path, kind(create|replace), preimage, pre_version,
+- [x] `WriteJournal` 在每次**成功提交后**记录 `{path, kind(create|replace), preimage, pre_version,
   post_version}`；策略拒绝、审批拒绝、版本冲突、写入异常都不计入。
-- [ ] 创建记录 `preimage=None`（原本不存在），替换记录替换前正文与版本；有界：单条 ≤
+- [x] 创建记录 `preimage=None`（原本不存在），替换记录替换前正文与版本；有界：单条 ≤
   `max_write_bytes`、条目数有上限，超限停止记录并标记日志 `incomplete`（不让内存无界增长）。
-- [ ] 单写者语义：子 Agent 只读，只记录主 Agent 提交；顺序即真实提交顺序，供逆序回放。
+- [x] 单写者语义：子 Agent 只读，只记录主 Agent 提交；顺序即真实提交顺序，供逆序回放。
 
 ### Task 7.2：回滚执行与 fail closed
 
@@ -647,13 +647,13 @@ Agent 都会调用模型、消耗 Token、各自交接，由主 Agent 重复核�
 - 修改 `src/core/schemas.py`（`RunResult.rollback`）、`src/core/agent.py`（trace/终态）
 - 新增 `tests/test_rollback.py`
 
-- [ ] 新增 `SecureFileSystem.atomic_delete_file(relative, expected=version)`：基于 dir-fd、no-follow、
+- [x] 新增 `SecureFileSystem.atomic_delete_file(relative, expected=version)`：基于 dir-fd、no-follow、
   版本校验的删除，用于撤销 create。
-- [ ] `WriteJournal.rollback(secure_fs)` 逆序恢复：replace → 用 preimage 原子写回（`expected=post_version`）；
+- [x] `WriteJournal.rollback(secure_fs)` 逆序恢复：replace → 用 preimage 原子写回（`expected=post_version`）；
   create → 版本校验后删除；若当前版本与 `post_version` 不一致（外部已改动）→ **跳过并上报**，绝不覆盖。
-- [ ] 返回摘要 `{restored, deleted, skipped, failed}`；`RunResult` 增加 `rollback`，trace 事件
+- [x] 返回摘要 `{restored, deleted, skipped, failed}`；`RunResult` 增加 `rollback`，trace 事件
   `rollback_started/rollback_restored/rollback_deleted/rollback_skipped/rollback_completed/rollback_failed`。
-- [ ] 回滚本身出错不得伪装成功；部分失败要如实计入 `failed` 并保留可审计原因。
+- [x] 回滚本身出错不得伪装成功；部分失败要如实计入 `failed` 并保留可审计原因。
 
 ### Task 7.3：显式触发接线
 

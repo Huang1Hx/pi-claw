@@ -371,6 +371,37 @@ class SecureWorkspaceFS:
                 with suppress(FileNotFoundError):
                     os.unlink(temporary, dir_fd=parent_descriptor)
 
+    def atomic_delete_file(
+        self,
+        relative: Path,
+        *,
+        expected: SecureFileVersion,
+        max_bytes: int,
+    ) -> None:
+        """在锚定父目录中版本校验后删除普通文件，用于撤销本次创建的改动。
+
+        与替换共用同一无跟随、版本绑定语义：当前版本必须与记录一致，否则拒绝删除，
+        绝不静默删除已被外部改动的文件。
+        """
+        self._require_supported()
+        if max_bytes <= 0:
+            raise ValueError("安全删除读取上限必须大于 0")
+        if not expected.exists:
+            raise SecureFileViolation("删除审批版本要求目标文件存在")
+        with self._open_parent(relative) as (parent_descriptor, leaf):
+            self._before_final_open(relative)
+            self._verify_parent_mapping(relative, parent_descriptor)
+            current = self._read_at(
+                parent_descriptor,
+                leaf,
+                max_bytes=max_bytes,
+                truncate=False,
+            )
+            if current.version != expected:
+                raise SecureFileViolation("目标文件与记录版本不一致，拒绝删除")
+            os.unlink(leaf, dir_fd=parent_descriptor)
+            os.fsync(parent_descriptor)
+
     def _require_supported(self) -> None:
         """能力不足时明确 fail closed，不能退回普通 Path 路径写入。"""
         if not self.supported:
