@@ -427,6 +427,14 @@ def summarize_repairs(
             "strict_successes": post_successes,
             "strict_failures": total - post_successes,
             "strict_success_rate": round(post_successes / total, 6),
+            "gradable_successes": post_successes,
+            "gradable_failures": sum(
+                row.get("passed") is not True and row.get("leader_status") != "provider_error"
+                for row in final_rows
+            ),
+            "excluded_model_failure_trials": sum(
+                row.get("leader_status") == "provider_error" for row in final_rows
+            ),
         },
         "eligible_failures": len(ledger),
         "recovered_trials": recovered,

@@ -61,6 +61,8 @@ from tools import ToolExecutor
 
 MODES = ("single", "workflow", "team")
 VERIFY_ARGV = ["uv", "run", "python", "-m", "unittest", "-q", "test_target.py"]
+# 模型/端点侧传输失败不反映实现质量，单独统计并从评测失败分母中剔除。
+MODEL_FAILURE_STATUSES = frozenset({"provider_error"})
 PUBLIC_SUMMARY_FIELDS = (
     "schema_version",
     "grader_version",
@@ -1584,9 +1586,23 @@ def _nearest_rank(values: list[float], percentile: float) -> float:
     return ordered[max(0, ceil(percentile * len(ordered)) - 1)]
 
 
+def gradable_failures(rows: list[dict]) -> int:
+    """统计真正反映实现质量的失败；模型/端点传输失败不计数。"""
+    return sum(
+        row.get("passed") is not True and row.get("leader_status") not in MODEL_FAILURE_STATUSES
+        for row in rows
+    )
+
+
 def summarize(rows: list[dict], *, premium_model: str | None = None) -> dict:
     """汇总成功、长尾耗时、模型总请求、Token、安全边界和返工。"""
     successes = sum(row["passed"] for row in rows)
+    # 模型/端点传输失败不计入评测失败：从分母中剔除，单独计数并保留原严格口径。
+    excluded_model_failures = sum(
+        row.get("leader_status") in MODEL_FAILURE_STATUSES for row in rows
+    )
+    gradable_trials = len(rows) - excluded_model_failures
+    gradable_successes = successes
     known_tokens = sum((row["usage"] or {}).get("total_tokens", 0) for row in rows)
     durations = [row["duration_seconds"] for row in rows]
     statuses = Counter(row.get("leader_status", "unknown") for row in rows)
@@ -1637,6 +1653,13 @@ def summarize(rows: list[dict], *, premium_model: str | None = None) -> dict:
         "reliability": reliability(rows),
         "strict_successes": successes,
         "strict_failures": len(rows) - successes,
+        "gradable_trials": gradable_trials,
+        "gradable_successes": gradable_successes,
+        "gradable_failures": gradable_trials - gradable_successes,
+        "gradable_success_rate": round(gradable_successes / gradable_trials, 6)
+        if gradable_trials
+        else None,
+        "excluded_model_failure_trials": excluded_model_failures,
         "p50_duration_seconds": round(median(durations), 3),
         "p95_duration_seconds": round(_nearest_rank(durations, 0.95), 3),
         "median_duration_seconds": round(median(durations), 3),
@@ -2205,7 +2228,7 @@ def main() -> int:
         except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError) as error:
             parser.error(f"无法执行修复批次：{error}")
         print(json.dumps(summary["repair"], ensure_ascii=False), flush=True)
-        return 0 if summary["repair"]["post_repair"]["strict_failures"] == 0 else 1
+        return 0 if summary["repair"]["post_repair"]["gradable_failures"] == 0 else 1
     if args.resume_repair_from:
         if not args.live:
             parser.error("--resume-repair-from 必须与 --live 一起使用")
@@ -2218,7 +2241,7 @@ def main() -> int:
         except (OSError, json.JSONDecodeError, TypeError, ValueError, KeyError) as error:
             parser.error(f"无法执行修复续跑：{error}")
         print(json.dumps(summary["repair"], ensure_ascii=False), flush=True)
-        return 0 if summary["repair"]["post_repair"]["strict_failures"] == 0 else 1
+        return 0 if summary["repair"]["post_repair"]["gradable_failures"] == 0 else 1
     if not 1 <= args.trials <= 5 or not 1 <= args.workers <= 3:
         parser.error("trials 为 1–5；workers 为 1–3")
     if not 30 <= args.deadline <= 1800 or not 4 <= args.max_steps <= 40:
@@ -2371,7 +2394,7 @@ def main() -> int:
     save_json(args.output / "report.json", summary)
     save_json(args.output / "public-summary.json", build_public_summary(summary))
     print(json.dumps(summary["by_mode"], ensure_ascii=False), flush=True)
-    return 0 if all(row["passed"] for row in reports) else 1
+    return 0 if gradable_failures(reports) == 0 else 1
 
 
 if __name__ == "__main__":

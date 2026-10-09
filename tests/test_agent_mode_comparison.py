@@ -16,6 +16,7 @@ from evaluation.compare_modes import (
     build_public_summary,
     build_trial_report,
     combine_resumed_reports,
+    gradable_failures,
     reliability,
     run_trial,
     select_resume_jobs,
@@ -457,6 +458,48 @@ def test_summary_reports_tail_latency_timeouts_status_layers_and_model_requests(
     assert summary["failure_layer_distribution"] == {"L0_execution": 2, "L2_semantics": 1}
     assert summary["model_request_distribution"] == {"deepseek-flash": 6, "kimi-k3": 1}
     assert summary["premium_model_requests"] == 1
+
+
+def _summary_row(*, passed, status, duration=1, task="a"):
+    return {
+        "task": task,
+        "passed": passed,
+        "leader_status": status,
+        "duration_seconds": duration,
+        "usage": {"total_tokens": 10},
+        "usage_may_be_incomplete": False,
+        "models_used": ["m"],
+        "model_requests": {},
+        "model_usage": {},
+        "tool_calls": 0,
+        "unauthorized_attempts": 0,
+        "write_conflicts": 0,
+        "rework_events": 0,
+        "max_parallel_subagents": 0,
+        "failure_checks": [],
+    }
+
+
+def test_summary_excludes_model_failures_from_evaluation_denominator():
+    """模型/端点传输失败不算评测失败：从分母剔除并单独计数，保留严格口径。"""
+    rows = [
+        _summary_row(passed=True, status="completed"),
+        _summary_row(passed=True, status="completed"),
+        _summary_row(passed=False, status="completed"),
+        _summary_row(passed=False, status="provider_error"),
+    ]
+    summary = summarize(rows)
+    assert summary["strict_failures"] == 2
+    assert summary["gradable_trials"] == 3
+    assert summary["gradable_successes"] == 2
+    assert summary["gradable_failures"] == 1
+    assert summary["gradable_success_rate"] == 0.666667
+    assert summary["excluded_model_failure_trials"] == 1
+    assert gradable_failures(rows) == 1
+
+    only_model_failures = [_summary_row(passed=False, status="provider_error")]
+    assert gradable_failures(only_model_failures) == 0
+    assert summarize(only_model_failures)["gradable_success_rate"] is None
 
 
 def test_per_model_usage_separates_known_tokens_from_missing_premium_usage(tmp_path):

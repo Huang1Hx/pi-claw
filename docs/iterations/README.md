@@ -66,3 +66,4 @@ Iteration 001–005 保留当时的路径与验证命令，不回写历史记录
 [Iteration 034](ITERATION_034_WORKSPACE_TEST_PROTECTION.md)：工作区测试保护与变更—测试关联。
 [Iteration 035](ITERATION_035_PUBLIC_CI_AND_LICENSE.md)：公开仓库许可证与通用 CI。
 [Iteration 037](ITERATION_037_EXPLICIT_ROLLBACK.md)：取消后的显式事务回滚（宿主写入日志 + `/undo`）。
+[Iteration 038](ITERATION_038_STAGE3_FULL_REGRESSION.md)：阶段 3 同协议 90-trial 回归与模型失败口径修正。
