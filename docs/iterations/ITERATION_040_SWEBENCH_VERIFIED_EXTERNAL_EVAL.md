@@ -74,9 +74,18 @@ gold pilot（requests-5414，Python 3.9）     ftp=1/1，ptp=121/130（同上，
 
 ### 待办阻塞
 
-容器版 gold 自检的命令在自动审批复核上连续两次超时，尚未实跑；需用户显式批准后执行：
+容器版 gold 自检已实跑，但**固定 Python 版本被网络限制卡住**：
 
-```bash
-.venv/bin/python -m external_eval gold --instance psf__requests-5414 --docker \
-  --root runs/swebench-verified/work-docker
-```
+- Docker 守护进程无法访问 `registry-1.docker.io`，`python:3.9-slim` 拉不下来；镜像源
+  `docker.m.daocloud.io` 亦超时。
+- 容器内 `pip` 可访问 PyPI（200），但用 `uv` 在容器内拉取独立 CPython 3.9 的下载挂起。
+- 退而用本地已有的 `python:3.12.15` 镜像 + 判定期 `--network none` 跑通：
+  `psf__requests-5414` gold `ftp=1/1`、`ptp=124/130`（较宿主 venv 的 121/130 少 3 项网络噪声）。
+  剩余 6 项失败为 **Python 3.12 vs 3.9 语义**（`_basic_auth_str` 原生 str、socket 超时行为），
+  仍属环境而非补丁问题。
+
+因此需要一个可用的固定版本来源（预拉取镜像 / 可用镜像源 / 预置 3.9 运行时）才能得到干净基线。
+
+**当前可行的替代口径**：以 gold 补丁在同环境的 PASS_TO_PASS 结果作为该实例基线，
+只统计"相对基线的回归"，用 `FAIL_TO_PASS` 通过率作为修 bug 的主信号——这样 3.12 的固定环境噪声
+被基线抵消，仍能给出可信的相对结论。

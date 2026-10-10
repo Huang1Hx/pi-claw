@@ -45,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--root", type=Path, default=DEFAULT_ROOT)
         p.add_argument("--python-version", help="用 uv 固定该 Python 版本（如 3.9）")
         p.add_argument("--docker", action="store_true", help="用受限容器固定环境（方案 B）")
+        p.add_argument("--image", help="覆盖容器镜像（本地已有镜像或私有源）")
         if name == "patch":
             p.add_argument("--patch-file", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -79,8 +80,8 @@ def main(argv: list[str] | None = None) -> int:
     root = assert_isolated_output(args.root)
     repo_dir = clone_base(instance, root)
     if args.docker:
-        docker_prepare(instance, repo_dir.parent)
-        tester = docker_tester(instance, repo_dir.parent)
+        docker_prepare(instance, repo_dir.parent, image=args.image)
+        tester = docker_tester(instance, repo_dir.parent, image=args.image)
     else:
         venv = create_venv(repo_dir, python_version=args.python_version)
         tester = local_tester(venv / "bin" / "python", repo_dir)

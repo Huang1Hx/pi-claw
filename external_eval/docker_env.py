@@ -27,8 +27,10 @@ LIMITS = ("--memory", "2g", "--memory-swap", "2g", "--cpus", "2", "--pids-limit"
 CONTAINER_WORK = "/work"
 
 
-def image_for(instance: dict) -> str:
+def image_for(instance: dict, *, image: str | None = None) -> str:
     """按仓库选出固定 Python 的官方 slim 镜像。"""
+    if image:
+        return image
     version = REPO_PYTHON.get(instance["repo"], DEFAULT_PYTHON)
     return f"python:{version}-slim"
 
@@ -43,6 +45,7 @@ def docker_prepare(
     instance: dict,
     inst_dir: Path,
     *,
+    image: str | None = None,
     runner: Runner | None = None,
     timeout: int = 1800,
 ) -> str:
@@ -63,7 +66,7 @@ def docker_prepare(
         f"{inst_dir}:{CONTAINER_WORK}",
         "-w",
         f"{CONTAINER_WORK}/repo",
-        image_for(instance),
+        image_for(instance, image=image),
         "bash",
         "-lc",
         install,
@@ -78,6 +81,7 @@ def docker_tester(
     instance: dict,
     inst_dir: Path,
     *,
+    image: str | None = None,
     runner: Runner | None = None,
     timeout: int = 600,
 ) -> Callable[[str], bool]:
@@ -97,7 +101,7 @@ def docker_tester(
             f"{inst_dir}:{CONTAINER_WORK}",
             "-w",
             f"{CONTAINER_WORK}/repo",
-            image_for(instance),
+            image_for(instance, image=image),
             f"{CONTAINER_WORK}/venv/bin/python",
             "-m",
             "pytest",
