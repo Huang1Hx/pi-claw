@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from external_eval.harness import create_venv, evaluate_patch
+from external_eval.harness import create_venv, evaluate_patch, parse_junit
 from external_eval.swebench_verified import (
     assert_isolated_output,
     frozen_task_ids,
@@ -74,7 +74,26 @@ class _FakeRunner:
 
 def _tester(fail_ids):
     """把"失败测试集合"包装成 test_fn(test_id) -> bool。"""
-    return lambda test_id: test_id not in fail_ids
+    return lambda test_ids: {t: t not in fail_ids for t in test_ids}
+
+
+def test_parse_junit_maps_classname_to_nodeid(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_mod.py").write_text("")
+    xml = (
+        '<testsuites><testsuite name="pytest" tests="3">'
+        '<testcase classname="tests.test_mod" name="test_fn"/>'
+        '<testcase classname="tests.test_mod.TestCls" name="test_m[1]">'
+        '<failure message="boom"/></testcase>'
+        '<testcase classname="tests.test_mod.TestCls" name="test_ok[2]"/>'
+        "</testsuite></testsuites>"
+    )
+    parsed = parse_junit(xml, tmp_path)
+    assert parsed == {
+        "tests/test_mod.py::test_fn": True,
+        "tests/test_mod.py::TestCls::test_m[1]": False,
+        "tests/test_mod.py::TestCls::test_ok[2]": True,
+    }
 
 
 def _instance():

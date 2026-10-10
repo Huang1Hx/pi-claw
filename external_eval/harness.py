@@ -105,17 +105,71 @@ def apply_diff(repo_dir: Path, diff_text: str, *, runner: Runner | None = None, 
         raise RuntimeError(f"应用 {label} 失败：{result.stderr.strip()[:400]}")
 
 
-def local_tester(python: Path, repo_dir: Path, *, runner: Runner | None = None, timeout: int = 600):
-    """返回"跑单个测试 id → 是否通过"的本地 venv 实现。"""
+def parse_junit(xml_text: str, repo_dir: Path) -> dict[str, bool]:
+    """把 pytest 的 junit xml 还原成 `nodeid -> 是否通过`；无法定位的用例忽略。"""
+    import xml.etree.ElementTree as ET
 
-    def run(test_id: str) -> bool:
-        result = _run(
-            runner,
-            [str(python), "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider", test_id],
-            repo_dir,
-            timeout=timeout,
-        )
-        return result.returncode == 0
+    root = ET.fromstring(xml_text)
+    results: dict[str, bool] = {}
+    for case in root.iter("testcase"):
+        classname = case.get("classname") or ""
+        name = case.get("name") or ""
+        parts = classname.split(".") if classname else []
+        nodeid = None
+        for k in range(len(parts), 0, -1):
+            candidate = "/".join(parts[:k]) + ".py"
+            if (repo_dir / candidate).is_file():
+                nodeid = candidate + "::" + "::".join(parts[k:] + [name])
+                break
+        if nodeid is None:
+            continue
+        failed = any(child.tag in {"failure", "error"} for child in case)
+        results[nodeid] = not failed
+    return results
+
+
+def _pytest_group(
+    argv_prefix, repo_dir, test_ids, *, runner, timeout, junit_arg: str | None = None
+) -> dict[str, bool]:
+    """一次 pytest 调用跑完一组用例，用 junit xml 取每条结果。"""
+    junit = repo_dir.parent / "junit.xml"
+    if junit.exists():
+        junit.unlink()
+    # junit_arg 是"被执行进程视角"的路径（容器内为 /work/junit.xml，本地为宿主路径）。
+    junit_arg = junit_arg or str(junit)
+    # 直接传 nodeid 时，任一 id 在当前环境不存在都会让 pytest 以用法错误中止整组；
+    # 因此改为按文件运行，再用 junit 逐条匹配（未匹配到的计为未通过）。
+    files = list(dict.fromkeys(test_id.split("::", 1)[0] for test_id in test_ids))
+    result = _run(
+        runner,
+        [
+            *argv_prefix,
+            "-m",
+            "pytest",
+            "-q",
+            "--tb=no",
+            "--no-header",
+            "-p",
+            "no:cacheprovider",
+            f"--junitxml={junit_arg}",
+            *files,
+        ],
+        repo_dir,
+        timeout=timeout,
+    )
+    _ = result  # 返回码不直接用；判定以 junit 每条结果为准
+    parsed = parse_junit(junit.read_text(), repo_dir) if junit.exists() else {}
+    # 未出现在 junit 里的用例按"未通过"处理（收集/导入错误等）。
+    return {test_id: parsed.get(test_id, False) for test_id in test_ids}
+
+
+def local_tester(
+    python: Path, repo_dir: Path, *, runner: Runner | None = None, timeout: int = 1200
+):
+    """返回"跑一组测试 id → {id: 是否通过}"的本地 venv 实现。"""
+
+    def run(test_ids: list[str]) -> dict[str, bool]:
+        return _pytest_group([str(python)], repo_dir, test_ids, runner=runner, timeout=timeout)
 
     return run
 
@@ -130,15 +184,15 @@ def evaluate_patch(
 ) -> dict:
     """按官方规则判定：全部 FAIL_TO_PASS 通过且全部 PASS_TO_PASS 仍通过。
 
-    `test_fn(test_id) -> bool` 由调用方决定执行环境（本地 venv 或受限额的容器）。
+    `test_fn(test_ids) -> {id: bool}` 由调用方决定执行环境（本地 venv 或受限额的容器）。
     """
     tests = instance_tests(instance)
     reset_base(repo_dir, instance["base_commit"], runner=runner)
     apply_diff(repo_dir, prediction_patch, runner=runner, label="prediction")
     apply_diff(repo_dir, instance["test_patch"], runner=runner, label="test_patch")
 
-    fail_results = {test_id: bool(test_fn(test_id)) for test_id in tests["FAIL_TO_PASS"]}
-    pass_results = {test_id: bool(test_fn(test_id)) for test_id in tests["PASS_TO_PASS"]}
+    fail_results = test_fn(tests["FAIL_TO_PASS"])
+    pass_results = test_fn(tests["PASS_TO_PASS"])
 
     resolved = all(fail_results.values()) and all(pass_results.values())
     return {

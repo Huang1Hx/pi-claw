@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from external_eval.harness import Runner, _run
+from external_eval.harness import Runner, _pytest_group, _run
 
 # SWE-bench 各仓库对应的 Python 版本（按仓库版本取经验值，用 gold 补丁自检校验）。
 REPO_PYTHON = {
@@ -83,34 +83,35 @@ def docker_tester(
     *,
     image: str | None = None,
     runner: Runner | None = None,
-    timeout: int = 600,
-) -> Callable[[str], bool]:
-    """返回在 `--network none` 受限容器里跑单个测试 id 的判定函数。"""
+    timeout: int = 1800,
+) -> Callable[[list[str]], dict[str, bool]]:
+    """返回在 `--network none` 受限容器里跑一组测试 id 的判定函数。"""
     inst_dir = Path(inst_dir)
     repo_dir = inst_dir / "repo"
 
-    def run(test_id: str) -> bool:
-        argv = [
-            "docker",
-            "run",
-            "--rm",
-            "--network",
-            "none",
-            *LIMITS,
-            "-v",
-            f"{inst_dir}:{CONTAINER_WORK}",
-            "-w",
-            f"{CONTAINER_WORK}/repo",
-            image_for(instance, image=image),
-            f"{CONTAINER_WORK}/venv/bin/python",
-            "-m",
-            "pytest",
-            "-q",
-            "--no-header",
-            "-p",
-            "no:cacheprovider",
-            test_id,
-        ]
-        return _run(runner, argv, repo_dir, timeout=timeout).returncode == 0
+    prefix = [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        *LIMITS,
+        "-v",
+        f"{inst_dir}:{CONTAINER_WORK}",
+        "-w",
+        f"{CONTAINER_WORK}/repo",
+        image_for(instance, image=image),
+        f"{CONTAINER_WORK}/venv/bin/python",
+    ]
+
+    def run(test_ids: list[str]) -> dict[str, bool]:
+        return _pytest_group(
+            prefix,
+            repo_dir,
+            test_ids,
+            runner=runner,
+            timeout=timeout,
+            junit_arg=f"{CONTAINER_WORK}/junit.xml",
+        )
 
     return run

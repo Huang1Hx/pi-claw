@@ -30,18 +30,16 @@ def test_image_for_uses_pinned_python_per_repo():
 def test_docker_tester_pins_network_none_and_limits(tmp_path):
     recorder = _Recorder(returncode=0)
     tester = docker_tester(_instance(), tmp_path, runner=recorder)
-    assert tester("tests/test_requests.py::TestX::test_y") is True
+    result = tester(["tests/test_requests.py::TestX::test_y"])
     argv = recorder.calls[0]
     assert argv[:3] == ["docker", "run", "--rm"]
     assert "--network" in argv and argv[argv.index("--network") + 1] == "none"
     for flag in LIMITS:
         assert flag in argv
-    assert "-v" in argv and argv[-1].endswith("TestX::test_y")
-
-
-def test_docker_tester_reports_failure_on_nonzero(tmp_path):
-    tester = docker_tester(_instance(), tmp_path, runner=_Recorder(returncode=1))
-    assert tester("tests/test_requests.py::TestX::test_y") is False
+    assert "-v" in argv and argv[-1] == "tests/test_requests.py"
+    assert any(a.startswith("--junitxml=/work/") for a in argv)
+    # 没有 junit 产物时按"未通过"处理。
+    assert result == {"tests/test_requests.py::TestX::test_y": False}
 
 
 def test_docker_prepare_runs_install_in_one_container(tmp_path):

@@ -21,6 +21,9 @@
     "pylint-dev__pylint-4970",
     "pylint-dev__pylint-7080",
     "sphinx-doc__sphinx-8595",
-    "sphinx-doc__sphinx-8269"
+    "sphinx-doc__sphinx-8269",
+    "pallets__flask-5014",
+    "pylint-dev__pylint-6903",
+    "pytest-dev__pytest-10051"
   ]
 }
