@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import time
 from pathlib import Path
@@ -70,11 +71,30 @@ def run_agent(
     max_steps: int = 24,
     deadline_seconds: int = 1800,
     trace_path: Path | None = None,
+    checkpoint_path: Path | None = None,
+    resume_from: Path | None = None,
+    seed_patch: str | None = None,
+    extra_instructions: str | None = None,
 ) -> dict:
-    """在干净 base_commit 上跑一个 Agent 回合并返回补丁与运行摘要。"""
-    from external_eval.harness import reset_base
+    """在干净 base_commit 上跑一个 Agent 回合，返回补丁与运行摘要。
+
+    续跑相关参数用于坏例自动修复：
+    - `seed_patch`：先把上一轮的补丁恢复到工作区，回到"失误时的 checkpoint"；
+    - `resume_from`：读取上一轮保存的对话历史，从同一条上下文继续；
+    - `checkpoint_path`：本轮结束后把对话历史落盘，供下次续跑；
+    - `extra_instructions`：把诊断出的失败原因作为纠正提示追加到任务里。
+    """
+    from external_eval.harness import apply_diff, reset_base
 
     reset_base(repo_dir, instance["base_commit"])
+    if seed_patch and seed_patch.strip():
+        apply_diff(repo_dir, seed_patch, label="checkpoint")
+    history = None
+    if resume_from and Path(resume_from).is_file():
+        try:
+            history = json.loads(Path(resume_from).read_text()).get("messages") or None
+        except (ValueError, OSError):
+            history = None
     settings = load_settings(config_path=Path(config_path).resolve(), cwd=Path(config_path).parent)
     executor = ToolExecutor(
         ExternalPolicy(repo_dir),
@@ -99,8 +119,22 @@ def run_agent(
         completion_verifier=None,
     )
     control = ExecutionControl(deadline_monotonic=time.monotonic() + deadline_seconds)
-    result = agent.run(build_user_prompt(instance), control=control)
+    task = build_user_prompt(instance)
+    if extra_instructions:
+        task = f"{task}\n\n补充要求：\n{extra_instructions}"
+    result = agent.run(task, messages=history, control=control)
     patch = capture_diff(repo_dir)
+    if checkpoint_path is not None:
+        Path(checkpoint_path).write_text(
+            json.dumps(
+                {
+                    "messages": agent.last_messages,
+                    "steps": result.steps,
+                    "status": result.status.value,
+                },
+                ensure_ascii=False,
+            )
+        )
     return {
         "patch": patch,
         "status": result.status.value,

@@ -49,6 +49,22 @@ def main(argv: list[str] | None = None) -> int:
     runner_parser.add_argument("--max-steps", type=int, default=24)
     runner_parser.add_argument("--deadline", type=int, default=1800)
     runner_parser.add_argument("--no-baseline", action="store_true")
+    runner_parser.add_argument("--resume", type=Path, help="从 checkpoint 历史续跑")
+    runner_parser.add_argument("--seed-patch", type=Path, help="先恢复上一轮补丁到工作区")
+    runner_parser.add_argument("--hint", help="追加的纠正提示（来自坏例诊断）")
+    runner_parser.add_argument("--attempt", type=int, default=1)
+    sub.add_parser("diagnose", help="对结果表做坏例诊断").add_argument(
+        "--root", type=Path, default=DEFAULT_ROOT
+    )
+    repair_parser = sub.add_parser("repair", help="按诊断自动重试坏例")
+    repair_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    repair_parser.add_argument("--image")
+    repair_parser.add_argument("--config", type=Path, default=Path("pi-claw.toml"))
+    repair_parser.add_argument("--max-steps", type=int, default=30)
+    repair_parser.add_argument("--deadline", type=int, default=3600)
+    repair_parser.add_argument("--workers", type=int, default=2)
+    repair_parser.add_argument("--attempts", type=int, default=2)
+    repair_parser.add_argument("--only", nargs="*")
     sweep_parser = sub.add_parser("sweep", help="对选样逐条 prepare+gold 体检")
     sweep_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     sweep_parser.add_argument("--image")
@@ -101,6 +117,28 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         return _run_agent_instance(args)
+
+    if args.command == "diagnose":
+        from external_eval.diagnose import diagnose_all, summarize
+
+        diags = diagnose_all(root=args.root)
+        print(json.dumps(summarize(diags), ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "repair":
+        from external_eval.batch import auto_repair
+
+        auto_repair(
+            root=args.root,
+            image=args.image,
+            config=args.config,
+            max_steps=args.max_steps,
+            deadline=args.deadline,
+            workers=args.workers,
+            attempts=args.attempts,
+            only=args.only,
+        )
+        return 0
 
     if args.command == "sweep":
         from external_eval.batch import sweep
@@ -178,6 +216,10 @@ def _run_agent_instance(args) -> int:
         max_steps=args.max_steps,
         deadline_seconds=args.deadline,
         trace_path=inst_dir / "trace-agent.jsonl",
+        checkpoint_path=inst_dir / "checkpoint-agent.json",
+        resume_from=getattr(args, "resume", None),
+        seed_patch=getattr(args, "seed_patch", None),
+        extra_instructions=getattr(args, "hint", None),
     )
     result = evaluate_patch(instance, repo_dir, tester, run["patch"])
     regressions = sorted(
@@ -197,6 +239,7 @@ def _run_agent_instance(args) -> int:
         "ftp_all_passed": ftp_ok,
         "official_resolved": result["resolved"],
         "relative_resolved": relative_resolved,
+        "attempt": getattr(args, "attempt", 1),
     }
     path = save_result(report, report_dir)
     print(

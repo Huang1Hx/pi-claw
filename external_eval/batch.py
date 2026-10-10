@@ -121,7 +121,10 @@ def run_instance(instance: dict, root: Path, *, image, config, max_steps, deadli
     except Exception as exc:  # noqa: BLE001
         return {"instance_id": instance["instance_id"], "error": str(exc)[:400], "rc": None}
     report = root.parent / "report" / f"{instance['instance_id']}.json"
-    data = json.loads(report.read_text())
+    return _record_from_report(instance, json.loads(report.read_text()), started, rc, attempt=1)
+
+
+def _record_from_report(instance: dict, data: dict, started: float, rc, *, attempt: int) -> dict:
     return {
         "instance_id": instance["instance_id"],
         "repo": instance["repo"],
@@ -133,8 +136,118 @@ def run_instance(instance: dict, root: Path, *, image, config, max_steps, deadli
         "relative_resolved": data["relative_resolved"],
         "ptp_regressions": len(data["ptp_regressions"]),
         "seconds": round(time.monotonic() - started, 1),
+        "attempt": attempt,
         "rc": rc,
     }
+
+
+def repair_instance(
+    instance: dict, root: Path, *, image, config, max_steps, deadline, attempts
+) -> dict:
+    """对一个坏例按诊断结果反复"回到 checkpoint 重试"，直到通过或重试次数用尽。"""
+    from types import SimpleNamespace
+
+    from external_eval.__main__ import _run_agent_instance
+    from external_eval.diagnose import classify, plan_retry
+
+    iid = instance["instance_id"]
+    inst_dir = Path(root) / iid
+    record = _find_record(root, iid, instance)
+    for attempt in range(1, attempts + 1):
+        diag = classify(record, root=root)
+        plan = plan_retry(diag, base_max_steps=max_steps)
+        if plan is None:
+            break
+        _log(f"[repair] {iid:<40} 第{attempt}次：{diag['reason']} → max_steps={plan['max_steps']}")
+        args = SimpleNamespace(
+            instance=iid,
+            root=root,
+            docker=True,
+            image=image,
+            config=config,
+            max_steps=plan["max_steps"],
+            deadline=deadline,
+            no_baseline=False,
+            resume=inst_dir / "checkpoint-agent.json",
+            seed_patch=inst_dir / "prediction.diff",
+            hint=plan["hint"],
+            attempt=attempt + 1,
+        )
+        started = time.monotonic()
+        try:
+            rc = _run_agent_instance(args)
+        except Exception as exc:  # noqa: BLE001
+            return {"instance_id": iid, "error": str(exc)[:400], "rc": None, "attempt": attempt + 1}
+        report = json.loads((Path(root).parent / "report" / f"{iid}.json").read_text())
+        record = _record_from_report(instance, report, started, rc, attempt=attempt + 1)
+        if record["relative_resolved"]:
+            break
+    return record
+
+
+def _find_record(root: Path, iid: str, instance: dict) -> dict:
+    batch_path = Path(root).parent / "batch.json"
+    if batch_path.is_file():
+        for row in json.loads(batch_path.read_text()):
+            if row.get("instance_id") == iid:
+                return row
+    return {"instance_id": iid, "repo": instance["repo"]}
+
+
+def auto_repair(
+    *,
+    root: Path = DEFAULT_ROOT,
+    image: str | None = None,
+    config: Path = Path("pi-claw.toml"),
+    max_steps: int = 30,
+    deadline: int = 3600,
+    workers: int = 2,
+    attempts: int = 2,
+    only: list[str] | None = None,
+) -> list[dict]:
+    """对结果表中的可修复坏例自动重试，并把最新结果合并回 batch.json。"""
+    from external_eval.diagnose import RETRYABLE, classify, summarize
+
+    root = assert_isolated_output(root)
+    selection = json.loads((Path(__file__).with_name("selection.json")).read_text())
+    rows = select_instances(json.loads(_metadata_path(root).read_text()), selection)
+    by_id = {r["instance_id"]: r for r in rows}
+    batch_path = root.parent / "batch.json"
+    records = json.loads(batch_path.read_text()) if batch_path.is_file() else []
+    diags = [classify(r, root=root) for r in records]
+    todo = [d["instance_id"] for d in diags if d["reason"] in RETRYABLE]
+    if only:
+        todo = [i for i in todo if i in set(only)]
+    _log(f"[repair] 可重试 {len(todo)} 个：{summarize(diags)['by_reason']}")
+    results: list[dict] = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(
+                repair_instance,
+                by_id[i],
+                root,
+                image=image,
+                config=config,
+                max_steps=max_steps,
+                deadline=deadline,
+                attempts=attempts,
+            ): i
+            for i in todo
+        }
+        for fut in as_completed(futures):
+            rec = fut.result()
+            results.append(rec)
+            _log(
+                f"[repair] {rec['instance_id']:<40} rel={rec.get('relative_resolved')} "
+                f"attempt={rec.get('attempt')} steps={rec.get('steps', '-')} "
+                f"{rec.get('error', '')[:60]}"
+            )
+    if batch_path.is_file():
+        merged = {r["instance_id"]: r for r in json.loads(batch_path.read_text())}
+        merged.update({r["instance_id"]: r for r in results})
+        records = sorted(merged.values(), key=lambda r: r["instance_id"])
+    batch_path.write_text(json.dumps(records, ensure_ascii=False, indent=2))
+    return results
 
 
 def batch(
@@ -182,6 +295,11 @@ def batch(
             )
     results.sort(key=lambda r: r["instance_id"])
     out = root.parent / "batch.json"
+    if out.is_file():
+        # 与既有结果表合并，支持只补跑失败项而不丢全表。
+        merged = {r["instance_id"]: r for r in json.loads(out.read_text())}
+        merged.update({r["instance_id"]: r for r in results})
+        results = sorted(merged.values(), key=lambda r: r["instance_id"])
     out.write_text(json.dumps(results, ensure_ascii=False, indent=2))
     _log(f"[batch] 结果表：{out}")
     return results
