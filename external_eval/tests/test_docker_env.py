@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from external_eval.docker_env import LIMITS, docker_prepare, docker_tester, image_for
+from external_eval.docker_env import (
+    DEFAULT_IMAGE,
+    LIMITS,
+    docker_prepare,
+    docker_tester,
+    image_for,
+)
 
 
 class _Recorder:
@@ -21,10 +27,11 @@ def _instance(repo="psf/requests"):
     return {"instance_id": "psf__requests-5414", "repo": repo}
 
 
-def test_image_for_uses_pinned_python_per_repo():
-    assert image_for(_instance("psf/requests")) == "python:3.9-slim"
-    assert image_for(_instance("pallets/flask")) == "python:3.8-slim"
-    assert image_for(_instance("unknown/repo")) == "python:3.9-slim"
+def test_image_for_defaults_to_local_py39_image():
+    assert image_for(_instance("psf/requests")) == DEFAULT_IMAGE
+    assert image_for(_instance("pallets/flask")) == DEFAULT_IMAGE
+    assert image_for(_instance("unknown/repo")) == DEFAULT_IMAGE
+    assert image_for(_instance(), image="custom:tag") == "custom:tag"
 
 
 def test_docker_tester_pins_network_none_and_limits(tmp_path):

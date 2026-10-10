@@ -1,0 +1,26 @@
+# SWE-bench Verified 外部评测专用镜像：在本地 python:3.12 基础镜像上源码编译 Python 3.9。
+# 官方 SWE-bench 环境用 3.9；本机镜像仓库不可拉取，只能从本地已有镜像派生。
+FROM pi-claw-base:py312
+
+ENV DEBIAN_FRONTEND=noninteractive PYTHON_VERSION=3.9.18
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential zlib1g-dev libssl-dev libffi-dev libbz2-dev \
+      liblzma-dev libreadline-dev libsqlite3-dev libncurses-dev \
+      wget ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN wget -q "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tgz" -O /tmp/py.tgz \
+ && tar -xzf /tmp/py.tgz -C /tmp \
+ && cd "/tmp/Python-${PYTHON_VERSION}" \
+ && ./configure --prefix=/opt/python3.9 --with-ensurepip=install >/tmp/configure.log 2>&1 \
+ && make -j"$(nproc)" >/tmp/make.log 2>&1 \
+ && make install >/tmp/install.log 2>&1 \
+ && rm -rf "/tmp/Python-${PYTHON_VERSION}" /tmp/py.tgz \
+ && cd / \
+ && /opt/python3.9/bin/python3.9 -m pip install -q --upgrade pip
+
+ENV PATH=/opt/python3.9/bin:$PATH
+
+CMD ["/opt/python3.9/bin/python3.9"]
