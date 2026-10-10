@@ -49,6 +49,19 @@ def main(argv: list[str] | None = None) -> int:
     runner_parser.add_argument("--max-steps", type=int, default=24)
     runner_parser.add_argument("--deadline", type=int, default=1800)
     runner_parser.add_argument("--no-baseline", action="store_true")
+    sweep_parser = sub.add_parser("sweep", help="对选样逐条 prepare+gold 体检")
+    sweep_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    sweep_parser.add_argument("--image")
+    sweep_parser.add_argument("--workers", type=int, default=3)
+    sweep_parser.add_argument("--only", nargs="*")
+    batch_parser = sub.add_parser("batch", help="对体检通过的实例批量跑 Agent")
+    batch_parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    batch_parser.add_argument("--image")
+    batch_parser.add_argument("--config", type=Path, default=Path("pi-claw.toml"))
+    batch_parser.add_argument("--max-steps", type=int, default=30)
+    batch_parser.add_argument("--deadline", type=int, default=2400)
+    batch_parser.add_argument("--workers", type=int, default=2)
+    batch_parser.add_argument("--only", nargs="*")
     for name in ("prepare", "gold", "patch"):
         p = sub.add_parser(name, help=f"{name} 一个实例")
         p.add_argument("--instance", required=True)
@@ -88,6 +101,26 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "run":
         return _run_agent_instance(args)
+
+    if args.command == "sweep":
+        from external_eval.batch import sweep
+
+        sweep(root=args.root, image=args.image, workers=args.workers, only=args.only)
+        return 0
+
+    if args.command == "batch":
+        from external_eval.batch import batch
+
+        batch(
+            root=args.root,
+            image=args.image,
+            config=args.config,
+            max_steps=args.max_steps,
+            deadline=args.deadline,
+            workers=args.workers,
+            only=args.only,
+        )
+        return 0
 
     instance, _ = _load_instance(args.instance)
     root = assert_isolated_output(args.root)
