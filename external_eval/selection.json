@@ -1,0 +1,26 @@
+{
+  "dataset": "princeton-nlp/SWE-bench_Verified",
+  "split": "test",
+  "generated_from": "runs/swebench-verified/metadata.json",
+  "criteria": [
+    "纯 Python、依赖轻、测试可快速运行，排除编译型/科学计算重栈",
+    "gold 补丁单文件且新增行数很小（多数 <= 6）",
+    "FAIL_TO_PASS 数量少（<= 8），便于逐条判定",
+    "仓库限定在 requests / pytest / pylint / sphinx / flask"
+  ],
+  "repos": ["psf/requests", "pytest-dev/pytest", "pylint-dev/pylint", "sphinx-doc/sphinx", "pallets/flask"],
+  "instances": [
+    "psf__requests-1142",
+    "psf__requests-1766",
+    "psf__requests-1921",
+    "psf__requests-5414",
+    "pytest-dev__pytest-5809",
+    "pytest-dev__pytest-6202",
+    "pytest-dev__pytest-7521",
+    "pytest-dev__pytest-7982",
+    "pylint-dev__pylint-4970",
+    "pylint-dev__pylint-7080",
+    "sphinx-doc__sphinx-8595",
+    "sphinx-doc__sphinx-8269"
+  ]
+}
