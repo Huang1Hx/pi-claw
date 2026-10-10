@@ -38,6 +38,8 @@ FAIL_TO_PASS ≤ 8"筛出 12 条，覆盖 `requests`/`pytest`/`pylint`/`sphinx`�
 | `external_eval/harness.py` | 克隆 base_commit、建 venv（可用 `uv` 固定 Python 版本）、`git apply` 补丁、按官方规则判定 resolved |
 | `external_eval/__main__.py` | `fetch` / `list` / `prepare` / `gold` / `patch` 子命令 |
 | `external_eval/tests/test_external_eval.py` | 7 项离线测试（筛选、隔离、判定逻辑、uv argv），不联网 |
+| `external_eval/docker_env.py` | 方案 B：按仓库固定 Python 的受限容器（`--memory 2g --cpus 2 --pids-limit 512`），准备期联网装依赖、判定期 `--network none` |
+| `external_eval/tests/test_docker_env.py` | 4 项离线测试（镜像映射、资源上限、network none、安装 argv），不真的起容器 |
 
 判定规则与官方一致：应用预测补丁与 `test_patch` 后，**全部 FAIL_TO_PASS 通过且全部 PASS_TO_PASS
 仍通过**才算 resolved。
@@ -65,7 +67,16 @@ gold pilot（requests-5414，Python 3.9）     ftp=1/1，ptp=121/130（同上，
 
 ## 后续（待确认）
 
-- 选定执行环境：官方 per-instance Docker 镜像，或自建"按仓库固定 Python+依赖+网络"的镜像；
+- 执行环境已定为**方案 B**（`docker_env.py`，按仓库固定 Python 的受限容器）；
 - 实现外部 Agent 适配器：以放宽的、**独立**的 policy/审批驱动本项目 Agent 产出补丁；
 - 先在 3–5 条实例上跑通"Agent 产补丁 → 官方规则判定"，报告 resolve 率、Token、步数与耗时；
 - 结果写入本文件并作为外生对照，不改动任何冻结评测的任务与口径。
+
+### 待办阻塞
+
+容器版 gold 自检的命令在自动审批复核上连续两次超时，尚未实跑；需用户显式批准后执行：
+
+```bash
+.venv/bin/python -m external_eval gold --instance psf__requests-5414 --docker \
+  --root runs/swebench-verified/work-docker
+```

@@ -105,39 +105,40 @@ def apply_diff(repo_dir: Path, diff_text: str, *, runner: Runner | None = None, 
         raise RuntimeError(f"应用 {label} 失败：{result.stderr.strip()[:400]}")
 
 
-def _pytest(python: Path, repo_dir: Path, test_id: str, *, runner, timeout: int):
-    return _run(
-        runner,
-        [str(python), "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider", test_id],
-        repo_dir,
-        timeout=timeout,
-    )
+def local_tester(python: Path, repo_dir: Path, *, runner: Runner | None = None, timeout: int = 600):
+    """返回"跑单个测试 id → 是否通过"的本地 venv 实现。"""
+
+    def run(test_id: str) -> bool:
+        result = _run(
+            runner,
+            [str(python), "-m", "pytest", "-q", "--no-header", "-p", "no:cacheprovider", test_id],
+            repo_dir,
+            timeout=timeout,
+        )
+        return result.returncode == 0
+
+    return run
 
 
 def evaluate_patch(
     instance: dict,
     repo_dir: Path,
-    python: Path,
+    test_fn,
     prediction_patch: str,
     *,
     runner: Runner | None = None,
-    timeout: int = 600,
 ) -> dict:
-    """按官方规则判定：全部 FAIL_TO_PASS 通过且全部 PASS_TO_PASS 仍通过。"""
+    """按官方规则判定：全部 FAIL_TO_PASS 通过且全部 PASS_TO_PASS 仍通过。
+
+    `test_fn(test_id) -> bool` 由调用方决定执行环境（本地 venv 或受限额的容器）。
+    """
     tests = instance_tests(instance)
     reset_base(repo_dir, instance["base_commit"], runner=runner)
     apply_diff(repo_dir, prediction_patch, runner=runner, label="prediction")
     apply_diff(repo_dir, instance["test_patch"], runner=runner, label="test_patch")
 
-    fail_results = {}
-    for test_id in tests["FAIL_TO_PASS"]:
-        result = _pytest(python, repo_dir, test_id, runner=runner, timeout=timeout)
-        fail_results[test_id] = result.returncode == 0
-
-    pass_results = {}
-    for test_id in tests["PASS_TO_PASS"]:
-        result = _pytest(python, repo_dir, test_id, runner=runner, timeout=timeout)
-        pass_results[test_id] = result.returncode == 0
+    fail_results = {test_id: bool(test_fn(test_id)) for test_id in tests["FAIL_TO_PASS"]}
+    pass_results = {test_id: bool(test_fn(test_id)) for test_id in tests["PASS_TO_PASS"]}
 
     resolved = all(fail_results.values()) and all(pass_results.values())
     return {

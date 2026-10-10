@@ -66,18 +66,15 @@ def test_external_instances_never_overlap_frozen_task_ids():
 
 
 class _FakeRunner:
-    """按最后一个参数（pytest 测试 id）决定返回码的假执行器。"""
-
-    def __init__(self, fail_ids: set[str], break_ptp: set[str] | None = None):
-        self.fail_ids = fail_ids
-        self.break_ptp = break_ptp or set()
+    """对所有命令返回成功的假执行器（仅用于 git 重置/应用补丁）。"""
 
     def __call__(self, argv, cwd, stdin_text=None):
-        if "-m" in argv and "pytest" in argv:
-            test_id = argv[-1]
-            rc = 1 if test_id in self.fail_ids or test_id in self.break_ptp else 0
-            return SimpleNamespace(returncode=rc, stdout="", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+
+def _tester(fail_ids):
+    """把"失败测试集合"包装成 test_fn(test_id) -> bool。"""
+    return lambda test_id: test_id not in fail_ids
 
 
 def _instance():
@@ -87,17 +84,15 @@ def _instance():
 def test_evaluate_patch_resolves_only_when_all_tests_pass(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
-    python = tmp_path / "venv" / "bin" / "python"
-    good = evaluate_patch(_instance(), repo, python, "diff", runner=_FakeRunner(set()))
+    runner = _FakeRunner()
+    good = evaluate_patch(_instance(), repo, _tester(set()), "diff", runner=runner)
     assert good["resolved"] is True
     assert good["fail_to_pass"] == {"t::a": True, "t::b": True}
 
-    broken_ftp = evaluate_patch(_instance(), repo, python, "diff", runner=_FakeRunner({"t::b"}))
+    broken_ftp = evaluate_patch(_instance(), repo, _tester({"t::b"}), "diff", runner=runner)
     assert broken_ftp["resolved"] is False
 
-    broken_ptp = evaluate_patch(
-        _instance(), repo, python, "diff", runner=_FakeRunner(set(), {"t::p"})
-    )
+    broken_ptp = evaluate_patch(_instance(), repo, _tester({"t::p"}), "diff", runner=runner)
     assert broken_ptp["resolved"] is False
 
 

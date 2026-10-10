@@ -6,11 +6,13 @@ import argparse
 import json
 from pathlib import Path
 
+from external_eval.docker_env import docker_prepare, docker_tester
 from external_eval.harness import (
     DEFAULT_ROOT,
     clone_base,
     create_venv,
     evaluate_patch,
+    local_tester,
     save_result,
 )
 from external_eval.swebench_verified import (
@@ -42,6 +44,7 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--instance", required=True)
         p.add_argument("--root", type=Path, default=DEFAULT_ROOT)
         p.add_argument("--python-version", help="用 uv 固定该 Python 版本（如 3.9）")
+        p.add_argument("--docker", action="store_true", help="用受限容器固定环境（方案 B）")
         if name == "patch":
             p.add_argument("--patch-file", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -75,8 +78,12 @@ def main(argv: list[str] | None = None) -> int:
     instance, _ = _load_instance(args.instance)
     root = assert_isolated_output(args.root)
     repo_dir = clone_base(instance, root)
-    venv = create_venv(repo_dir, python_version=args.python_version)
-    python = venv / "bin" / "python"
+    if args.docker:
+        docker_prepare(instance, repo_dir.parent)
+        tester = docker_tester(instance, repo_dir.parent)
+    else:
+        venv = create_venv(repo_dir, python_version=args.python_version)
+        tester = local_tester(venv / "bin" / "python", repo_dir)
     if args.command == "prepare":
         print(f"环境就绪：{repo_dir}")
         return 0
@@ -87,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         patch = args.patch_file.read_text()
         label = "prediction"
-    result = evaluate_patch(instance, repo_dir, python, patch)
+    result = evaluate_patch(instance, repo_dir, tester, patch)
     result["label"] = label
     path = save_result(result, root.parent / "report")
     print(json.dumps(result, ensure_ascii=False, indent=2))
