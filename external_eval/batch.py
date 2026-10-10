@@ -86,6 +86,11 @@ def sweep(
             )
     records.sort(key=lambda r: r["instance_id"])
     out = root.parent / "sweep.json"
+    if out.is_file():
+        # 与既有的体检表合并，支持只补扫失败项而不丢全表。
+        merged = {r["instance_id"]: r for r in json.loads(out.read_text())}
+        merged.update({r["instance_id"]: r for r in records})
+        records = sorted(merged.values(), key=lambda r: r["instance_id"])
     out.write_text(json.dumps(records, ensure_ascii=False, indent=2))
     _log(f"[sweep] 体检表：{out}")
     return records

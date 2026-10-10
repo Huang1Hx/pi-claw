@@ -33,7 +33,13 @@ REPO_PYTEST = {
 # 少数仓库的老代码依赖当年版本的直接依赖（新版会移除内部属性等）。
 REPO_EXTRA_PINS = {
     "pallets/flask": ("werkzeug==2.2.2",),
-    "pylint-dev/pylint": ("py==1.11.0", "pytest-timeout==2.1.0"),
+    "pylint-dev/pylint": (
+        "py==1.11.0",
+        "pytest-timeout==2.1.0",
+        "setuptools==69.5.1",
+        "setuptools_scm==7.1.0",
+        "wheel==0.41.3",
+    ),
     # Sphinx 的文档扩展在新版会反要求 Sphinx>=5，这里固定到与 3.x/4.x 时代匹配的一组。
     "sphinx-doc/sphinx": (
         "sphinxcontrib-applehelp==1.0.2",
@@ -50,8 +56,13 @@ REPO_EXTRA_PINS = {
         "imagesize==1.3.0",
         "snowballstemmer==2.2.0",
         "Pygments==2.11.2",
+        "html5lib==1.1",
     ),
 }
+
+# 部分仓库声明的构建后端过旧（如 setuptools~=62.6 不支持 PEP660），
+# 改用 venv 内已装的新 setuptools 做可编辑安装。
+REPO_NO_BUILD_ISOLATION = {"pylint-dev/pylint"}
 
 # 硬性资源上限，避免占用宿主内存/CPU/PID。
 LIMITS = ("--memory", "2g", "--memory-swap", "2g", "--cpus", "2", "--pids-limit", "512")
@@ -85,7 +96,8 @@ def install_spec(instance: dict) -> str:
         steps.append(f'/work/venv/bin/pip install -q "{pytest_spec}"')
     for pin in REPO_EXTRA_PINS.get(instance["repo"], ()):
         steps.append(f'/work/venv/bin/pip install -q "{pin}"')
-    steps.append("/work/venv/bin/pip install -q -e .")
+    editable_flag = " --no-build-isolation" if instance["repo"] in REPO_NO_BUILD_ISOLATION else ""
+    steps.append(f"/work/venv/bin/pip install -q -e .{editable_flag}")
     return " && ".join(steps)
 
 
