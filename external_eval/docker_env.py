@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 
@@ -74,6 +75,14 @@ def docker_prepare(
     """在受限容器里为该实例建 venv 并安装依赖，返回容器内解释器路径。"""
     inst_dir = Path(inst_dir)
     repo_dir = inst_dir / "repo"
+    marker = inst_dir / ".docker-prepare.json"
+    image = image_for(instance, image=image)
+    if marker.is_file() and (inst_dir / "venv" / "bin" / "python").is_file():
+        try:
+            if json.loads(marker.read_text()).get("image") == image:
+                return f"{CONTAINER_WORK}/venv/bin/python"
+        except (ValueError, OSError):
+            pass
     install = install_spec(instance)
     argv = [
         "docker",
@@ -84,7 +93,7 @@ def docker_prepare(
         f"{inst_dir}:{CONTAINER_WORK}",
         "-w",
         f"{CONTAINER_WORK}/repo",
-        image_for(instance, image=image),
+        image,
         "bash",
         "-lc",
         install,
@@ -92,6 +101,7 @@ def docker_prepare(
     result = _run(runner, argv, repo_dir, timeout=timeout)
     if result.returncode != 0:
         raise RuntimeError(f"容器内安装依赖失败：{result.stderr.strip()[:500]}")
+    marker.write_text(json.dumps({"image": image}))
     return f"{CONTAINER_WORK}/venv/bin/python"
 
 

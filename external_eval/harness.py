@@ -100,6 +100,9 @@ def apply_diff(repo_dir: Path, diff_text: str, *, runner: Runner | None = None, 
     """用 git apply 应用 unified diff；失败即报错并保留现场。"""
     patch_file = repo_dir.parent / f"{label}.diff"
     patch_file.write_text(diff_text)
+    if not diff_text.strip():
+        # 空补丁（如 Agent 未产出改动）按"无改动"处理，交由判定阶段判为未解决。
+        return
     result = _run(runner, ["git", "apply", "--whitespace=nowarn", str(patch_file)], repo_dir)
     if result.returncode != 0:
         raise RuntimeError(f"应用 {label} 失败：{result.stderr.strip()[:400]}")
