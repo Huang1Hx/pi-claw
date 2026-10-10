@@ -151,7 +151,6 @@ def _pytest_group(
             "pytest",
             "-q",
             "--tb=no",
-            "--no-header",
             "-p",
             "no:cacheprovider",
             f"--junitxml={junit_arg}",

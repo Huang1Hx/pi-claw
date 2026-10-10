@@ -34,11 +34,38 @@ REPO_PYTEST = {
 REPO_EXTRA_PINS = {
     "pallets/flask": ("werkzeug==2.2.2",),
     "pylint-dev/pylint": ("py==1.11.0", "pytest-timeout==2.1.0"),
+    # Sphinx 的文档扩展在新版会反要求 Sphinx>=5，这里固定到与 3.x/4.x 时代匹配的一组。
+    "sphinx-doc/sphinx": (
+        "sphinxcontrib-applehelp==1.0.2",
+        "sphinxcontrib-devhelp==1.0.2",
+        "sphinxcontrib-htmlhelp==2.0.0",
+        "sphinxcontrib-jsmath==1.0.1",
+        "sphinxcontrib-qthelp==1.0.3",
+        "sphinxcontrib-serializinghtml==1.1.5",
+        "docutils==0.17.1",
+        "jinja2==3.0.3",
+        "markupsafe==2.0.1",
+        "alabaster==0.7.12",
+        "babel==2.9.1",
+        "imagesize==1.3.0",
+        "snowballstemmer==2.2.0",
+        "Pygments==2.11.2",
+    ),
 }
 
 # 硬性资源上限，避免占用宿主内存/CPU/PID。
 LIMITS = ("--memory", "2g", "--memory-swap", "2g", "--cpus", "2", "--pids-limit", "512")
 CONTAINER_WORK = "/work"
+# 宿主与容器 UID 不同，git 会因 "dubious ownership" 拒绝工作，
+# 导致 setuptools_scm 等取不到版本；显式声明工作目录为安全目录。
+GIT_SAFE_ENV = (
+    "-e",
+    "GIT_CONFIG_COUNT=1",
+    "-e",
+    "GIT_CONFIG_KEY_0=safe.directory",
+    "-e",
+    "GIT_CONFIG_VALUE_0=/work/repo",
+)
 
 
 def image_for(instance: dict, *, image: str | None = None) -> str:
@@ -49,7 +76,11 @@ def image_for(instance: dict, *, image: str | None = None) -> str:
 def install_spec(instance: dict) -> str:
     """按仓库给出容器内的依赖安装命令（固定 pytest 版本）。"""
     pytest_spec = REPO_PYTEST.get(instance["repo"], "pytest==7.4.4")
-    steps = [f"{PYTHON} -m venv /work/venv", "/work/venv/bin/pip install -q --upgrade pip"]
+    steps = [
+        "rm -rf /work/venv",
+        f"{PYTHON} -m venv /work/venv",
+        "/work/venv/bin/pip install -q --upgrade pip",
+    ]
     if pytest_spec:
         steps.append(f'/work/venv/bin/pip install -q "{pytest_spec}"')
     for pin in REPO_EXTRA_PINS.get(instance["repo"], ()):
@@ -77,18 +108,20 @@ def docker_prepare(
     repo_dir = inst_dir / "repo"
     marker = inst_dir / ".docker-prepare.json"
     image = image_for(instance, image=image)
+    spec = install_spec(instance)
+    fingerprint = {"image": image, "spec": spec}
     if marker.is_file() and (inst_dir / "venv" / "bin" / "python").is_file():
         try:
-            if json.loads(marker.read_text()).get("image") == image:
+            if json.loads(marker.read_text()) == fingerprint:
                 return f"{CONTAINER_WORK}/venv/bin/python"
         except (ValueError, OSError):
             pass
-    install = install_spec(instance)
     argv = [
         "docker",
         "run",
         "--rm",
         *LIMITS,
+        *GIT_SAFE_ENV,
         "-v",
         f"{inst_dir}:{CONTAINER_WORK}",
         "-w",
@@ -96,12 +129,12 @@ def docker_prepare(
         image,
         "bash",
         "-lc",
-        install,
+        spec,
     ]
     result = _run(runner, argv, repo_dir, timeout=timeout)
     if result.returncode != 0:
         raise RuntimeError(f"容器内安装依赖失败：{result.stderr.strip()[:500]}")
-    marker.write_text(json.dumps({"image": image}))
+    marker.write_text(json.dumps(fingerprint))
     return f"{CONTAINER_WORK}/venv/bin/python"
 
 
@@ -124,6 +157,7 @@ def docker_tester(
         "--network",
         "none",
         *LIMITS,
+        *GIT_SAFE_ENV,
         "-v",
         f"{inst_dir}:{CONTAINER_WORK}",
         "-w",

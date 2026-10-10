@@ -23,4 +23,9 @@ RUN wget -q "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON
 
 ENV PATH=/opt/python3.9/bin:$PATH
 
+# 部分仓库用 setuptools_scm 从 git 历史取版本，测试本身也会调用 git，容器需自带 git。
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/*
+
 CMD ["/opt/python3.9/bin/python3.9"]
