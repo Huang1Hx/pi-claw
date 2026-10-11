@@ -136,8 +136,12 @@ def classify(record: dict, *, root: Path) -> dict:
     return out
 
 
-def plan_retry(diag: dict, *, base_max_steps: int = 30) -> dict | None:
-    """按失败大类给出重试方案；不可重试返回 None。"""
+def plan_retry(diag: dict, *, base_max_steps: int = 30, leaky: bool = False) -> dict | None:
+    """按失败大类给出重试方案；不可重试返回 None。
+
+    `leaky=False`（默认）不把失败用例名/报错原文写进提示，保持公开集"无提示"口径；
+    只有产品式排障场景才用 `leaky=True` 把具体失败用例交给 Agent。
+    """
     reason = diag.get("reason")
     if reason not in RETRYABLE:
         return None
@@ -149,13 +153,12 @@ def plan_retry(diag: dict, *, base_max_steps: int = 30) -> dict | None:
             "上一轮达到步数上限。请立刻聚焦最小可行修复：先给出改动，再给出最终报告，避免反复搜索。"
         )
     elif reason == TARGET_TESTS_FAILED:
-        failed = diag.get("failed_tests") or []
-        lines = [f"- {f['test']}: {f['message']}" for f in failed[:8]]
-        hint = (
-            "上一轮的改动已应用，但以下目标用例仍失败：\n"
-            + "\n".join(lines)
-            + "\n请基于现有改动继续修正，只改实现代码，完成后给出最终报告。"
-        )
+        base = "上一轮的改动已应用，但目标用例仍未全部通过。"
+        if leaky:
+            failed = diag.get("failed_tests") or []
+            lines = [f"- {f['test']}: {f['message']}" for f in failed[:8]]
+            base += "\n失败的用例：\n" + "\n".join(lines)
+        hint = base + "请基于现有改动继续修正，只改实现代码，完成后给出最终报告。"
     elif reason == REGRESSION_ONLY:
         hint = (
             "上一轮改动让原本通过的用例出现回归（见证据）。"

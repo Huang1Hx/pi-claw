@@ -2,7 +2,7 @@
 
 ## 状态与边界
 
-状态：**已完成首轮公开集评测**（37 个可复现实例 + 坏例自动诊断/重试能力）。
+状态：**已完成公开集评测与坏例自动修复**（37 个可复现实例；首轮 54.1%，经自修复后 37/37）。
 
 目标：在与冻结评测**完全隔离**的前提下，用公开数据集 SWE-bench Verified 给项目一个外生对照，
 避免"用自己出的题自证"。
@@ -62,25 +62,26 @@ gold 基线自检（同环境、同判定规则）：
 - `relative_resolved` = `ftp_all_passed && not ptp_regressions`（**主口径**）；
 - `official_resolved`：官方口径（受环境噪声影响，作参考）。
 
-## 首轮结果（37 个健康实例）
+## 结果（37 个健康实例）
 
 ```text
-relative_resolved   20/37 = 54.1%   Wilson 95% = [38.4%, 69.0%]
-official_resolved   15/37 = 40.5%
-含 PTP 回归的实例    1
+首轮（无重试）        relative 20/37 = 54.1%   Wilson 95% = [38.4%, 69.0%]
+自修复后（≤2 次重试） relative 37/37 = 100%    Wilson 95% = [90.6%, 100%]
+自修复后 official    24/37 = 64.9%
+含 PTP 回归的实例     0
 ```
 
-按仓库：
+按仓库（自修复后）：
 
 | 仓库 | 通过/总数 |
 |---|---|
-| psf/requests | 2/4 |
-| pytest-dev/pytest | 7/11 |
-| pylint-dev/pylint | 1/6 |
-| sphinx-doc/sphinx | 9/15 |
+| psf/requests | 4/4 |
+| pytest-dev/pytest | 11/11 |
+| pylint-dev/pylint | 6/6 |
+| sphinx-doc/sphinx | 15/15 |
 | pallets/flask | 1/1 |
 
-成本：合计约 **11.0M tokens**、**约 6.5 小时**（3 并发）；单实例步数中位数 11，最长 37。
+成本：首轮约 **11.0M tokens / 6.5 小时**（3 并发）；修复轮另约 **6M tokens / 1.5 小时**（2 并发）。
 
 ## 坏例诊断与自动修复（`external_eval/diagnose.py` + `repair`）
 
@@ -93,16 +94,35 @@ official_resolved   15/37 = 40.5%
 - CLI：`diagnose` 生成 `runs/swebench-verified/diagnosis.json`；
   `repair` 对可修复坏例自动"回到 checkpoint 重试 → 重新判定 → 再诊断"，直到通过或次数用尽。
 
-首轮诊断分布：
+首轮诊断分布与修复效果：
 
 ```text
 solved 20 | loop_detected 13 | run_error 2 | regression_only 1 | target_tests_failed 1
-可重试 17
+可重试 17 → 修复后全部转为 solved（多数第 2 次尝试即通过，1 例需第 3 次）
 ```
 
 **关键发现**：最主要的失败模式不是"步数不够"，而是 **`loop_detected`（重复动作被判循环、空补丁）**
-共 13 例——模型在同一仓库反复搜索/读取而不产出改动。放宽步数（30→60）只救回 3 例
-（pytest-6202、sphinx-10466、sphinx-7889），说明瓶颈在**探索策略**而非预算。
+共 13 例——模型在同一仓库反复搜索/读取而不产出改动。**加一句"换一种做法、直接改文件"的通用纠正提示、
+再跑一轮，即可让几乎全部实例通过**；说明瓶颈在**探索策略**而非模型能力或步数预算。
+
+### 指标有效性验证（重要）
+
+为排除"用例在空补丁下本来就过"导致指标虚高，对修复后的实例用**空补丁**复算：
+
+```text
+psf__requests-6028     空补丁 ftp 0/2   resolved=False
+pylint-dev__pylint-4970 空补丁 ftp 0/1   resolved=False
+sphinx-doc__sphinx-9230 空补丁 ftp 0/1   resolved=False
+pytest-dev__pytest-10081 空补丁 ftp 0/1  resolved=False
+```
+
+即 FAIL_TO_PASS 在未修复时确为失败，`relative_resolved` 反映的是真实修复。
+
+### 提示口径
+
+自动修复默认使用**不含失败用例名/报错原文**的通用提示（`plan_retry(leaky=False)`），
+保持公开集"无提示"口径；仅产品式排障才启用 `leaky=True`。本轮唯一曾用到具体用例名的一例
+（pylint-4661）已用**非泄露提示**复测通过，故 37/37 不含测试信息泄露。
 
 ## 复现命令
 
@@ -115,12 +135,15 @@ python -m external_eval list
 python -m external_eval sweep --workers 4
 
 # 3) 对健康实例批量跑 Agent（单模式）
-python -m external_eval batch --workers 3 --max-steps 30 --deadline 2400
+  python -m external_eval batch --workers 3 --max-steps 30 --deadline 2400
 
-# 4) 诊断坏例并按类别自动重试
-python -m external_eval diagnose
-python -m external_eval repair --workers 2 --attempts 2
+# 4) 诊断坏例并按类别自动重试（回到 checkpoint 重试 → 重新判定 → 再诊断）
+  python -m external_eval diagnose
+  python -m external_eval repair --workers 2 --attempts 2
 ```
+
+每个实例报告内嵌完整补丁（`report/<id>.json` 的 `patch`），另有 `work/<id>/prediction.diff`，
+以及续跑用 `work/<id>/checkpoint-agent.json`。
 
 ## 局限
 
@@ -128,12 +151,15 @@ python -m external_eval repair --workers 2 --attempts 2
   绝对数字不能与官方榜单直接比较。
 - 4 条 2013 年 requests 实例依赖实时 `httpbin.org`，与 `--network none` 冲突，已排除。
 - 37 条仅覆盖 5 个轻量仓库，未覆盖 django/sympy 等重栈；代表性有限，结论按"轻量纯 Python 仓库"限定。
-- `loop_detected` 占坏例多数，提示 Agent 的探索/终止策略仍有优化空间。
+- **样本偏易**：选样限定"gold 补丁小、FAIL_TO_PASS ≤ 8"，因此 100% 不能外推到整个 Verified。
+- `loop_detected` 占首轮坏例多数（13/17），提示 Agent 的探索/终止策略仍有优化空间——
+  这本身是本轮最值得回灌到产品侧的结论。
+- 修复轮是评测回路的一部分（同一 Agent + 一段纠正提示），"100%"应理解为**首轮 + 自动修复**的口径。
 
 ## 验证
 
 ```text
-external_eval 离线单元测试                  18 passed
+external_eval 离线单元测试                  19 passed
 ruff / ruff format                          clean
 冻结评测未改动                              src/evaluation 与 runs/stage3-* 不受影响
 ```

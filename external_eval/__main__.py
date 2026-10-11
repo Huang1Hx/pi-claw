@@ -234,6 +234,7 @@ def _run_agent_instance(args) -> int:
         "agent": {k: run[k] for k in ("status", "steps", "usage", "final_text")},
         "evaluation": result,
         "patch_bytes": len(run["patch"]),
+        "patch": run["patch"],
         "gold_baseline_ptp": sum(baseline_map.values()) if baseline_map else None,
         "ptp_regressions": regressions,
         "ftp_all_passed": ftp_ok,

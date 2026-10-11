@@ -117,10 +117,9 @@ def test_plan_retry_covers_each_reason():
     assert plan_retry({"reason": SOLVED}) is None
     assert plan_retry({"reason": BUILD_ERROR}) is None
     assert plan_retry({"reason": MAX_STEPS}, base_max_steps=20)["max_steps"] == 40
-    hint = plan_retry(
-        {"reason": TARGET_TESTS_FAILED, "failed_tests": [{"test": "t", "message": "m"}]}
-    )
-    assert "t" in hint["hint"]
+    diag = {"reason": TARGET_TESTS_FAILED, "failed_tests": [{"test": "t", "message": "m"}]}
+    assert "t" not in plan_retry(diag)["hint"]  # 默认不泄露失败用例名
+    assert "t" in plan_retry(diag, leaky=True)["hint"]
     assert plan_retry({"reason": REGRESSION_ONLY})["hint"]
     assert plan_retry({"reason": EMPTY_PATCH})["hint"]
     assert plan_retry({"reason": LOOP_DETECTED})["hint"]
