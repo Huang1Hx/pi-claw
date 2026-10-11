@@ -245,3 +245,32 @@ def test_repl_usage_command_after_offline_turn(tmp_path, workspace):
     assert repl.run_turn("hello") == 0
     assert repl._handle_command("/usage")
     assert "usage 未知的响应：1" in output.getvalue()
+
+
+def test_write_urgency_pushes_agent_to_edit(workspace):
+    """连续只读不写达到阈值时注入"立刻动手"提示，模型随后给出改动即恢复进展。"""
+    reads = [
+        ModelReply.call(ToolCall(str(i), "read_file", {"path": "alpha.txt"})) for i in range(4)
+    ]
+    steps = reads + [
+        ModelReply.call(
+            ToolCall("w", "write_or_replace", {"path": "alpha.txt", "old": "alpha", "new": "beta"})
+        ),
+        ModelReply.final("已修改"),
+    ]
+    events = []
+    agent = Agent(
+        ScriptedProvider(steps),
+        ToolExecutor(
+            WorkspacePolicy(workspace, allow_write=True), approval_callback=lambda *_: True
+        ),
+        max_steps=8,
+        write_urgency_after=2,
+        max_loop_nudges=0,
+        repetition_threshold=10,
+        on_event=events.append,
+    )
+    result = agent.run("改一个字符")
+    assert any(e.type == "write_urgency" for e in events)
+    assert (workspace / "alpha.txt").read_text() == "beta\nneedle one\n"
+    assert result.status is RunStatus.COMPLETED

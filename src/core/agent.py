@@ -48,6 +48,7 @@ class Agent:
         streaming: bool = False,
         repetition_threshold: int = 3,
         max_loop_nudges: int = 2,
+        write_urgency_after: int = 6,
     ) -> None:
         """装配模型、工具和回调，校验每回合预算；构造时不请求模型或执行工具。"""
         if max_steps <= 0 or max_tool_calls_per_reply <= 0 or max_tool_call_chars <= 0:
@@ -76,6 +77,9 @@ class Agent:
         if max_loop_nudges < 0:
             raise ValueError("max_loop_nudges 不能为负")
         self.max_loop_nudges = max_loop_nudges
+        if write_urgency_after < 0:
+            raise ValueError("write_urgency_after 不能为负")
+        self.write_urgency_after = write_urgency_after
         self.usage = UsageTracker()
         self._event_seq = 0
         self._running = False
@@ -196,6 +200,8 @@ class Agent:
         guard = RepetitionGuard(self.repetition_threshold)
         guard_generation = self._workflow_generation
         loop_nudges = 0
+        steps_since_write = 0
+        total_writes = 0
 
         for step in range(1, self.max_steps + 1):
             try:
@@ -531,6 +537,43 @@ class Agent:
                     run_id,
                 )
                 return RunResult(RunStatus.LOOP_DETECTED, run_id, step, error=error)
+
+            # 长时间只读不写会让整轮白跑（评测里正是这一模式导致大量空补丁）。
+            # 按固定间隔注入"立刻动手"的强指令，仍由模型自行决定改动内容。
+            # 累计成功写入数用于判断"这一步是否产出改动"；不动 observations，
+            # 它仍是完成验收器的证据来源。
+            seen_writes = sum(
+                1
+                for obs in observations
+                if obs.call.name in {"write_or_replace", "apply_patch"} and obs.result.ok
+            )
+            wrote = seen_writes > total_writes
+            total_writes = seen_writes
+            steps_since_write = 0 if wrote else steps_since_write + 1
+            if (
+                not wrote
+                and self.write_urgency_after > 0
+                and steps_since_write % self.write_urgency_after == 0
+                and getattr(self.provider, "workflow", None) is None
+            ):
+                self._record(
+                    "write_urgency",
+                    {"steps_since_write": steps_since_write},
+                    step,
+                    run_id,
+                )
+                self._append_message(
+                    history,
+                    {
+                        "role": "user",
+                        "content": (
+                            f"你已经连续 {steps_since_write} 步只读不写，还没有产生任何文件改动。"
+                            "请立刻停止进一步探索，基于已掌握的信息直接给出最小代码改动"
+                            "（write_or_replace/apply_patch）；不要修改测试文件。"
+                            "如果确实无法定位，请给出最终报告说明阻塞点。"
+                        ),
+                    },
+                )
 
         error = f"达到最大步骤数 {self.max_steps}，已安全停止"
         self._record("max_steps_reached", {"error": error}, self.max_steps, run_id)
