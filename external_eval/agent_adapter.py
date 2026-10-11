@@ -63,6 +63,17 @@ def capture_diff(repo_dir: Path) -> str:
     return diff
 
 
+def _read_seed_patch(seed_patch) -> str:
+    """`seed_patch` 既可是补丁文件路径，也可直接是补丁文本。"""
+    if seed_patch is None:
+        return ""
+    if isinstance(seed_patch, (str, Path)):
+        path = Path(seed_patch)
+        if path.is_file():
+            return path.read_text()
+    return str(seed_patch)
+
+
 def run_agent(
     instance: dict,
     repo_dir: Path,
@@ -87,8 +98,9 @@ def run_agent(
     from external_eval.harness import apply_diff, reset_base
 
     reset_base(repo_dir, instance["base_commit"])
-    if seed_patch and seed_patch.strip():
-        apply_diff(repo_dir, seed_patch, label="checkpoint")
+    seed_text = _read_seed_patch(seed_patch)
+    if seed_text.strip():
+        apply_diff(repo_dir, seed_text, label="checkpoint")
     history = None
     if resume_from and Path(resume_from).is_file():
         try:

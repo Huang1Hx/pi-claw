@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from external_eval.agent_adapter import _read_seed_patch
 from external_eval.diagnose import (
     BUILD_ERROR,
     EMPTY_PATCH,
@@ -18,6 +19,14 @@ from external_eval.diagnose import (
     plan_retry,
     summarize,
 )
+
+
+def test_read_seed_patch_accepts_path_and_text(tmp_path):
+    assert _read_seed_patch(None) == ""
+    assert _read_seed_patch("diff --git a/x b/x\n").startswith("diff --git")
+    p = tmp_path / "prediction.diff"
+    p.write_text("diff --git a/y b/y\n")
+    assert _read_seed_patch(p).startswith("diff --git a/y")
 
 
 def _root(tmp_path: Path) -> Path:
