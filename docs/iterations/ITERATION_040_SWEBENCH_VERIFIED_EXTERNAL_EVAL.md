@@ -2,7 +2,7 @@
 
 ## 状态与边界
 
-状态：**已完成公开集评测与坏例自动修复**（37 个可复现实例；首轮 54.1%，经自修复后 37/37）。
+状态：**已完成公开集评测、坏例自动修复，并把 `loop_detected` 结论回灌产品侧**（37 个可复现实例；首轮 54.1%，经自修复后 37/37；回灌修复后首轮升至 78.4%）。
 
 目标：在与冻结评测**完全隔离**的前提下，用公开数据集 SWE-bench Verified 给项目一个外生对照，
 避免"用自己出的题自证"。
@@ -69,6 +69,10 @@ gold 基线自检（同环境、同判定规则）：
 自修复后（≤2 次重试） relative 37/37 = 100%    Wilson 95% = [90.6%, 100%]
 自修复后 official    24/37 = 64.9%
 含 PTP 回归的实例     0
+
+loop_detected 回灌产品侧后重测（新 Agent，首轮无提示）：
+全量口径（20 例沿用旧结果 + 17 例用新 Agent 重测） 29/37 = 78.4%  Wilson 95% = [62.8%, 88.6%]
+受控 A/B（原先失败的 17 例，新 Agent 首轮）        9/17  = 52.9%  Wilson 95% = [31.0%, 73.8%]（旧 Agent 0/17）
 ```
 
 按仓库（自修复后）：
@@ -124,6 +128,40 @@ pytest-dev__pytest-10081 空补丁 ftp 0/1  resolved=False
 保持公开集"无提示"口径；仅产品式排障才启用 `leaky=True`。本轮唯一曾用到具体用例名的一例
 （pylint-4661）已用**非泄露提示**复测通过，故 37/37 不含测试信息泄露。
 
+### 回灌产品侧：loop_detected 修复与复测
+
+首轮坏例里 `loop_detected` 占多数（13/17）：模型在同一仓库反复发起**参数与结果都相同**的
+只读调用（读文件/搜索），被重复保护器判为无进展循环而中止，最终空补丁。据此对产品侧
+`src/core/agent.py` 做了两处**仅在单 Agent 模式**生效的软纠正（多 Agent 工作流与
+`policy_stall` 硬阻塞行为不变）：
+
+- **软循环恢复**：命中重复时不再一次就终止，而是注入一条"别再重复、换做法/直接改文件"的
+  通用提示并重置观察窗口，最多纠正 `max_loop_nudges=2` 次；
+- **写优先提示**：连续 `write_urgency_after=6` 步只读未产出改动时，注入"停止探索、给出最小改动"
+  的强指令；不动 `observations`（它仍是完成验收器的证据）。
+
+复测（新 Agent，`--max-steps 30`，**不含任何失败用例名**，先并行 3 worker、再对残留项串行 1 worker；
+DNS 抖动项单独重跑）：
+
+```text
+原 17 个首轮失败例：
+  旧 Agent 首轮      0/17 通过
+  新 Agent 首轮      9/17 通过（psf-6028, pylint-4970, pytest-10081/5262/8399,
+                              sphinx-8595/9230/9591/9673）
+  其中窗口内 loop_detected 事件      13 → 0
+剩余 8 例失败（非循环问题）：
+  pylint-4661 / pylint-7277   已产出补丁但目标用例未全过（target_tests_failed）
+  pylint-6386 / 7080 / pytest-6197 / sphinx-7440 / 8638   30 步用尽仍无有效补丁（max_steps）
+  psf-requests-2931           有补丁但引入 PTP 回归（regression_only）
+```
+
+结论：**软纠正彻底消除了"简单重复导致的空补丁"这一失败模式**，把首轮从 20/37 抬到 29/37；
+但**困难实例（长上下文、需要跨文件定位）仍会耗尽步数**，仍需修复轮的 checkpoint 重试兜底。
+`loop_detected` 修复属通用产品改进，不改变判定口径、不引入用例信息，故 37/37 的最终结论不变。
+
+口径说明：全量 29/37 是"20 例沿用旧结果 + 17 例新 Agent 重测"的**重构数字**（新增的软提示
+只在长只读/重复场景触发，对原先几步即通过的实例不生效），并非一次全新全量 sweep 的结果。
+
 ## 复现命令
 
 ```bash
@@ -152,14 +190,17 @@ python -m external_eval sweep --workers 4
 - 4 条 2013 年 requests 实例依赖实时 `httpbin.org`，与 `--network none` 冲突，已排除。
 - 37 条仅覆盖 5 个轻量仓库，未覆盖 django/sympy 等重栈；代表性有限，结论按"轻量纯 Python 仓库"限定。
 - **样本偏易**：选样限定"gold 补丁小、FAIL_TO_PASS ≤ 8"，因此 100% 不能外推到整个 Verified。
-- `loop_detected` 占首轮坏例多数（13/17），提示 Agent 的探索/终止策略仍有优化空间——
-  这本身是本轮最值得回灌到产品侧的结论。
+- `loop_detected` 占首轮坏例多数（13/17），提示 Agent 的探索/终止策略仍有优化空间；
+  已回灌产品侧（软循环恢复 + 写优先提示）并复测：循环事件 13→0、首轮 20/37→29/37，
+  但**困难实例仍会耗尽步数**，尚未把首轮做到 37/37。
 - 修复轮是评测回路的一部分（同一 Agent + 一段纠正提示），"100%"应理解为**首轮 + 自动修复**的口径。
 
 ## 验证
 
 ```text
 external_eval 离线单元测试                  19 passed
-ruff / ruff format                          clean
+Agent 运行特性（含软循环/写优先提示）       15 passed（tests/test_runtime_features.py）
+ruff check / ruff format --check            clean（src/core/agent.py、external_eval/）
 冻结评测未改动                              src/evaluation 与 runs/stage3-* 不受影响
+（全量 pytest 有 4 个与本次改动无关的既有失败：test_sandbox_lifecycle 2、test_terminal_experience 2）
 ```
