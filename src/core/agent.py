@@ -47,6 +47,7 @@ class Agent:
         hooks: HookBus | None = None,
         streaming: bool = False,
         repetition_threshold: int = 3,
+        max_loop_nudges: int = 2,
     ) -> None:
         """装配模型、工具和回调，校验每回合预算；构造时不请求模型或执行工具。"""
         if max_steps <= 0 or max_tool_calls_per_reply <= 0 or max_tool_call_chars <= 0:
@@ -72,6 +73,9 @@ class Agent:
         self.streaming = streaming
         RepetitionGuard(repetition_threshold)
         self.repetition_threshold = repetition_threshold
+        if max_loop_nudges < 0:
+            raise ValueError("max_loop_nudges 不能为负")
+        self.max_loop_nudges = max_loop_nudges
         self.usage = UsageTracker()
         self._event_seq = 0
         self._running = False
@@ -191,6 +195,7 @@ class Agent:
         observations: list[ToolObservation] = []
         guard = RepetitionGuard(self.repetition_threshold)
         guard_generation = self._workflow_generation
+        loop_nudges = 0
 
         for step in range(1, self.max_steps + 1):
             try:
@@ -481,6 +486,38 @@ class Agent:
                         return RunResult(RunStatus.PROVIDER_ERROR, run_id, step, error=error)
                 repeated = repeated or guard.observe(call, result)
             if repeated:
+                # 策略拒绝是硬阻塞，纠正提示无法改变结果，直接终止。
+                in_workflow = getattr(self.provider, "workflow", None) is not None
+                if (
+                    guard.stop_reason != "policy_stall"
+                    and not in_workflow
+                    and loop_nudges < self.max_loop_nudges
+                ):
+                    # 软纠正：先提示模型换策略并重置观察窗口，避免"一次重复就丢掉整轮"。
+                    stalled_tool = guard.tool_name
+                    loop_nudges += 1
+                    guard = RepetitionGuard(self.repetition_threshold)
+                    guard_generation = self._workflow_generation
+                    self._record(
+                        "loop_nudged",
+                        {"tool_name": stalled_tool, "nudge": loop_nudges},
+                        step,
+                        run_id,
+                    )
+                    self._append_message(
+                        history,
+                        {
+                            "role": "user",
+                            "content": (
+                                f"检测到你连续重复了相同的工具调用"
+                                f"（{stalled_tool or '同一工具'}），"
+                                "其结果没有变化。请不要再次发起相同的调用；换一种做法："
+                                "直接编辑目标文件（write_or_replace/apply_patch）给出最小改动，"
+                                "或读取你尚未看过的其他文件，然后给出最终报告。"
+                            ),
+                        },
+                    )
+                    continue
                 error = "相同工具参数和结果反复出现，已停止无进展循环"
                 self._record(
                     "loop_detected",

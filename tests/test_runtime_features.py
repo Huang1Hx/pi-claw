@@ -30,12 +30,41 @@ def test_loop_detector_stops_cycles_and_preserves_protocol(workspace):
         ScriptedProvider(calls),
         ToolExecutor(WorkspacePolicy(workspace)),
         max_steps=8,
+        max_loop_nudges=0,
         on_event=events.append,
     )
     result = agent.run("inspect forever")
     assert result.status is RunStatus.LOOP_DETECTED and result.steps == 5
     ContextManager._validate_tool_protocol(agent.last_messages)
     assert any(e.type == "loop_detected" for e in events)
+
+
+def test_loop_detector_nudges_before_stopping(workspace):
+    """默认先软纠正：注入换策略提示并继续，而不是一次重复就丢掉整轮。"""
+    calls = [
+        ModelReply.call(
+            ToolCall(
+                str(i),
+                "read_file",
+                {"path": "alpha.txt" if i % 2 == 0 else "test_sample.py"},
+            )
+        )
+        for i in range(30)
+    ]
+    events = []
+    agent = Agent(
+        ScriptedProvider(calls),
+        ToolExecutor(WorkspacePolicy(workspace)),
+        max_steps=18,
+        on_event=events.append,
+    )
+    result = agent.run("inspect forever")
+    nudges = [e for e in events if e.type == "loop_nudged"]
+    assert len(nudges) == 2  # 默认最多两次软纠正后仍有界终止
+    assert result.status is RunStatus.LOOP_DETECTED
+    assert result.steps <= 18
+    ContextManager._validate_tool_protocol(agent.last_messages)
+    assert any("不要再次发起相同的调用" in str(m.get("content")) for m in agent.last_messages)
 
 
 def test_hook_blocks_write_and_is_observed(workspace):
