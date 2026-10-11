@@ -77,6 +77,8 @@ GIT_SAFE_ENV = (
     "-e",
     "GIT_CONFIG_VALUE_0=/work/repo",
 )
+# 容器 DNS 偶发抖动会让 pip 安装失败；加大重试并放宽超时，减少假失败。
+PIP_ENV = ("-e", "PIP_RETRIES=5", "-e", "PIP_TIMEOUT=60", "-e", "PIP_DISABLE_PIP_VERSION_CHECK=1")
 
 
 def image_for(instance: dict, *, image: str | None = None) -> str:
@@ -114,6 +116,7 @@ def docker_prepare(
     image: str | None = None,
     runner: Runner | None = None,
     timeout: int = 1800,
+    retries: int = 3,
 ) -> str:
     """在受限容器里为该实例建 venv 并安装依赖，返回容器内解释器路径。"""
     inst_dir = Path(inst_dir)
@@ -128,24 +131,29 @@ def docker_prepare(
                 return f"{CONTAINER_WORK}/venv/bin/python"
         except (ValueError, OSError):
             pass
-    argv = [
-        "docker",
-        "run",
-        "--rm",
-        *LIMITS,
-        *GIT_SAFE_ENV,
-        "-v",
-        f"{inst_dir}:{CONTAINER_WORK}",
-        "-w",
-        f"{CONTAINER_WORK}/repo",
-        image,
-        "bash",
-        "-lc",
-        spec,
-    ]
-    result = _run(runner, argv, repo_dir, timeout=timeout)
-    if result.returncode != 0:
-        raise RuntimeError(f"容器内安装依赖失败：{result.stderr.strip()[:500]}")
+    result = None
+    for _ in range(max(1, retries)):
+        argv = [
+            "docker",
+            "run",
+            "--rm",
+            *LIMITS,
+            *GIT_SAFE_ENV,
+            *PIP_ENV,
+            "-v",
+            f"{inst_dir}:{CONTAINER_WORK}",
+            "-w",
+            f"{CONTAINER_WORK}/repo",
+            image,
+            "bash",
+            "-lc",
+            spec,
+        ]
+        result = _run(runner, argv, repo_dir, timeout=timeout)
+        if result.returncode == 0:
+            break
+    if result is None or result.returncode != 0:
+        raise RuntimeError(f"容器内安装依赖失败：{(result.stderr if result else '').strip()[:500]}")
     marker.write_text(json.dumps(fingerprint))
     return f"{CONTAINER_WORK}/venv/bin/python"
 
