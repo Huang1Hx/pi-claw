@@ -3,6 +3,9 @@
 使用 Python 3.12 和 uv 的本地 Coding Agent。提供可恢复会话、流式回复、受控工具执行、
 宿主完成验收和离线回归评测。
 
+> **一句话定位**：一个**可审计、可回放、权限受控**的本地 Coding Agent —— 多模型路由、
+> 自动规划/编码/审查、Docker 命令隔离，以及**用公开数据集做外生对照的离线回归评测**。
+
 ## 快速开始
 
 ```bash
@@ -24,6 +27,93 @@ uv run --frozen pi-claw chat "检查当前示例工作区" --print
 显式操作一个已有项目时使用 `--workspace /ABS/PATH/project`；要修改 Pi-Claw 自身则明确用
 `--workspace .`。默认路径是**启动目录下的 projects/**，因此推荐先 `cd` 到 Pi-Claw 根目录。
 旧会话仍绑定原工作区；恢复以前根目录的会话需显式加 `--workspace .`，不会自动迁移或删除。
+
+## 30 秒离线演示
+
+`demo` 在临时工作区跑一个**确定性、完全离线**的修复流程（读到 bug → 改一处实现 → 跑测试），
+不调用任何模型、不联网，退出即清理工作区：
+
+```bash
+uv run --frozen pi-claw demo --yes
+```
+
+真实输出（节选）：
+
+```json
+{
+  "status": "completed",
+  "steps": 4,
+  "verification": {
+    "accepted": true,
+    "reason": "写入后满足必跑检查：test",
+    "changed_files": ["calculator.py"]
+  }
+}
+```
+
+`verification.accepted` 只有在**写后真的跑通测试**时才为 `true`：完成声明不靠模型自述，
+而由宿主用已经发生的工具证据验收（见“主要能力 · 完成验收”）。可用
+`--trace runs/demo.jsonl` 导出这一步的完整轨迹，再 `pi-claw replay runs/demo.jsonl` 回放。
+
+## 架构概览
+
+```mermaid
+flowchart TD
+  CLI["interfaces · CLI / REPL"] --> CMD["commands · /status /model /usage ..."]
+  CLI --> CORE["core · Agent / Team / 完成验收"]
+  CORE --> ROUT["routing · 复杂度分类 / 模型路由 / 规划-编码-审查"]
+  CORE --> TOOLS["tools · ToolExecutor / 内置工具"]
+  CORE --> PERS["persistence · session / journal / checkpoint / trace"]
+  TOOLS --> SEC["security · Policy / Approval / Workspace"]
+  TOOLS --> SBX["sandbox · host / docker"]
+  ROUT --> PROV["providers · scripted / OpenAI 兼容 SSE"]
+  CORE --> PROV
+  EVAL["evaluation · 离线验收 / 三架构对照 / 攻击回归"] --> CORE
+  EVAL --> SEC
+```
+
+一条任务的端到端数据流：
+
+```text
+用户任务
+  → SessionStore 追加消息，裁剪旧回合的大工具结果 / 必要时压缩活动窗口
+  → Provider 流式返回 text_delta / tool_call_delta
+  → before_tool Hook → Policy → Approval（需要批准则暂停，不静默放行）
+  → ToolExecutor 执行（可选 Docker 断网隔离）→ ToolResult 写回上下文与原始日志
+  → 重复调用检测；final 候选经过“完成验收”（写后必须有认可的成功验证证据）
+  → RunResult 携带 usage → 幂等写入用量账本 + 可回放 Trace
+```
+
+设计要点：
+
+- **依赖方向单向**：`interfaces → core → tools/security/persistence`；Runtime 不导入
+  `evaluation`，评测按需加载，评测逻辑不进入产品路径。
+- **唯一工具执行入口**：所有模型工具都经过 `ToolExecutor`，统一走 Policy/Approval 与路径边界，
+  没有绕过审批的旁路。
+- **完成验收不信任模型自述**：`ToolEvidenceCompletionVerifier` 要求“成功写入后出现受认可的成功
+  验证命令”；宿主声明的 `VerificationPlan` 还能保护测试文件、拒绝无关测试绿灯。
+- **可回放**：一次运行落 `journal` + `checkpoint` + 脱敏 `trace`，可复盘每一步工具调用与结果。
+- **三套评测彼此独立**：内部冻结回归、内部分布外 holdout、外部 SWE-bench Verified 互不复用，
+  避免“用自己出的题自证”。
+
+## 评测结果摘要
+
+| 评测 | 规模 | 结果 |
+|---|---|---|
+| 内部冻结回归（阶段 3，同协议） | 10 任务 × 3 架构 × 3 次 = 90 trial | **严格 90/90**（single / workflow / team 各 30/30） |
+| 内部分布外 holdout（未见任务） | 3 任务 × 3 架构 × 3 次 = 27 trial | **27/27**（pass@3 = 1.0） |
+| 外部 **SWE-bench Verified**（公开集） | 37 个环境健康实例 | 首轮 **54.1%** → 坏例自修复后 **37/37**（Wilson 95% [90.6, 100]） |
+| Docker 沙箱攻击回归 | 11 类攻击 × 30 次连续运行 | 全部拦截，Host / Docker 结果一致 |
+| 离线单元测试 | 822 项 | `pytest`（另有独立的 `docker_integration` 标记用例） |
+
+产品侧闭环示例：外部评测里首轮坏例以 `loop_detected` 为主（13/17，模型反复发起**参数与结果都
+相同**的只读调用、最终空补丁）。把该结论回灌到 `src/core/agent.py`（单 Agent 模式加**软循环恢复**
+与**写优先提示**）后复测，循环事件 13 → 0、首轮 20/37 → 29/37，困难实例再由 checkpoint 修复兜底。
+详见 [Iteration 040](docs/iterations/ITERATION_040_SWEBENCH_VERIFIED_EXTERNAL_EVAL.md)。
+
+口径说明：外部数字来自本机 aarch64 固定镜像，用**同环境 gold 基线**抵消环境噪声，绝对值不与
+官方榜单直接比较；选样限定纯 Python、gold 补丁小、FAIL_TO_PASS ≤ 8，故 100% 不外推到整个
+Verified。“首轮 + 自动修复”是评测回路的一部分，已与“首轮”分开报告。
 
 ## 连接模型
 
@@ -196,10 +286,12 @@ pi-claw/                  # Git/uv 项目根目录
 │   ├── persistence/      # Session、journal、checkpoint、锁、Trace
 │   ├── evaluation/       # 正式 Runtime 离线验收与路由对照
 │   └── interfaces/       # CLI、REPL
+├── external_eval/        # 独立外部评测（SWE-bench Verified）；不进入主 pytest/CI
 ├── tests/
 ├── docs/
 ├── projects/             # 默认示例/代码项目工作区；生成内容不进入 Pi-Claw Git
-└── runs/                 # 本地 Trace 和评测报告，内容不进入 Git
+├── runs/                 # 本地 Trace 和评测报告，内容不进入 Git
+└── scripts/              # 镜像构建、评测进度看板等运维脚本
 ```
 
 业务模块直接位于 `src/core/`、`src/interfaces/` 等目录，不再嵌套 `pi_claw/`。
@@ -230,6 +322,7 @@ uv build --no-config
 - [安全与授权边界](docs/SECURITY.md)
 - [评测指标](docs/EVALUATION.md)
 - [单 Agent、顺序工作流与主从多 Agent 对照](docs/AGENT_MODE_COMPARISON.md)
+- [外部评测：SWE-bench Verified 与坏例自修复](docs/iterations/ITERATION_040_SWEBENCH_VERIFIED_EXTERNAL_EVAL.md)
 - [项目范围](docs/PROJECT_SCOPE.md)
 - [变更与集成流程](CONTRIBUTING.md)
 - [迭代记录](docs/iterations/README.md)
