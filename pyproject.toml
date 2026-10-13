@@ -34,6 +34,7 @@ packages = [
   "src/routing",
   "src/sandbox",
   "src/security",
+  "src/skills",
   "src/tools",
 ]
 
