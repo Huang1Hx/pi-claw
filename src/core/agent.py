@@ -94,6 +94,7 @@ class Agent:
         messages: list[dict[str, Any]] | None = None,
         control: ExecutionControl | None = None,
         skill_guidance: str | None = None,
+        run_id: str | None = None,
     ) -> RunResult:
         """执行一个用户回合，返回包含终态、用量和路由摘要的 RunResult。
 
@@ -110,8 +111,10 @@ class Agent:
             not isinstance(skill_guidance, str) or not skill_guidance.strip()
         ):
             raise ValueError("skill_guidance 必须是非空字符串或 None")
+        if run_id is not None and (not isinstance(run_id, str) or not run_id.strip()):
+            raise ValueError("run_id 必须是非空字符串或 None")
         self._running = True
-        run_id = uuid.uuid4().hex
+        run_id = run_id or uuid.uuid4().hex
         self._last_run_id = run_id
         self.usage = UsageTracker()
         self._event_seq = 0

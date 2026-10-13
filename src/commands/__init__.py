@@ -6,6 +6,7 @@ from commands.help import help_command
 from commands.model import model
 from commands.registry import Command, CommandRegistry
 from commands.sessions import new_session, resume, sessions, title
+from commands.skills import skill, skills
 from commands.status import status
 from commands.undo import undo
 from commands.usage import usage
@@ -28,6 +29,8 @@ def create_commands() -> CommandRegistry:
         Command("/usage", "/usage", "当前会话和项目累计 Token", usage),
         Command("/undo", "/undo", "撤销最近一次宿主写入", undo),
         Command("/history", "/history", "查看消息预览", history),
+        Command("/skills", "/skills", "列出可用 Skill 与权限属性", skills),
+        Command("/skill", "/skill auto|<id>|off", "启用自动/显式选择或关闭 Skill", skill),
     ]:
         registry.register(spec)
     return registry

@@ -43,10 +43,12 @@ def status(repl, argument: str) -> bool:
         scopes = len(repl.session.approved_tools)
         if scopes:
             approval += f"；当前会话已保存 {scopes} 个授权范围"
+        skill_label = repl.skill_status_label() if hasattr(repl, "skill_status_label") else "关闭"
         print(
             f"工作区：{repl.workspace}\n会话：{repl.session.session_id}\n"
             f"模型：{current_model(repl)}\n审批：{approval}\n"
             f"执行后端：{backend}\n资源限制：{resource_limits}\n"
+            f"Skill：{skill_label}\n"
             f"最近结果：{result}\n"
             "Token 用量见 /usage；上下文见 /context；调试详情见 /status --verbose。",
             file=repl.output,
@@ -61,6 +63,11 @@ def status(repl, argument: str) -> bool:
         "auto_approve": repl.auto_approve,
         "last_status": repl.last_result.status.value if repl.last_result else None,
         "routing": repl.last_result.routing if repl.last_result else None,
+        "skill": {
+            "mode": getattr(repl, "skill_mode", "off"),
+            "id": getattr(repl, "skill_id", None),
+            "last": getattr(getattr(repl, "last_skill", None), "id", None),
+        },
         "sandbox": vars(repl.settings.sandbox if repl.settings else SandboxSettings()),
     }
     print(json.dumps(value, ensure_ascii=False, indent=2), file=repl.output)

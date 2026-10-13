@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shlex
 import sys
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TextIO
@@ -28,6 +29,11 @@ from sandbox import create_runner
 from sandbox.base import CommandRunner
 from security.approval import TerminalApprovalBroker
 from security.policy import WorkspacePolicy
+from skills.errors import ToolNotAllowed
+from skills.executor import SkillExecutor, policy_allowed_tools
+from skills.models import Skill
+from skills.registry import SkillRegistry
+from skills.selector import SkillSelector
 from tools import ToolExecutor
 
 InputFunction = Callable[[str], str]
@@ -57,6 +63,7 @@ class CodingRepl:
         settings: Settings | None = None,
         max_attempts: int = 3,
         command_runner: CommandRunner | None = None,
+        skills_registry: SkillRegistry | None = None,
     ) -> None:
         """恢复或创建会话、加载带序号的活动快照并装配运行时；模型在用户回合才调用。"""
         self.workspace = Path(workspace).expanduser().resolve(strict=True)
@@ -80,6 +87,14 @@ class CodingRepl:
         )
         self.max_attempts = max_attempts
         self.commands = create_commands()
+        self.skills = (
+            skills_registry if skills_registry is not None else SkillRegistry.from_builtin()
+        )
+        self.skill_selector = SkillSelector(self.skills)
+        self.skill_executor = SkillExecutor()
+        self.skill_mode = "off"
+        self.skill_id: str | None = None
+        self.last_skill: Skill | None = None
         self.terminal_input = TerminalInput(
             self.commands, lambda: model_options(self.settings), self.output
         )
@@ -137,14 +152,14 @@ class CodingRepl:
             interactive=self.interactive_approvals,
             on_state_change=self._persist_approvals,
         )
-        policy = WorkspacePolicy(
+        self.policy = WorkspacePolicy(
             self.workspace,
             allow_write=True,
             allow_commands=True,
             command_profile="coding",
         )
         executor = ToolExecutor(
-            policy, approval_callback=self.approval, command_runner=self.command_runner
+            self.policy, approval_callback=self.approval, command_runner=self.command_runner
         )
         system_prompt = next(
             (
@@ -294,9 +309,17 @@ class CodingRepl:
         return 0
 
     def run_turn(self, text: str) -> int:
-        """运行一个用户回合，持久化活动窗口并显示完成状态。"""
+        """运行一个用户回合，按当前 Skill 模式注入受限指导并持久化活动窗口。"""
         self.display.reset()
-        result = self.agent.run(text, messages=self.messages)
+        run_id = uuid.uuid4().hex
+        prepared = self._prepare_skill(text, run_id)
+        guidance = prepared.guidance if prepared is not None else None
+        result = self.agent.run(
+            text, messages=self.messages, skill_guidance=guidance, run_id=run_id
+        )
+        self.skill_executor.complete(
+            prepared, status=result.status.value, trace=self.trace, run_id=run_id
+        )
         self.last_result = result
         if result.usage is not None:
             self.store.record_usage(
@@ -314,6 +337,55 @@ class CodingRepl:
             print(f"运行未完成：{result.error or result.status.value}", file=self.output)
             return 1
         return 0
+
+    def set_skill(self, mode: str, skill_id: str | None = None) -> None:
+        """切换 Skill 模式；显式模式必须指定已注册的内置 Skill ID。"""
+        if mode == "off":
+            self.skill_mode, self.skill_id, self.last_skill = "off", None, None
+            return
+        if mode == "auto":
+            self.skill_mode, self.skill_id = "auto", None
+            return
+        if mode != "explicit" or not skill_id:
+            raise ValueError("用法：/skill auto|<id>|off")
+        if self.skills.get(skill_id) is None:
+            raise ValueError(f"未知 Skill：{skill_id}")
+        self.skill_mode, self.skill_id = "explicit", skill_id
+
+    def _prepare_skill(self, text: str, run_id: str):
+        """按当前模式选择并准备 Skill；关闭或未匹配时返回 None。"""
+        if self.skill_mode == "off":
+            return None
+        explicit = self.skill_id if self.skill_mode == "explicit" else None
+        selection = self.skill_selector.select(text, explicit_id=explicit)
+        try:
+            prepared = self.skill_executor.prepare(
+                selection,
+                task=text,
+                allowed_tools=policy_allowed_tools(self.policy),
+                trace=self.trace,
+                run_id=run_id,
+            )
+        except ToolNotAllowed as exc:
+            print(f"Skill 未激活：{exc}", file=self.output)
+            prepared = None
+        self.last_skill = prepared.skill if prepared is not None else None
+        return prepared
+
+    def skill_status_label(self) -> str:
+        """供 /status 显示当前 Skill 模式、ID 与版本。"""
+        if self.skill_mode == "off":
+            return "关闭"
+        if self.skill_mode == "auto":
+            last = (
+                f"{self.last_skill.id} v{self.last_skill.version}"
+                if self.last_skill is not None
+                else "尚未选择"
+            )
+            return f"自动选择（上次：{last}）"
+        skill = self.skills.get(self.skill_id or "")
+        version = f" v{skill.version}" if skill is not None else ""
+        return f"显式：{self.skill_id}{version}"
 
     def _handle_command(self, raw: str) -> bool:
         """将用户命令交给注册表，REPL 只负责输入输出。"""
