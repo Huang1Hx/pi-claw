@@ -32,3 +32,7 @@ class SecretDetected(SkillError):
 
 class ToolNotAllowed(SkillError):
     """Skill 声明的工具不在当前策略允许集合内。"""
+
+
+class SkillNotFound(SkillError):
+    """显式指定的 Skill ID 不存在。"""

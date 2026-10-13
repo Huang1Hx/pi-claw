@@ -18,6 +18,12 @@ _TOOL_DESCRIPTIONS = {
 }
 
 
+def known_tool_names() -> frozenset[str]:
+    """返回当前注册表已知的工具名集合，供 Skill Manifest 校验工具白名单。"""
+
+    return frozenset(_TOOL_DESCRIPTIONS)
+
+
 class ToolRegistry:
     """工具名到处理函数及模型可见 JSON Schema 的统一注册表。"""
 
