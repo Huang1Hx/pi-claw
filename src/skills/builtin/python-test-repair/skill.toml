@@ -1,0 +1,9 @@
+id = "python-test-repair"
+version = "1.0.0"
+description = "修复 Python 测试失败：复现→定位→最小修改→专项验证→回归"
+task_types = ["test_repair"]
+trigger_keywords = ["修复测试", "测试失败", "pytest 失败", "单测失败", "让测试通过"]
+required_tools = ["list_files", "search_text", "read_file", "write_or_replace", "apply_patch", "run_command"]
+read_only = false
+max_prompt_chars = 6000
+prompt_file = "prompt.md"

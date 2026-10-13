@@ -1,0 +1,9 @@
+id = "repository-investigation"
+version = "1.0.0"
+description = "只读定位代码路径、调用链、配置与故障原因"
+task_types = ["investigation", "root_cause"]
+trigger_keywords = ["定位", "调用链", "排查", "故障原因", "代码路径", "在哪里实现"]
+required_tools = ["list_files", "search_text", "read_file"]
+read_only = true
+max_prompt_chars = 4000
+prompt_file = "prompt.md"
