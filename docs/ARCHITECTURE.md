@@ -8,6 +8,7 @@ interfaces → commands / config
                   → tools → security
                   → persistence
 evaluation → 正式 core / routing / tools / security / persistence
+skills → core / persistence / security（仅供 Agent 注入受限指导）
 ```
 
 core.schemas、core.events、core.usage 是低层数据协议。providers 和 security 可以依赖这些
@@ -41,6 +42,7 @@ core.schemas、core.events、core.usage 是低层数据协议。providers 和 se
 | evaluation | compare_modes.py、mode_tasks.py、mode_task_catalog.py、mode_cases.py、mode_grading.py | 十任务、三种 Agent 架构、重复真实模型评测与分模型核算 |
 | evaluation | sandbox_cases.py | 11 类确定性攻击、30 次连续运行、Host/Docker 一致性与脱敏聚合报告 |
 | interfaces | cli.py、repl.py | 参数解析、终端显示和会话交互 |
+| skills | models.py、loader.py、registry.py、selector.py、executor.py、metrics.py | 声明式 Skill 的校验、加载、确定性选择、受限指导渲染与只读指标聚合 |
 | interfaces | terminal_input.py、rendering.py | 注册表驱动斜杠菜单、TTY 降级、流式和最终显示去重 |
 
 tools 的工具类由 ToolExecutor 组合，共用 Workspace 和预算。persistence 的内部 Mixin

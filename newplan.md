@@ -86,11 +86,11 @@ selection_reason, run_id, step, duration_ms, result_status`；只记元数据，
 - 全量 pytest、ruff、format、build 通过。
 
 ## 进度
-- [ ] P0 骨架与 Manifest 校验
-- [ ] P1 注册表与确定性选择
-- [ ] P2 执行、Trace 与 Agent 注入
-- [ ] P3 终端接口
-- [ ] P4 内置 Skill 资源与打包
-- [ ] P5 集成与量化
-- [ ] P6 文档与收口
-- [ ] 全部完成后停止，等待用户审核并合并 `main`
+- [x] P0 骨架与 Manifest 校验（0325a2b）
+- [x] P1 注册表与确定性选择（436700f）
+- [x] P2 执行、Trace 与 Agent 注入（d77dca9）
+- [x] P3 终端接口（237de7b）
+- [x] P4 内置 Skill 资源与打包（a9624e6）
+- [x] P5 集成与量化（290f2c0）
+- [x] P6 文档与收口
+- [x] 全部完成后停止，等待用户审核并合并 `main`

@@ -218,6 +218,7 @@ uv run --frozen pi-claw chat --config pi-claw.toml --route auto --max-steps 24
 | 离线评测 | 真实工具链、独立工作区并发、机器可读报告和脱敏 Trace |
 | 模型路由 | 轻量模型分类、按复杂度分流、失败升级、固定 profile、分模型 Token 与请求上限 |
 | 多模型工作流 | DeepSeek 规划/编码/常规审查、按风险升级 Kimi、高级只读隔离和结构化产物持久化 |
+| 声明式 Skill | 内置任务执行指导（只读定位、测试修复）；确定性选择、默认关闭、不提权、不执行代码 |
 | Docker 命令隔离 | 去敏只读快照、断网非 root 容器、资源硬限制、强制清理和 11 类攻击回归 |
 
 完成验收是最低证据检查，不保证任务业务正确。默认 Host 后端不提供 OS 沙箱；显式 Docker 后端
@@ -246,6 +247,7 @@ uv run --frozen pi-claw replay <TRACE_PATH>
 
 REPL：`/help`、`/status [--verbose]`、`/model [模型ID|auto|别名]`、`/new`、`/sessions`、`/resume <id>`、`/compact`、`/context`、
 `/usage`、`/history`、`/title <标题>`、`/exit`。
+`/skills` 列出内置 Skill；`/skill auto|<id>|off` 启用自动选择、显式选择或关闭。
 
 在 `pi-claw>` 提示符下输入 `/` 即显示命令菜单，继续输入可筛选；Tab / ↑↓ 选择，回车执行。
 `/model ` 补全具体模型 ID 和带模型说明的配置别名，例如 `/model deepseek-flash`；同一 ID
@@ -323,6 +325,7 @@ uv build --no-config
 - [评测指标](docs/EVALUATION.md)
 - [单 Agent、顺序工作流与主从多 Agent 对照](docs/AGENT_MODE_COMPARISON.md)
 - [外部评测：SWE-bench Verified 与坏例自修复](docs/iterations/ITERATION_040_SWEBENCH_VERIFIED_EXTERNAL_EVAL.md)
+- [声明式 Skill：边界、Manifest 与命令](docs/SKILLS.md)
 - [项目范围](docs/PROJECT_SCOPE.md)
 - [变更与集成流程](CONTRIBUTING.md)
 - [迭代记录](docs/iterations/README.md)
