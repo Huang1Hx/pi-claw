@@ -85,6 +85,7 @@ class Agent:
         self._running = False
         self._workflow_generation = 0
         self._control: ExecutionControl | None = None
+        self._guidance_message: dict[str, Any] | None = None
 
     def run(
         self,
@@ -92,6 +93,7 @@ class Agent:
         *,
         messages: list[dict[str, Any]] | None = None,
         control: ExecutionControl | None = None,
+        skill_guidance: str | None = None,
     ) -> RunResult:
         """执行一个用户回合，返回包含终态、用量和路由摘要的 RunResult。
 
@@ -104,6 +106,10 @@ class Agent:
             raise RuntimeError("同一个 Agent 不支持重入；并发任务应创建独立实例")
         if not isinstance(task, str) or not task.strip():
             raise ValueError("task 必须是非空字符串")
+        if skill_guidance is not None and (
+            not isinstance(skill_guidance, str) or not skill_guidance.strip()
+        ):
+            raise ValueError("skill_guidance 必须是非空字符串或 None")
         self._running = True
         run_id = uuid.uuid4().hex
         self._last_run_id = run_id
@@ -120,7 +126,9 @@ class Agent:
             if callable(begin_run):
                 begin_run(task)
             self._fire_hook("run_start", {"task": task}, 0, run_id)
-            result = self._run(task, messages=messages, run_id=run_id)
+            result = self._run(
+                task, messages=messages, run_id=run_id, skill_guidance=skill_guidance
+            )
             finish_run = getattr(self.provider, "finish_run", None)
             if callable(finish_run):
                 finish_run(result)
@@ -130,6 +138,7 @@ class Agent:
                 self._record("routing_summary", routing, result.steps, run_id)
             return replace(result, usage=self.usage.to_dict(), routing=routing)
         finally:
+            self._strip_guidance(messages)
             payload = {
                 "status": result.status.value if result else "interrupted",
                 "usage": self.usage.to_dict(),
@@ -138,6 +147,17 @@ class Agent:
             self._emit("run_end", payload, result.steps if result else 0, run_id)
             self._running = False
             self._control = None
+
+    def _strip_guidance(self, messages: list[dict[str, Any]] | None) -> None:
+        """按对象身份移除本回合注入的 Skill 指导，避免进入活动窗口或后续回合。"""
+        guidance = self._guidance_message
+        self._guidance_message = None
+        if guidance is None or messages is None:
+            return
+        for index, message in enumerate(messages):
+            if message is guidance:
+                del messages[index]
+                return
 
     def rollback_run(self, result: RunResult) -> RunResult:
         """按运行结果执行显式回滚，并把不含正文的摘要附回 RunResult。
@@ -181,6 +201,7 @@ class Agent:
         *,
         messages: list[dict[str, Any]] | None,
         run_id: str,
+        skill_guidance: str | None = None,
     ) -> RunResult:
         """在给定会话历史上完成一个用户回合。
 
@@ -193,6 +214,13 @@ class Agent:
         history = messages if messages is not None else []
         if not history and self.system_prompt:
             self._append_message(history, {"role": "system", "content": self.system_prompt})
+        # Skill 指导是本回合的受限指令：插在系统提示之后、用户任务之前，
+        # 不经过 on_message 持久化，并在 run() 结束时按对象身份剥离。
+        self._guidance_message = None
+        if skill_guidance:
+            guidance_message = {"role": "system", "content": skill_guidance}
+            history.append(guidance_message)
+            self._guidance_message = guidance_message
         self._append_message(history, {"role": "user", "content": task})
         self.last_messages = history
         self._record("run_started", {"task": task, "max_steps": self.max_steps}, 0, run_id)
