@@ -19,6 +19,7 @@ PACKAGES = {
     "routing",
     "sandbox",
     "security",
+    "skills",
     "tools",
 }
 
