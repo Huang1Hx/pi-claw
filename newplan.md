@@ -1,6 +1,6 @@
 # Pi-Claw 会话上下文一致性与可选长期记忆实施计划
 
-> **执行说明：** 接续已有 Skill MVP，按 M0–M7 顺序实施；每阶段先定义验收标准、补失败测试，
+> **执行说明：** 接续已有 Skill MVP，按第 7 节的两批交付顺序实施；每阶段先定义验收标准、补失败测试，
 > 再实现、验证、形成验收文档和审查结论。只有标为 `ACCEPTED` 才能进入下一阶段。
 > 采用当前会话内逐项执行方式，实施时使用 `superpowers:executing-plans`；本次计划落盘不代表开始实施。
 
@@ -17,12 +17,15 @@ Skill 继续提供单回合执行指导。可选长期记忆使用独立的数�
 
 ## 1. 当前状态与执行入口
 
-- 2026-10-14 核对：工作分支为 `optimize`，本次编辑前工作区干净；本地 `main`、`optimize` 和
-  已知远程跟踪分支均指向 `edfceef`。这只是本次本地检查结果，执行时必须重新核实。
+- 编制基线为 `edfceef`；融合计划首次提交为 `993881f`。这些是固定的历史参照，不表示分支当前指向；
+  每次执行先核对实际 Git 状态，避免计划的下一次提交使“当前提交”描述再次过时。
 - Skill P0–P6 已有实现和提交，不重复开发。Skill 默认关闭、本地确定性选择、单回合受限指导，
   当前设计仅在单 Agent 路径激活；需要核实实际调用链，不能假定多模型 Workflow 已支持。
 - [Iteration 041](docs/iterations/ITERATION_041_SKILLS_MVP.md) 仍有发布状态陈旧、历史全量测试
   4 项失败以及真实模型 A/B 待验证的记录。本次只更新计划，未重新执行这些测试，M0 必须复核。
+- 2026-10-14 已核实：`993881f` 的 [常规 CI 运行 38428830418](https://github.com/Huang1Hx/pi-claw/actions/runs/38428830418)
+  成功，环境为 Ubuntu 24.04 / Python 3.12，Lint、Format、Compile、Test、Build 步骤通过。
+  该证据只覆盖这次运行的配置，不证明本地历史 4 项失败已消失或属于既有缺陷，也不替代专门的 Docker 验收。
 - 所有 M 阶段尚未开始；E 阶段为条件扩展。历史实现进度不能代替本轮验收。
 - 先阅读适用的 AGENTS.md、Git 状态、最近提交及现有计划；保留用户已有修改，不覆盖或丢弃。
 - 优先使用 `optimize`。分支不同或有重叠修改时先检查原因，不能强行切换或覆盖。
@@ -36,6 +39,10 @@ Skill 继续提供单回合执行指导。可选长期记忆使用独立的数�
 并发与崩溃验证、双向迁移、终端接线、Trace、量化评测及验收文档。
 
 条件扩展：显式跨会话知识、关键词检索、Skill 按需检索；Embedding 和 Redis 最后按证据决定。
+
+**交付范围已确定：** 保留 M0 独立验收。第一批先交付 M0–M2，以及前移的 M6a 最小交互/Trace 和
+M7a 上下文专项验收，形成仅用文件后端、无新增运行依赖的任务锚可用版本；第二批完成 SQLite、
+迁移、后端切换和综合评测。不能只完成 M2 就称为可发布，也不需要等待 SQLite 才展示任务锚。
 
 | 组件 | 唯一职责 | 明确边界 |
 | --- | --- | --- |
@@ -56,7 +63,28 @@ Skill 继续提供单回合执行指导。可选长期记忆使用独立的数�
 ### ActiveContext 与请求组装
 
 值对象至少包含 `version`、普通活动 `messages`、`through_seq`、`snapshot_revision`、结构化 `pins`
-和可为空的结构化 `anchor`。新格式兼容现有 v1/v2；无锚时按空值恢复，不能丢失日志尾部。
+和可为空的结构化 `anchor`。**新写入固定采用 `version:3`，禁止继续写 v2 再附加新字段。**
+
+### 快照版本、升级和降级
+
+| 路径 | 必须行为 |
+| --- | --- |
+| 新程序读取 v1/v2 | 兼容读取，缺失 pins/anchor 恢复为空；继承 v1 以耐久 journal 为准及 v2 补齐尾部的语义 |
+| 新程序保存旧格式或新会话 | 在版本/修订校验及锁保护下写完整 v3；单纯读取不自动改写磁盘 |
+| 新程序读取/更新未知格式或畸形 v3 | 明确失败；版本/格式预检在任何相关日志、状态或快照修改之前完成 |
+| 旧程序正常读取 v3 | 明确报不支持；不得靠沿用 v2 让旧程序静默忽略 pins/anchor |
+| 用户回退旧程序 | 停止写入后恢复兼容备份，或显式导出到另一目录；不能原地丢字段降级 |
+
+旧二进制的写路径并非全部检查现有快照：`save_active_messages()` 可直接覆盖，`append_message()`
+可能先写 journal 再检查快照。因此，“旧读取器拒绝 v3”不等于“旧进程无法写坏数据”。升级前必须停止
+共享目录的旧写入进程并备份；无法确认停止时拒绝原地升级，改用明确隔离的新数据目录，不在其间混写。
+不能声称新代码能约束仍持有旧实现的进程。
+
+M0 固定并测试：v1/v2→v3、未知版本拒绝、旧版本正常恢复 v3 失败、失败前后数据状态，以及旧写接口
+误用的实际风险与升级隔离约束。非空 pins/anchor 无法无损导出旧格式时必须拒绝，不能以“回滚”名义丢弃。
+具体兼容默认值和初始 `snapshot_revision` 在 M0 固定，兼容包装器不得绕过后续快照 CAS。
+
+### 请求组装与序号
 
 `messages` 不再持久化合成的 pinned 消息。发请求前临时物化 pins、anchor 和本回合 Skill 指导，
 防止两份权威数据、重复注入及摘要污染。默认关闭新能力时保留既有可观察行为。
@@ -76,11 +104,13 @@ Usage 若不参与当前日志序号协议，不人为假设它会增加消息 s
 
 ### 必须进入测试的审查重点
 
-1. 两进程在相同日志 seq 下修改快照：不能静默覆盖，M0/M4 验证修订号 CAS。
+1. 两进程在相同日志 seq 下修改快照：不能静默覆盖；M0/M2 验证文件后端基本冲突，M4 扩展双后端压力/故障验证。
 2. Skill 指导经过深拷贝与多次压缩：不能依赖对象身份剥离，M1 验证原文及摘要不残留。
 3. 任务更新、pin 撤销和文件再次修改：旧目标及旧通过证据不能继续生效，M2 验证生命周期。
 4. 超预算和恶意工具正文：不得静默删除硬约束或把低信任数据提升为规则，M1/M2 验证。
 5. 迁移中断和切换后新写入：不能自动回退旧数据或误报成功，M5/M6 验证。
+
+版本兼容审查同时检查读取和写入路径，不能只测试 `load_active_snapshot()` 抛错。
 
 ## 4. 任务锚与 Skill 组合规则
 
@@ -101,6 +131,14 @@ Usage 若不参与当前日志序号协议，不人为假设它会增加消息 s
 ### SessionRepository 与文件后端
 
 先定义覆盖实际调用点的 Protocol；保留 SessionStore 兼容入口，通过适配接入，避免无关重写。
+M0 必须交付 `docs/acceptance/session-context/M0_CALL_SITES.md`，不能只列拟新增模块。
+调用点清单至少包含：文件/函数、触发入口、读写接口、seq/revision 的来源与更新、目标签名/适配方式、
+保留字段、对应回归测试及所属实施阶段。覆盖全仓库实际调用者，包括测试替身与内部包装器。
+
+已确认必须检查的路径：REPL 初始化、消息持久化与回合结束保存；`commands/sessions.py` 的 `/new`、
+`/resume`；`commands/context.py` 的 `/compact`；`SessionStore.create()`；
+`JournalMixin.append_message()` 及内部快照推进；`load_active_messages()` 等兼容入口。
+M1、M2、M6a、M6b 每次接线后更新清单，签名变更不能留下旧调用者静默丢字段或跳过 CAS。
 文件后端继续用必要的文件锁与原子写入，整体保存 messages、pins、anchor 和快照版本。
 保持日志尾恢复、Usage 幂等及中断工具协议修复语义。旧 messages 接口不能意外清空新增字段。
 文件后端不宣称跨多个文件的数据库事务；错误语义和提交边界必须写明。
@@ -130,14 +168,16 @@ Usage 若不参与当前日志序号协议，不人为假设它会增加消息 s
 
 | 阶段 | 产品代码边界 | 验证入口 |
 | --- | --- | --- |
-| M0 | 新 `src/core/active_context.py`、`src/persistence/repository.py`；现有 `checkpoint.py` / `session_store.py` | 新 `tests/test_active_context.py`、`tests/test_session_repository_contract.py`；旧 session/context 测试 |
+| M0 | 新 `src/core/active_context.py`、`src/persistence/repository.py`；现有 `checkpoint.py` / `session_store.py` / `journal.py`；调用点清单 | 新 `tests/test_active_context.py`、`tests/test_session_repository_contract.py`；旧 session/context 及版本降级测试 |
 | M1 | `src/core/context.py`、`src/core/agent.py` | `tests/test_context.py`、`tests/test_skills_agent_injection.py` |
 | M2 | 新 `src/core/task_anchor.py`；现有 agent、checkpoint 与写入/验证结果接点 | 新 `tests/test_task_anchor.py`；session/context 回归 |
 | M3 | 新 `src/persistence/sqlite_repository.py`；文件后端适配 | 同一份 repository contract 双后端参数化 |
 | M4 | 仓储事务、锁与快照修订控制 | 新 `tests/test_session_repository_concurrency.py`、`tests/test_session_repository_recovery.py` |
 | M5 | 新 `src/persistence/migration.py`；CLI 迁移入口 | 新 `tests/test_session_migration.py` |
-| M6 | 新 `src/persistence/factory.py`、`src/commands/pin.py`；CLI / REPL / context / status 命令 | commands、CLI、Skill 和端到端接线测试 |
-| M7 | 现有 `src/evaluation/` 下专用对照入口；产品文档 | 新 `tests/test_context_evaluation.py`、完整回归及脱敏对照报告 |
+| M6a | 新 `src/commands/pin.py`；现有 CLI / REPL / context / status 命令与基础 Trace | 文件后端命令、Skill 和端到端接线测试 |
+| M7a | 现有 `src/evaluation/` 下上下文专项验证入口；第一批产品文档 | 新 `tests/test_context_evaluation.py`、文件后端完整回归及机制报告 |
+| M6b | 新 `src/persistence/factory.py`；CLI / REPL 后端配置及迁移接线 | 双后端命令、配置优先级和故障反馈测试 |
+| M7b | 双后端对照与真实模型评测入口；综合交付文档 | 完整回归、双后端 parity 和脱敏在线评测报告 |
 
 新评测入口可以定义本轮约束评分，但不得修改历史评分器或历史分母。E 阶段文件设计在触发时单独细化。
 
@@ -146,16 +186,22 @@ Usage 若不参与当前日志序号协议，不人为假设它会增加消息 s
 主计划以本文件为准，避免另建重复状态源。阶段验收目录使用 `docs/acceptance/session-context/`。
 下表文档是计划中的产物；只有启动对应阶段才创建，不将空模板当成验收成果。
 
+**执行顺序：** `M0 → M1 → M2 → M6a → M7a（第一批）→ M3 → M4 → M5 → M6b → M7b（第二批）`。
+M6、M7 各拆成 a/b 两个验收单元；对应 a、b 均通过后，其父阶段才算 `ACCEPTED`。
+M0 保持独立，不因提前交付合并或削弱基线、版本及调用点审查。
+
 | 阶段 | 当前状态 | 前置条件 | 验收文档（拟） |
 | --- | --- | --- | --- |
-| M0 | NOT_STARTED | 现状核实 | `M0_BASELINE_AND_CONTRACT.md` |
+| M0 | NOT_STARTED | 现状核实 | `M0_BASELINE_AND_CONTRACT.md`、`M0_CALL_SITES.md` |
 | M1 | NOT_STARTED | M0 ACCEPTED | `M1_PINNED_CONTEXT.md` |
 | M2 | NOT_STARTED | M1 ACCEPTED | `M2_TASK_ANCHOR.md` |
-| M3 | NOT_STARTED | M2 ACCEPTED | `M3_SQLITE_REPOSITORY.md` |
+| M6a | NOT_STARTED | M2 ACCEPTED | `M6A_CONTEXT_COMMANDS.md` |
+| M7a | NOT_STARTED | M6a ACCEPTED | `M7A_CONTEXT_RELEASE.md` |
+| M3 | NOT_STARTED | M7a ACCEPTED | `M3_SQLITE_REPOSITORY.md` |
 | M4 | NOT_STARTED | M3 ACCEPTED | `M4_CONCURRENCY_AND_RECOVERY.md` |
 | M5 | NOT_STARTED | M4 ACCEPTED | `M5_MIGRATION.md` |
-| M6 | NOT_STARTED | M5 ACCEPTED | `M6_CLI_AND_OBSERVABILITY.md` |
-| M7 | NOT_STARTED | M6 ACCEPTED | `M7_EVALUATION_AND_RELEASE.md` |
+| M6b | NOT_STARTED | M5 ACCEPTED | `M6B_BACKEND_COMMANDS.md` |
+| M7b | NOT_STARTED | M6b ACCEPTED | `M7B_EVALUATION_AND_RELEASE.md` |
 | E1 | DEFERRED | M0–M7 ACCEPTED 且有跨会话重复调查证据 | `E1_EXPLICIT_MEMORY.md` |
 | E2 | DEFERRED | E1 ACCEPTED | `E2_SKILL_MEMORY_RETRIEVAL.md` |
 | E3 | DEFERRED | E2 ACCEPTED 且有检索质量或并发性能瓶颈证据 | `E3_OPTIONAL_INDEX.md` |
@@ -180,17 +226,28 @@ Usage 若不参与当前日志序号协议，不人为假设它会增加消息 s
 
 通过后自动继续下一阶段，不必例行重复询问；真实阻塞或需扩大范围时明确说明。不得只创建空白验收模板。
 
+第一批交付只证明其已验收范围，不能把 M3–M7b 或 E 阶段标成完成。M7a 通过后可准备独立发布材料；
+`main` 仍按最终审核约定执行，准备发布本身不阻塞已授权的后续阶段开发。
+
 ## 8. 核心阶段 M0–M7
 
 ### M0：基线与共享契约
 
-- [ ] 复核 Skill、上下文和会话基线，复现或澄清历史失败，按证据更新陈旧状态。
-- [ ] 固定 ActiveContext/Repository 的字段、接口签名、序号、任务生命周期、预算和错误语义。
-- [ ] 先写旧格式、空锚、旧接口和日志尾恢复的失败测试，再实现兼容契约。
+- [ ] 创建验收目录，在 M0 文档中分别记录本地测试证据、CI 运行证据和两者覆盖差异，复核历史 4 项失败。
+- [ ] 本地证据包含代码 SHA、系统/Python/依赖版本、命令、结果和失败用例；CI 证据包含 SHA、run URL/ID、
+  工作流/环境、通过步骤和跳过范围。认定“既有失败”须有同环境旧提交的复现或可核对日志，否则标待归因。
+- [ ] 固定 v3 ActiveContext/Repository 的字段、接口签名、序号、任务生命周期、预算、升级隔离和错误语义。
+- [ ] 完成 `M0_CALL_SITES.md`，逐项映射读取、写入、兼容包装器、内部快照推进与测试替身。
+- [ ] 先写旧格式、空锚、旧接口、日志尾恢复、未知版本及旧程序降级的失败测试，再实现兼容契约。
 - [ ] 专项验证、差异审核，完成 `M0_BASELINE_AND_CONTRACT.md` 后才推进。
 
 **验收标准 M0-A：** 基线结果可复现，失败均有证据且相关阻断已处理；无锚/无 pin 的既有行为在契约集等价；
 日志尾不丢不重；旧接口不擦除新字段；水位线与修订号职责、具体预算和签名均确定。
+
+**M0-B：** 新写入为 v3，旧读取器拒绝 v3，版本错误预检先于新代码的写入；旧写路径风险和隔离方案有测试/证据；
+失败后的持久化状态符合预期，不宣称所有旧二进制写接口已获得保护。
+
+**M0-C：** 调用点清单完整且有测试映射；历史 4 项失败与当前 CI 分开取证，没有“CI 绿所以本地也绿”的推断。
 
 ### M1：有界 pinned context 与压缩
 
@@ -205,13 +262,43 @@ Usage 若不参与当前日志序号协议，不人为假设它会增加消息 s
 
 - [ ] 先写确定性、重启、目标切换、pin 撤销、写入证据不完整和旧验证失效测试。
 - [ ] 实现有界锚、证据引用、更新/重置和覆盖水位线，接入文件快照。
+- [ ] 验证文件后端相同 seq 的 pin/锚/压缩竞争、进程中断恢复和兼容包装器；同步调用点清单。
 - [ ] 验证恢复后模型实际看到的输入，完成 `M2_TASK_ANCHOR.md`。
 
 **验收标准 M2-A：** 固定输入语义内容/哈希一致率 100%；重复压缩与重启保持锚；不完整记录显式标识；
 新修改使旧通过证据失效；切换任务/撤销 pin 后无旧约束误用；锚构建额外模型请求为 0。
 
+**M2-B：** 第一批需要的文件后端修订号 CAS、原子快照和恢复通过专项验证，不能把全部保护延后到 M4。
+
+### M6a：第一批上下文交互与基础观测（在 M3 前执行）
+
+- [ ] 先写 `/pin` 查看/添加/删除、目标查看/更新/重置、`/new`、`/resume`、`/compact` 的端到端测试。
+- [ ] 在文件后端接通命令和 REPL，增强 `/context` 展示锚、pins、预算、水位线和修订号。
+- [ ] 接入 `context_pinned / anchor_updated / context_compacted / session_cas_conflict /
+  session_snapshot_saved / session_storage_failed` 基础事件，验证不泄露正文及凭据。
+- [ ] 核实 Skill/Workflow/多 Agent 支持矩阵；未支持组合明确报告，更新 M0 调用点清单。
+- [ ] 完成 `M6A_CONTEXT_COMMANDS.md`；后端工厂、切换和迁移事件保留给 M6b。
+
+**验收标准 M6a-A：** 用户可实际设置、查看、撤销和恢复约束；关闭锚后兼容；正常退出或重启后展示与模型
+实际输入一致；旧任务/Skill 无残留；不支持组合不静默忽略 pin；存储失败不显示保存成功。
+
+### M7a：第一批专项验收与可展示交付（在 M3 前执行）
+
+- [ ] 冻结文件后端的上下文离线语料、验收项和预期；覆盖长会话多次压缩、撤销/改目标、旧验证失效、
+  提示注入、重启、旧版兼容和基本快照竞争。
+- [ ] 完成 M0–M2 与 M6a 的端到端演示、完整离线回归、构建、文档和差异审核。
+- [ ] 用 `M7A_CONTEXT_RELEASE.md` 记录第一批范围、机制指标、命令演示、升级/回退方法及尚未实施的第二批。
+- [ ] 如本批运行真实模型 anchor off/on，对照前固定预算/评分并完成离线前置；否则明确记为未执行，
+  该行为收益验证保留为 M7b 必选项，不影响已经预先限定为离线机制验收的第一批结论。
+
+**验收标准 M7a-A：** 所有第一批必选项、全量 pytest、Ruff、格式、构建和秘密检查通过；可演示设置约束→
+多次压缩→重启恢复→变更/撤销目标；无新增运行依赖。文件后端安全验证不能因 SQLite 尚未实施而跳过。
+报告只宣称已证实的约束保留和恢复机制；未经真实模型对照不得宣称降低模型漂移率或提高任务成功率。
+M7a 通过代表第一批可发布，不代表 M6/M7 父阶段或整个融合方案已经验收。
+
 ### M3：SQLite SessionRepository
 
+- [ ] 确认第一批 M7a 已验收，复用其数据契约、命令和测试，不重复实现。
 - [ ] 将相同契约测试参数化为 files/sqlite，先证明 SQLite 缺失行为。
 - [ ] 实现会话、事件、完整快照、Usage 和元数据操作，保持统一错误语义和兼容接口。
 - [ ] 验证事务边界、幂等和工作区隔离，完成 `M3_SQLITE_REPOSITORY.md`。
@@ -238,24 +325,23 @@ Usage 若不参与当前日志序号协议，不人为假设它会增加消息 s
 **验收标准 M5-A：** 固定迁移语料的规范化业务内容往返相等；重复导入无重复事件/Usage；
 中断不损坏源数据、半成品不可用；目标冲突报错；SQLite 新写入可完整迁回 files 后再切换。
 
-### M6：CLI、REPL 和观测
+### M6b：后端切换、迁移接线和观测补齐
 
-- [ ] 先写配置优先级、pin 操作、目标更新/重置、恢复和故障反馈的端到端测试。
-- [ ] 工厂接入全部实际入口，增加 `/pin`，增强 `/context` 显示窗口、锚、预算、水位线、修订号及后端。
-- [ ] 记录 `context_pinned / anchor_updated / context_compacted / session_cas_conflict /
-  session_snapshot_saved / session_migrated / session_storage_failed` 等事件，只保留安全元数据。
-- [ ] 核实 Skill、Workflow 和多 Agent 的支持矩阵，完成 `M6_CLI_AND_OBSERVABILITY.md`。
+- [ ] 先写后端配置优先级、迁移切换、恢复和数据库故障反馈的端到端测试。
+- [ ] 工厂接入全部实际入口，将 M6a 命令参数化为双后端，`/context` 补充实际后端信息。
+- [ ] 复用 M6a 的基础 Trace，补齐 `session_migrated` 等后端事件，只保留安全元数据。
+- [ ] 回归 M6a 支持矩阵和命令行为，核对 M0 调用点清单，完成 `M6B_BACKEND_COMMANDS.md`。
 
-**验收标准 M6-A：** 配置、新建、恢复全链路通过；Trace 不泄露凭据/私有正文；故障不报成功；
-files 默认及锚关闭路径兼容；未支持组合显式报告，不能悄悄忽略用户 pin。
+**验收标准 M6b-A：** 双后端配置、新建、恢复、迁移全链路通过；Trace 不泄露凭据/私有正文；
+故障不报成功或回退陈旧数据；files 默认及锚关闭路径兼容；M6a 既有验收无回归。
 
-### M7：综合评测和交付
+### M7b：双后端综合评测与第二批交付
 
 - [ ] 先冻结任务、约束、评分器、模型/Skill 设置、重试和时间预算，再执行对照。
 - [ ] 对照 anchor off/on 与 files/sqlite；两组 Skill 设置一致，不能混合归因。
-- [ ] 场景覆盖多次压缩、无关干扰、目标更新、约束撤销、验证失效、重启与提示注入。
+- [ ] 复用 M7a 场景并扩展双后端、并发及迁移；覆盖多次压缩、无关干扰、目标更新、约束撤销、验证失效、重启与提示注入。
 - [ ] 完成离线门槛后才执行真实模型评测；审核所有成功、失败、超时和服务错误。
-- [ ] 完整回归、文档核对与发布审查，完成 `M7_EVALUATION_AND_RELEASE.md`。
+- [ ] 完整回归、文档核对与发布审查，完成 `M7B_EVALUATION_AND_RELEASE.md`。
 
 **指标：**
 
@@ -264,10 +350,11 @@ files 默认及锚关闭路径兼容；未支持组合显式报告，不能悄�
 - 安全：越权、跨工作区读取、秘密泄露、静默覆盖次数。
 - 性能：压缩、快照保存和恢复延迟，标明样本数及环境。
 
-**验收标准 M7-A：** 离线机制与安全必选项全部通过；全量 pytest、Ruff、格式、构建、敏感信息检查和
+**验收标准 M7b-A：** 离线机制与安全必选项全部通过；全量 pytest、Ruff、格式、构建、敏感信息检查和
 Git diff 审核通过；在线评测按预先定义的约束与实际结果判断漂移，不能用“锚还在输入里”证明不漂移。
 失败不得重跑到成功后隐藏。基线漂移为 0 时报告本次无法证明改善，不能虚构收益。
-模型或 Docker 不可用时记录准确阻塞和未覆盖项；对应必选验证未执行不能标 M7 ACCEPTED。
+模型或 Docker 不可用时记录准确阻塞和未覆盖项；对应必选验证未执行不能标 M7b 或 M7 父阶段 ACCEPTED。
+M7a 如已有同版本且配置等价的在线证据可经审查复用；实现/模型/评分变化则重新验证，不无理由重复跑全量历史评测。
 
 ## 9. 条件扩展 E1–E3
 
@@ -311,8 +398,8 @@ Git diff 审核通过；在线评测按预先定义的约束与实际结果判�
 - 检查敏感信息时只报告通过/问题位置，不输出秘密；原始证据保存在不跟踪的运行目录，验收文档仅含脱敏结果。
 - 每个稳定阶段审核通过、阻断修复并有验收证据后，以明确文件列表提交、推送 `optimize`，不广泛暂存无关改动。
 - 计划文档更新单独检查内容、链接和差异即可，不为了纯文档修改重复跑完整模型评测或把基线写成新通过。
-- 阶段提交不代表整体发布；保留本文件原有的 main 最终审核约定：核心阶段全通过后准备合并材料，
-  经用户最终审核再合并并推送 `main`，不因本次保存计划而触发产品实施或主分支合并。
+- 阶段提交不代表发布。第一批 M7a 通过即可按其明确范围准备独立发布材料；第二批 M7b 通过再准备完整核心发布。
+  两批都保留 main 最终审核约定：经用户最终审核再合并并推送 `main`，不因保存计划自动实施或合并。
 - 每次汇报当前阶段、通过证据、阻塞、验收文档路径和下一步。不得将未执行的检查写成通过。
 
 ---
