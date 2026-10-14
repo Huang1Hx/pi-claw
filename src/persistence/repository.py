@@ -133,7 +133,13 @@ class SessionRepository(Protocol):
         *,
         expected_seq: int | None = None,
     ) -> None:
-        """保存完整活动上下文（含 pins 与任务锚）。"""
+        """保存完整活动上下文（含 pins 与任务锚）。
+
+        契约：写入前必须校验既有快照版本/格式，并拒绝超预算或领先 journal 的水位线。
+        `snapshot_revision` 目前仅随写入递增用于版本标注，**尚未**作为并发 CAS 依据；
+        不追加消息的并发更新（如两次改 pins）暂无法被 `expected_seq` 识别，
+        修订号 CAS 的实现在 M2/M4，调用方不得假定当前已有该保护。
+        """
         ...
 
     def record_usage(

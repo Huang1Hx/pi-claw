@@ -197,6 +197,8 @@ class ActiveContext:
 
     messages: list[dict[str, Any]] = field(default_factory=list)
     through_seq: int = 0
+    # 修订号目前只是随写入递增的计数，用于区分“水位线不变的原地编辑”；
+    # 基于它的并发 CAS 校验在 M2/M4 实现，M0 不声称已提供该保护。
     snapshot_revision: int = 0
     pins: tuple[Pin, ...] = ()
     anchor: TaskAnchor | None = None
@@ -239,16 +241,22 @@ class ActiveContext:
         version = value.get("version")
         if type(version) is not int or version not in READ_VERSIONS:
             raise ActiveContextError("活动上下文版本不受支持")
-        messages = value.get("messages", [])
+        # messages 与 through_seq 是必填字段：缺失即视为畸形，不能默认成空数据。
+        if "messages" not in value:
+            raise ActiveContextError("活动上下文缺少 messages 字段")
+        messages = value["messages"]
         if not isinstance(messages, list) or not all(isinstance(item, dict) for item in messages):
             raise ActiveContextError("活动上下文必须包含消息对象数组")
+        if "through_seq" not in value:
+            raise ActiveContextError("活动上下文缺少 through_seq 字段")
+        # snapshot_revision/pins/anchor 是可选兼容字段，缺失按默认值升级。
         pins_value = value.get("pins", [])
         if not isinstance(pins_value, list):
             raise ActiveContextError("pins 必须是数组")
         anchor_value = value.get("anchor")
         return cls(
             messages=list(messages),
-            through_seq=value.get("through_seq", 0),
+            through_seq=value["through_seq"],
             snapshot_revision=value.get("snapshot_revision", 0),
             pins=tuple(Pin.from_dict(item) for item in pins_value),
             anchor=None if anchor_value is None else TaskAnchor.from_dict(anchor_value),

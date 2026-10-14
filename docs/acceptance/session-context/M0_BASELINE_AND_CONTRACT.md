@@ -40,7 +40,7 @@
 
 `test_terminal_experience` 的失败原因是本地无网络时工作区内 `uv run python -m unittest` 退出码为 2，
 属环境依赖；按 `ITERATION_041` 记录这 4 项在 CI 侧为通过。本阶段未改动这些路径，失败集合不变即为
-“与本轮契约改动无关”的直接证据。新增测试 25 项（`test_active_context.py` 18、`test_session_repository_contract.py` 7）全部通过。
+“与本轮契约改动无关”的直接证据。新增测试 31 项（`test_active_context.py` 24、`test_session_repository_contract.py` 7）全部通过。
 
 “既有失败”的认定依据：M0 首次全量运行发生在**未做任何 M0 改动、工作树干净**的 `993881f` 上，失败集合与本阶段改动后完全一致；
 这 4 项测试不涉及上下文/持久化/会话契约路径。
@@ -74,7 +74,7 @@
 | 字段 | 语义 | 谁保护 |
 | --- | --- | --- |
 | `through_seq` | 活动快照已吸收的日志水位线 | `expected_seq`（=journal seq）CAS |
-| `snapshot_revision` | 快照本身的修订号 | 仅保护**水位线不变**的原地编辑 |
+| `snapshot_revision` | 随写入递增的修订计数，标注水位线不变的原地编辑 | **尚未**提供并发 CAS；实现在 M2/M4（见 §3.7） |
 | `anchor.covered_through_seq` | 锚构建器检查到的日志位置 | M2 使用；不作为“最后证据位置” |
 
 ### 3.3 预算（M0 固定）
@@ -103,6 +103,15 @@
   因此“旧读取器拒绝 v3”不等于“旧进程写不坏数据”。升级前必须停止共享目录的旧写入进程并备份，
   否则改用隔离的新数据目录；本阶段不宣称已保护旧二进制的写接口。
 - 非空 pins/anchor 无法无损导出旧格式时必须拒绝，不以“回滚”名义丢字段。
+
+### 3.7 修订号 CAS 尚未启用（M0 明确契约）
+
+`snapshot_revision` 目前只是随写入递增的计数，用于标注“水位线不变的原地编辑”（如 `/compact`、改 pins）。
+它**尚未**作为并发比较依据：
+- `expected_seq` 只反映 journal 日志序号，**无法识别不追加消息的并发更新**。两个实例读取同一状态后各自
+  追加 pin 并保存，当前两次都会成功，后写覆盖先写（丢失更新）。
+- M0 **不声称**已具备该保护；接口契约（`save_active_context` 的 docstring）已明确这一点。
+  基于 `snapshot_revision` 的比较-写入（CAS）实现归入 M2/M4，届时需新增并发回归测试。
 
 ## 4. 调用点清单
 
@@ -138,6 +147,25 @@
 | M0-8 | 旧读取器拒绝 v3（降级为显式失败） | `test_v3_snapshot_is_rejected_by_v2_only_reader` | passed | §3.6 | PASS |
 | M0-9 | 未知版本预检先于写入，失败后数据不变 | `test_unknown_snapshot_version_fails_before_any_write` | passed | §3.6 | PASS |
 | M0-10 | 调用点清单完整且有测试映射 | `M0_CALL_SITES.md` | 覆盖产品调用点/包装器/测试替身 | 该文档 | PASS |
+| M0-11 | 中断→恢复→保存→再恢复不重复消息，水位线同步 | `test_interrupted_recovery_then_save_does_not_duplicate_messages` | passed | §5b 复审 | PASS |
+| M0-12 | `save_active_context` 写入前预检既有版本 | `test_save_active_context_prechecks_existing_version` | passed | §5b 复审 | PASS |
+| M0-13 | messages/through_seq 为必填，缺失拒绝 | `test_missing_required_fields_are_rejected` | passed | §5b 复审 | PASS |
+| M0-14 | 保存完整上下文前拒绝超预算/超前水位线 | `test_save_active_context_rejects_oversized_and_ahead_of_journal` | passed | §5b 复审 | PASS |
+| M0-15 | 修订号 CAS 契约明确且未过度声明 | 本文件 §3.7、`repository.py` docstring | 已修正 | §3.7 | PASS |
+
+## 5b. M0 复审修复（2026-10-14）
+
+对 `ec991bb..46b49dd` 的复审发现 5 项问题，均已处理：
+
+| # | 问题 | 修复 |
+| --- | --- | --- |
+| 1 | 中断恢复后再次保存重复消息（水位线未同步） | `_load_active_context_unlocked` 返回的水位线同步到实际吸收位置；补 M0-11 回归 |
+| 2 | `save_active_context` 绕过未知版本保护 | 锁内写入前调用 `_precheck_snapshot_unlocked`；补 M0-12 |
+| 3 | 缺失必填字段的快照被当合法 | `from_payload` 要求 `messages`/`through_seq` 必填；补 M0-13 |
+| 4 | 能保存本仓库读不回的快照 | 保存前校验 `max_events` 与 `through_seq <= journal`；补 M0-14 |
+| 5 | 修订号无 CAS 却被暗示有保护 | 明确契约缺口（§3.7），修正字段说明与协议 docstring；补 M0-15 |
+
+修复后本地全量：`4 failed（既有）, 925 passed, 3 skipped`。
 
 ## 6. 裁决记录（Ruling）
 

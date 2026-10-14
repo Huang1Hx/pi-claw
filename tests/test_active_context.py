@@ -215,3 +215,83 @@ def test_unknown_snapshot_version_fails_before_any_write(workspace: Path, tmp_pa
 
     assert active.read_bytes() == corrupted
     assert store.load_messages(session.session_id, workspace) == before_journal
+
+
+def test_interrupted_recovery_then_save_does_not_duplicate_messages(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """中断→恢复→保存→再恢复后消息不重复，水位线同步到实际吸收位置。"""
+    store = SessionStore(tmp_path / "sessions")
+    session = store.create(workspace, "system")
+    original = store._save_active_messages_unlocked
+
+    def crash(*_args: object, **_kwargs: object) -> None:
+        raise OSError("crash")
+
+    monkeypatch.setattr(store, "_save_active_messages_unlocked", crash)
+    with pytest.raises(OSError):
+        store.append_message(session.session_id, workspace, {"role": "user", "content": "tail"})
+    monkeypatch.setattr(store, "_save_active_messages_unlocked", original)
+
+    recovered = store.load_active_context(session.session_id, workspace)
+    assert len(recovered.messages) == 2
+    assert recovered.through_seq == 2  # 已吸收 journal 尾部，水位线必须同步
+
+    store.save_active_context(session.session_id, workspace, recovered)
+    again = store.load_active_context(session.session_id, workspace)
+    assert [m.get("content") for m in again.messages] == ["system", "tail"]
+
+
+def test_save_active_context_prechecks_existing_version(workspace: Path, tmp_path: Path) -> None:
+    """新保存接口在写入前预检既有快照版本，未知版本 fail closed 且不改写文件。"""
+    store = SessionStore(tmp_path / "sessions")
+    session = store.create(workspace, "system")
+    session_dir = next(store.data_dir.glob(f"*/{session.session_id}"))
+    active = session_dir / "active_context.json"
+    active.write_text(
+        json.dumps({"version": 4, "through_seq": 1, "messages": []}), encoding="utf-8"
+    )
+    corrupted = active.read_bytes()
+
+    with pytest.raises(ValueError, match="版本"):
+        store.save_active_context(session.session_id, workspace, ActiveContext.empty())
+
+    assert active.read_bytes() == corrupted
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"version": 3, "through_seq": 1},
+        {"version": 3, "messages": []},
+        {"version": 2},
+    ],
+)
+def test_missing_required_fields_are_rejected(payload: dict[str, object]) -> None:
+    """messages/through_seq 是必填字段，缺失时不能默认成空数据。"""
+    with pytest.raises(ActiveContextError, match="messages|through_seq"):
+        ActiveContext.from_payload(payload)
+
+
+def test_save_active_context_rejects_oversized_and_ahead_of_journal(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """保存完整上下文前拒绝超预算和超前水位线，不能写坏有效快照。"""
+    store = SessionStore(tmp_path / "sessions", max_events=1)
+    session = store.create(workspace, "system")
+    messages, seq = store.load_active_snapshot(session.session_id, workspace)
+
+    with pytest.raises(ValueError, match="消息上限"):
+        store.save_active_context(
+            session.session_id,
+            workspace,
+            ActiveContext(messages=messages + [{"role": "user", "content": "x"}], through_seq=seq),
+        )
+    with pytest.raises(ValueError, match="领先"):
+        store.save_active_context(
+            session.session_id,
+            workspace,
+            ActiveContext(messages=messages, through_seq=seq + 5),
+        )
+
+    assert store.load_active_context(session.session_id, workspace).through_seq == seq

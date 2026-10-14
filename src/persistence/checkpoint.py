@@ -131,14 +131,17 @@ class CheckpointMixin:
             messages = self._repair_incomplete_tool_calls(messages)
         if len(messages) > self.max_events:
             raise ValueError(f"会话活动上下文超过消息上限 {self.max_events}")
+        # 已把 journal 尾部并入 messages，水位线必须同步到实际吸收位置，
+        # 否则返回的上下文再保存时会带着旧水位线，导致下次恢复重复拼接尾部。
+        last_seq = self._journal_last_seq(session_dir)
         recovered = ActiveContext(
             messages=messages,
-            through_seq=context.through_seq,
+            through_seq=last_seq,
             snapshot_revision=context.snapshot_revision,
             pins=context.pins,
             anchor=context.anchor,
         )
-        return recovered, self._journal_last_seq(session_dir)
+        return recovered, last_seq
 
     def save_active_messages(
         self,
@@ -178,8 +181,15 @@ class CheckpointMixin:
         session_dir = self._session_dir(session_id, root)
         self.load(session_id, root)
         with self._session_write_lock(session_dir):
+            # 写入前先校验既有快照版本/格式，避免用新格式覆盖未知字段（fail closed）。
+            self._precheck_snapshot_unlocked(session_dir)
             current_seq = self._journal_last_seq(session_dir)
             self._check_expected_seq(expected_seq, current_seq)
+            # 拒绝本仓库随后无法读取的快照：超预算或水位线超前于 journal。
+            if len(context.messages) > self.max_events:
+                raise ValueError(f"活动上下文超过消息上限 {self.max_events}")
+            if context.through_seq > current_seq:
+                raise ValueError("会话活动上下文领先于 journal，拒绝写入")
             self._save_active_context_unlocked(session_dir, context)
 
     def _save_active_messages_unlocked(

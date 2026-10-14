@@ -242,6 +242,7 @@ M0 保持独立，不因提前交付合并或削弱基线、版本及调用点�
 - [x] 专项验证、差异审核，完成 `M0_BASELINE_AND_CONTRACT.md` 后才推进。
       验收文档：`docs/acceptance/session-context/M0_BASELINE_AND_CONTRACT.md`（ACCEPTED）、
       `docs/acceptance/session-context/M0_CALL_SITES.md`（ACCEPTED）。
+      复审（`ec991bb..46b49dd`）发现的 5 项问题已修复并回归，见验收文档 §5b。
 
 **验收标准 M0-A：** 基线结果可复现，失败均有证据且相关阻断已处理；无锚/无 pin 的既有行为在契约集等价；
 日志尾不丢不重；旧接口不擦除新字段；水位线与修订号职责、具体预算和签名均确定。
