@@ -82,3 +82,17 @@ CAS 启用范围必须区分两种写入，否则会误伤：
 - **原地更新（水位线不变：改 pins/锚/压缩）**：`save_active_context(..., expected_revision=...)`
   或 `save_active_messages(..., expected_revision=...)`，且新上下文必须经 `with_pins`/`with_anchor`/`compact`
   产生真实变更以推进修订号；原样回写会被拒绝。
+
+## 7. M6a 接口变更回填（2026-10-14）
+
+| 变更 | 位置 | 兼容性 | 回归测试 | 阶段 |
+| --- | --- | --- | --- | --- |
+| `ActiveContext.goal`（新增可选字段） | `src/core/active_context.py` | v3 可选字段；缺失按 `""` 升级，空值不写入载荷（与 M0/M2 字节等价） | `tests/test_active_context.py`、`tests/test_pin_commands.py` | M6a |
+| `ActiveContext.with_goal()` | 同上 | 新方法，原地更新并推进修订号 | `test_goal_set_view_reset_and_persist` | M6a |
+| `CodingRepl.load_context()` / `commit_context()` | `src/interfaces/repl.py` | REPL 新公开方法；命令层经此读写，CAS 冲突/存储失败显式上报 | `test_cas_conflict_reports_failure_not_success` | M6a |
+| `CodingRepl.refresh_anchor()` | 同上 | 锚生产者接线：由 goal/pins/WriteJournal 构建并 CAS 持久化 | `test_run_turn_injects_pins_and_anchor_without_persisting` | M6a |
+| `/pin`、`/goal` 命令 | `src/commands/pin.py`、`src/commands/__init__.py` | 新命令，注册进命令表；拒绝路径形式加载 | `tests/test_pin_commands.py` | M6a |
+| `ANCHOR_TASK/PINS/REASON_BUDGET`（原私有常量公开） | `src/core/task_anchor.py` | 仅重命名公开；行为不变 | `test_anchor_is_bounded_and_never_silently_drops_constraints` | M6a |
+
+M6b 接线时必须：工厂接入全部实际入口后，把 `/pin`、`/goal`、`/context` 与 `commit_context` 参数化为
+双后端；`/context` 补充实际后端信息；复用上述 CAS/Trace 路径，不得绕过 `expected_revision`。

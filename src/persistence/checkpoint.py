@@ -140,6 +140,7 @@ class CheckpointMixin:
             snapshot_revision=context.snapshot_revision,
             pins=context.pins,
             anchor=context.anchor,
+            goal=context.goal,
         )
         return recovered, last_seq
 
@@ -305,6 +306,7 @@ class CheckpointMixin:
                     updated_at=context.anchor.updated_at,
                 )
             ),
+            goal=redact(context.goal),
         )
         encoded = json.dumps(
             redacted.to_payload(),

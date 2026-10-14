@@ -14,6 +14,7 @@ from typing import Any
 SNAPSHOT_VERSION = 3
 READ_VERSIONS = (2, 3)
 ANCHOR_MAX_CHARS = 2_000
+GOAL_MAX_CHARS = 800
 MAX_PINS = 32
 PIN_MAX_CHARS = 500
 PINS_MAX_CHARS = 4_000
@@ -202,6 +203,7 @@ class ActiveContext:
     snapshot_revision: int = 0
     pins: tuple[Pin, ...] = ()
     anchor: TaskAnchor | None = None
+    goal: str = ""
     version: int = SNAPSHOT_VERSION
 
     def __post_init__(self) -> None:
@@ -217,6 +219,10 @@ class ActiveContext:
             raise ActiveContextError("pins 必须是 Pin 元组")
         if self.anchor is not None and not isinstance(self.anchor, TaskAnchor):
             raise ActiveContextError("anchor 必须是 TaskAnchor 或 None")
+        if not isinstance(self.goal, str):
+            raise ActiveContextError("goal 必须是字符串")
+        if len(self.goal) > GOAL_MAX_CHARS:
+            raise ActiveContextError(f"goal 长度超过 {GOAL_MAX_CHARS}")
         if len(self.pins) > MAX_PINS:
             raise ActiveContextError(f"pins 数量超过 {MAX_PINS}")
         pin_ids = [pin.pin_id for pin in self.pins]
@@ -254,12 +260,17 @@ class ActiveContext:
         if not isinstance(pins_value, list):
             raise ActiveContextError("pins 必须是数组")
         anchor_value = value.get("anchor")
+        goal_value = value.get("goal", "")
+        if not isinstance(goal_value, str):
+            raise ActiveContextError("goal 必须是字符串")
+        # goal 是可选兼容字段：缺失按默认值升级。
         return cls(
             messages=list(messages),
             through_seq=value["through_seq"],
             snapshot_revision=value.get("snapshot_revision", 0),
             pins=tuple(Pin.from_dict(item) for item in pins_value),
             anchor=None if anchor_value is None else TaskAnchor.from_dict(anchor_value),
+            goal=goal_value,
         )
 
     def to_payload(self) -> dict[str, Any]:
@@ -278,6 +289,8 @@ class ActiveContext:
             payload["pins"] = [pin.to_dict() for pin in self.pins]
         if self.anchor is not None:
             payload["anchor"] = self.anchor.to_dict()
+        if self.goal:
+            payload["goal"] = self.goal
         return payload
 
     def with_messages(self, messages: list[dict[str, Any]], through_seq: int) -> ActiveContext:
@@ -297,6 +310,7 @@ class ActiveContext:
             else self.snapshot_revision,
             pins=self.pins,
             anchor=self.anchor,
+            goal=self.goal,
         )
 
     def with_pins(self, pins: tuple[Pin, ...]) -> ActiveContext:
@@ -307,6 +321,7 @@ class ActiveContext:
             snapshot_revision=self.snapshot_revision + 1,
             pins=pins,
             anchor=self.anchor,
+            goal=self.goal,
         )
 
     def with_anchor(self, anchor: TaskAnchor | None) -> ActiveContext:
@@ -317,4 +332,16 @@ class ActiveContext:
             snapshot_revision=self.snapshot_revision + 1,
             pins=self.pins,
             anchor=anchor,
+            goal=self.goal,
+        )
+
+    def with_goal(self, goal: str) -> ActiveContext:
+        """替换当前目标文本，保留其他字段并推进修订号。"""
+        return ActiveContext(
+            messages=self.messages,
+            through_seq=self.through_seq,
+            snapshot_revision=self.snapshot_revision + 1,
+            pins=self.pins,
+            anchor=self.anchor,
+            goal=goal,
         )

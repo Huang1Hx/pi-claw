@@ -13,12 +13,14 @@ from typing import Any, TextIO
 from commands import create_commands
 from commands.model import current_model, model_options, resolve_model_selection
 from config import Settings
+from core.active_context import ActiveContext, TaskAnchor
 from core.agent import Agent
 from core.completion import default_completion_verifier
 from core.context import ContextManager
 from core.events import AgentEvent
 from core.prompts import build_system_prompt
 from core.schemas import RunStatus
+from core.task_anchor import AnchorInputs, build_anchor
 from interfaces.rendering import ReplyDisplay
 from interfaces.terminal_input import TerminalInput
 from persistence.session_store import SessionInfo, SessionStore
@@ -118,11 +120,13 @@ class CodingRepl:
                 model=self.model,
                 base_url=self.base_url,
             )
-        self.messages, self._session_seq = self.store.load_active_snapshot(
+        self._context = self.store.load_active_context(
             self.session.session_id,
             self.workspace,
             repair_incomplete=True,
         )
+        self.messages = list(self._context.messages)
+        self._session_seq = self._context.through_seq
         self.store.save_active_messages(
             self.session.session_id,
             self.workspace,
@@ -161,6 +165,7 @@ class CodingRepl:
         executor = ToolExecutor(
             self.policy, approval_callback=self.approval, command_runner=self.command_runner
         )
+        self.executor = executor
         system_prompt = next(
             (
                 str(message.get("content", ""))
@@ -314,8 +319,33 @@ class CodingRepl:
         run_id = uuid.uuid4().hex
         prepared = self._prepare_skill(text, run_id)
         guidance = prepared.guidance if prepared is not None else None
+        # pins 与任务锚都是受限临时指令：只在请求组装时物化，不写回活动窗口。
+        try:
+            anchor = self.refresh_anchor()
+        except (ValueError, OSError) as exc:
+            # 锚刷新失败不中断本回合；约束仍单独注入，失败已由 refresh_anchor/commit 记录。
+            print(f"任务锚未更新：{exc}", file=self.output)
+            anchor = self._context.anchor
+        anchor_text = anchor.text if anchor is not None else None
+        pins = [pin.text for pin in self._context.pins]
+        workflow = getattr(self.provider, "workflow", None) is not None
+        if workflow and (pins or anchor_text):
+            print(
+                "工作流模式下 pins/任务锚暂未支持，不会注入本回合请求，请改用单 Agent 模式后重试。",
+                file=self.output,
+            )
+            self.trace.record(
+                "context_unsupported",
+                {"mode": "workflow", "pins": len(pins), "anchor": anchor_text is not None},
+            )
+            pins, anchor_text = [], None
         result = self.agent.run(
-            text, messages=self.messages, skill_guidance=guidance, run_id=run_id
+            text,
+            messages=self.messages,
+            skill_guidance=guidance,
+            pins=pins or None,
+            anchor=anchor_text,
+            run_id=run_id,
         )
         self.skill_executor.complete(
             prepared, status=result.status.value, trace=self.trace, run_id=run_id
@@ -326,12 +356,21 @@ class CodingRepl:
                 self.session.session_id, self.workspace, result.run_id, result.usage
             )
         # Provider 在压缩后直接失败时不会产生新消息；此处仍要保存活动窗口。
-        self.store.save_active_messages(
-            self.session.session_id,
-            self.workspace,
-            self.messages,
-            expected_seq=self._session_seq,
-        )
+        try:
+            self.store.save_active_messages(
+                self.session.session_id,
+                self.workspace,
+                self.messages,
+                expected_seq=self._session_seq,
+            )
+        except (OSError, ValueError) as exc:
+            self.trace.record(
+                "session_storage_failed",
+                {"session_id": self.session.session_id, "event": "turn_save"},
+            )
+            print(f"上下文保存失败：{exc}", file=self.output)
+            self.display.finish(result)
+            return 1
         self.display.finish(result)
         if result.status is not RunStatus.COMPLETED:
             print(f"运行未完成：{result.error or result.status.value}", file=self.output)
@@ -351,6 +390,110 @@ class CodingRepl:
         if self.skills.get(skill_id) is None:
             raise ValueError(f"未知 Skill：{skill_id}")
         self.skill_mode, self.skill_id = "explicit", skill_id
+
+    def load_context(self) -> ActiveContext:
+        """重新加载活动上下文（含 goal/pins/锚）并同步消息窗口与水位线。"""
+        self._context = self.store.load_active_context(
+            self.session.session_id,
+            self.workspace,
+            repair_incomplete=True,
+        )
+        self.messages = list(self._context.messages)
+        self._session_seq = self._context.through_seq
+        return self._context
+
+    def commit_context(
+        self,
+        context: ActiveContext,
+        *,
+        event: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """以修订号 CAS 保存完整上下文；冲突或存储失败显式上报，绝不显示为保存成功。
+
+        `expected_revision` 取本次加载观察到的修订号；`context` 必须经 `with_goal`/`with_pins`
+        等原地修改产生真实变更，才能推进修订号并通过 CAS。
+        """
+        expected_revision = self._context.snapshot_revision
+        try:
+            self.store.save_active_context(
+                self.session.session_id,
+                self.workspace,
+                context,
+                expected_revision=expected_revision,
+            )
+        except RuntimeError as exc:
+            self.trace.record(
+                "session_cas_conflict",
+                {
+                    "session_id": self.session.session_id,
+                    "event": event,
+                    "expected_revision": expected_revision,
+                },
+            )
+            raise ValueError(str(exc)) from exc
+        except (OSError, ValueError):
+            self.trace.record(
+                "session_storage_failed",
+                {"session_id": self.session.session_id, "event": event},
+            )
+            raise
+        self._context = self.store.load_active_context(self.session.session_id, self.workspace)
+        self.messages = list(self._context.messages)
+        self._session_seq = self._context.through_seq
+        self.trace.record(event, payload or {})
+        self.trace.record(
+            "session_snapshot_saved",
+            {
+                "session_id": self.session.session_id,
+                "revision": self._context.snapshot_revision,
+                "watermark": self._context.through_seq,
+            },
+        )
+
+    def _build_anchor(self) -> TaskAnchor | None:
+        """由已在手数据（目标、约束、写入记录）构建有界锚；零模型调用。"""
+        journal = getattr(self.executor, "journal", None)
+        files = tuple(record.relative_name for record in journal.records) if journal else ()
+        incomplete = bool(getattr(journal, "incomplete", False))
+        return build_anchor(
+            AnchorInputs(
+                task=self._context.goal,
+                pins=tuple(pin.text for pin in self._context.pins),
+                changed_files=files,
+                changed_files_incomplete=incomplete,
+                covered_through_seq=self._session_seq,
+            )
+        )
+
+    def refresh_anchor(self) -> TaskAnchor | None:
+        """重建锚；内容变化时以 CAS 持久化，返回当前应注入模型的锚。"""
+        context = self.load_context()
+        try:
+            anchor = self._build_anchor()
+        except ValueError as exc:
+            # 锚放不下时显式报告并保留既有锚，绝不让约束静默消失：pins 仍会单独注入。
+            print(f"任务锚未更新：{exc}（pins 仍会注入本回合）", file=self.output)
+            self.trace.record(
+                "anchor_updated",
+                {"action": "skipped", "reason": "over_budget"},
+            )
+            return context.anchor
+        if anchor is None:
+            return None
+        if context.anchor is not None and context.anchor.content_hash == anchor.content_hash:
+            return context.anchor
+        self.commit_context(
+            context.with_anchor(anchor),
+            event="anchor_updated",
+            payload={
+                "action": "refresh",
+                "hash": anchor.content_hash[:12],
+                "sources": list(anchor.sources),
+                "covered_through_seq": anchor.covered_through_seq,
+            },
+        )
+        return self._context.anchor
 
     def _prepare_skill(self, text: str, run_id: str):
         """按当前模式选择并准备 Skill；关闭或未匹配时返回 None。"""

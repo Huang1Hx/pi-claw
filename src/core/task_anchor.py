@@ -11,9 +11,11 @@ from dataclasses import dataclass
 
 from core.active_context import ANCHOR_MAX_CHARS, TaskAnchor
 
-_TASK_BUDGET = 800
-_PINS_BUDGET = 1_200
-_REASON_BUDGET = 300
+# 锚内各段的字符预算；命令层（如 /pin、/goal）据此在写入前拒绝放不下的输入，
+# 避免把“放不下”推迟到请求组装时才报错。
+ANCHOR_TASK_BUDGET = 800
+ANCHOR_PINS_BUDGET = 1_200
+ANCHOR_REASON_BUDGET = 300
 _MAX_LISTED_FILES = 20
 
 
@@ -52,7 +54,7 @@ class AnchorInputs:
     covered_through_seq: int = 0
 
     def __post_init__(self) -> None:
-        _one_line(self.task, _TASK_BUDGET)
+        _one_line(self.task, ANCHOR_TASK_BUDGET)
         object.__setattr__(self, "pins", _string_tuple(self.pins, "pins"))
         object.__setattr__(
             self, "changed_files", _string_tuple(self.changed_files, "changed_files")
@@ -83,11 +85,11 @@ def build_anchor(inputs: AnchorInputs, *, updated_at: str = "") -> TaskAnchor | 
     if not isinstance(inputs, AnchorInputs):
         raise TypeError("inputs 必须是 AnchorInputs")
 
-    task = _one_line(inputs.task, _TASK_BUDGET)
+    task = _one_line(inputs.task, ANCHOR_TASK_BUDGET)
     # 约束是已接受的硬约束：只规范化空白，绝不截断；放不下就显式失败。
     pins = [" ".join(pin.split()) for pin in inputs.pins if pin.strip()]
     pin_chars = sum(len(pin) for pin in pins)
-    if pin_chars > _PINS_BUDGET:
+    if pin_chars > ANCHOR_PINS_BUDGET:
         raise ValueError(f"任务锚无法容纳全部约束（pins 合计 {pin_chars} 字符）")
 
     files = [name for name in inputs.changed_files if name.strip()]
@@ -116,7 +118,7 @@ def build_anchor(inputs: AnchorInputs, *, updated_at: str = "") -> TaskAnchor | 
         lines.append(segment)
     if inputs.verification_accepted is not None:
         status = "通过" if inputs.verification_accepted else "未通过"
-        reason = _one_line(inputs.verification_reason, _REASON_BUDGET)
+        reason = _one_line(inputs.verification_reason, ANCHOR_REASON_BUDGET)
         segment = f"验证：{status}" + (f"：{reason}" if reason else "")
         if verification_stale:
             segment += "（已失效：文件在上次验证后又被修改）"

@@ -26,7 +26,7 @@ Skill 继续提供单回合执行指导。可选长期记忆使用独立的数�
 - 2026-10-14 已核实：`993881f` 的 [常规 CI 运行 38428830418](https://github.com/Huang1Hx/pi-claw/actions/runs/38428830418)
   成功，环境为 Ubuntu 24.04 / Python 3.12，Lint、Format、Compile、Test、Build 步骤通过。
   该证据只覆盖这次运行的配置，不证明本地历史 4 项失败已消失或属于既有缺陷，也不替代专门的 Docker 验收。
-- M0、M1、M2 已 ACCEPTED；下一步 M6a（第一批上下文交互与基础观测）；E 阶段为条件扩展。
+- M0、M1、M2、M6a 已 ACCEPTED；下一步 M7a（第一批专项验收与可展示交付）；E 阶段为条件扩展。
 - 先阅读适用的 AGENTS.md、Git 状态、最近提交及现有计划；保留用户已有修改，不覆盖或丢弃。
 - 优先使用 `optimize`。分支不同或有重叠修改时先检查原因，不能强行切换或覆盖。
 
@@ -195,7 +195,7 @@ M0 保持独立，不因提前交付合并或削弱基线、版本及调用点�
 | M0 | ACCEPTED | 现状核实 | `docs/acceptance/session-context/M0_BASELINE_AND_CONTRACT.md`、`docs/acceptance/session-context/M0_CALL_SITES.md` |
 | M1 | ACCEPTED | M0 ACCEPTED | `docs/acceptance/session-context/M1_PINNED_CONTEXT.md` |
 | M2 | ACCEPTED | M1 ACCEPTED | `docs/acceptance/session-context/M2_TASK_ANCHOR.md` |
-| M6a | NOT_STARTED | M2 ACCEPTED | `M6A_CONTEXT_COMMANDS.md` |
+| M6a | ACCEPTED | M2 ACCEPTED | `docs/acceptance/session-context/M6A_CONTEXT_COMMANDS.md` |
 | M7a | NOT_STARTED | M6a ACCEPTED | `M7A_CONTEXT_RELEASE.md` |
 | M3 | NOT_STARTED | M7a ACCEPTED | `M3_SQLITE_REPOSITORY.md` |
 | M4 | NOT_STARTED | M3 ACCEPTED | `M4_CONCURRENCY_AND_RECOVERY.md` |
@@ -274,14 +274,14 @@ M0 保持独立，不因提前交付合并或削弱基线、版本及调用点�
 
 **M2-B：** 第一批需要的文件后端修订号 CAS、原子快照和恢复通过专项验证，不能把全部保护延后到 M4。
 
-### M6a：第一批上下文交互与基础观测（在 M3 前执行）
+### M6a：第一批上下文交互与基础观测（ACCEPTED）
 
-- [ ] 先写 `/pin` 查看/添加/删除、目标查看/更新/重置、`/new`、`/resume`、`/compact` 的端到端测试。
-- [ ] 在文件后端接通命令和 REPL，增强 `/context` 展示锚、pins、预算、水位线和修订号。
-- [ ] 接入 `context_pinned / anchor_updated / context_compacted / session_cas_conflict /
+- [x] 先写 `/pin` 查看/添加/删除、目标查看/更新/重置、`/new`、`/resume`、`/compact` 的端到端测试。
+- [x] 在文件后端接通命令和 REPL，增强 `/context` 展示锚、pins、预算、水位线和修订号。
+- [x] 接入 `context_pinned / anchor_updated / context_compacted / session_cas_conflict /
   session_snapshot_saved / session_storage_failed` 基础事件，验证不泄露正文及凭据。
-- [ ] 核实 Skill/Workflow/多 Agent 支持矩阵；未支持组合明确报告，更新 M0 调用点清单。
-- [ ] 完成 `M6A_CONTEXT_COMMANDS.md`；后端工厂、切换和迁移事件保留给 M6b。
+- [x] 核实 Skill/Workflow/多 Agent 支持矩阵；未支持组合明确报告，更新 M0 调用点清单。
+- [x] 完成 `M6A_CONTEXT_COMMANDS.md`；后端工厂、切换和迁移事件保留给 M6b。
 
 **验收标准 M6a-A：** 用户可实际设置、查看、撤销和恢复约束；关闭锚后兼容；正常退出或重启后展示与模型
 实际输入一致；旧任务/Skill 无残留；不支持组合不静默忽略 pin；存储失败不显示保存成功。

@@ -4,6 +4,7 @@ from commands.context import compact, context, history
 from commands.exit import exit_command
 from commands.help import help_command
 from commands.model import model
+from commands.pin import goal, pin
 from commands.registry import Command, CommandRegistry
 from commands.sessions import new_session, resume, sessions, title
 from commands.skills import skill, skills
@@ -26,6 +27,8 @@ def create_commands() -> CommandRegistry:
         Command("/title", "/title <标题>", "修改标题", title),
         Command("/compact", "/compact [关注点]", "压缩上下文", compact),
         Command("/context", "/context", "上下文大小", context),
+        Command("/pin", "/pin [<约束>|-d <id>]", "查看/添加/删除会话约束", pin),
+        Command("/goal", "/goal [<目标>|reset]", "查看/更新/重置当前目标", goal),
         Command("/usage", "/usage", "当前会话和项目累计 Token", usage),
         Command("/undo", "/undo", "撤销最近一次宿主写入", undo),
         Command("/history", "/history", "查看消息预览", history),
