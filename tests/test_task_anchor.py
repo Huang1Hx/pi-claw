@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import json
+import socket
+import subprocess
 
 import pytest
 
@@ -108,10 +109,21 @@ def test_anchor_is_bounded_and_never_silently_drops_constraints() -> None:
         build_anchor(AnchorInputs(task="任务", pins=("x" * (ANCHOR_MAX_CHARS + 1),)))
 
 
-def test_build_anchor_is_pure_without_model_calls() -> None:
-    """构建只依赖入参，不产生网络/模型依赖。"""
-    source = json.dumps(build_anchor(AnchorInputs(task="t", pins=("p",))).to_dict())
-    assert "t" in source and "p" in source
+def test_build_anchor_is_pure_without_external_io(monkeypatch) -> None:
+    """构建只依赖入参：禁止触达网络或子进程，且重复构建结果一致。"""
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("锚构建不应触达外部 IO")
+
+    monkeypatch.setattr(socket, "socket", boom, raising=False)
+    monkeypatch.setattr(socket, "create_connection", boom, raising=False)
+    monkeypatch.setattr(subprocess, "Popen", boom, raising=False)
+    monkeypatch.setattr(subprocess, "run", boom, raising=False)
+
+    first = build_anchor(AnchorInputs(task="t", pins=("p",)))
+    second = build_anchor(AnchorInputs(task="t", pins=("p",)))
+    assert first is not None and second is not None
+    assert first.content_hash == second.content_hash
 
 
 # ---- M2-B：文件后端修订号 CAS ----
@@ -174,6 +186,36 @@ def test_revision_cas_rejects_concurrent_compaction(workspace, tmp_path) -> None
             expected_seq=seq,
             expected_revision=revision,
         )
+
+
+def test_expected_revision_is_scoped_to_in_place_updates(workspace, tmp_path) -> None:
+    """CAS 只用于水位线不变的原地更新：追加后携带旧修订号保存必须显式失败。
+
+    追加（水位线前进）由 expected_seq 保护；若允许其携带旧修订号通过，
+    两个写者会在同一修订号上先后覆盖，CAS 形同虚设。
+    """
+    store, session = _seed(workspace, tmp_path)
+    _messages, seq = store.load_active_snapshot(session.session_id, workspace)
+    revision = store.load_active_context(session.session_id, workspace).snapshot_revision
+
+    store.append_message(session.session_id, workspace, {"role": "user", "content": "tail"})
+    messages, new_seq = store.load_active_snapshot(session.session_id, workspace)
+
+    with pytest.raises(ValueError, match="snapshot_revision"):
+        store.save_active_messages(
+            session.session_id,
+            workspace,
+            messages,
+            expected_seq=new_seq,
+            expected_revision=revision,
+        )
+    # 追加路径只用 expected_seq 即可安全提交。
+    store.save_active_messages(
+        session.session_id,
+        workspace,
+        messages,
+        expected_seq=new_seq,
+    )
 
 
 def test_anchor_survives_interrupted_append_then_recovery(workspace, tmp_path, monkeypatch) -> None:

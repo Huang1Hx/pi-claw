@@ -74,5 +74,11 @@ M2 未新增产品调用点，但扩展了持久化与请求组装签名，必�
 | `Agent.run(..., pins=None, anchor=None)` | `src/core/agent.py` | 新增关键字参数，默认不注入 | `test_pinned_context.py`、`test_task_anchor.py` | M2 |
 | `core/task_anchor.build_anchor(AnchorInputs)` | `src/core/task_anchor.py` | 新纯函数，无副作用 | `tests/test_task_anchor.py` | M2 |
 
-M6a 接线时必须：REPL 传入 `pins`/`anchor`（`anchor` 由 `build_anchor` 从运行中数据构建），
-并在 `save_active_context`/`save_active_messages` 传 `expected_revision` 以启用 CAS。
+M6a 接线时必须：REPL 传入 `pins`/`anchor`（`anchor` 由 `build_anchor` 从运行中数据构建）。
+CAS 启用范围必须区分两种写入，否则会误伤：
+
+- **追加（水位线前进）**：`save_active_messages(..., expected_seq=...)` 只传 `expected_seq`，
+  **不得**传 `expected_revision`（会因“必须推进 snapshot_revision”而显式失败，见 `test_expected_revision_is_scoped_to_in_place_updates`）。
+- **原地更新（水位线不变：改 pins/锚/压缩）**：`save_active_context(..., expected_revision=...)`
+  或 `save_active_messages(..., expected_revision=...)`，且新上下文必须经 `with_pins`/`with_anchor`/`compact`
+  产生真实变更以推进修订号；原样回写会被拒绝。

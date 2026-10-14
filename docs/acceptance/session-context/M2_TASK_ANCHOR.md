@@ -45,8 +45,9 @@
 | M2-8 | 中断追加后恢复：锚仍在、journal 尾部不丢 | `test_anchor_survives_interrupted_append_then_recovery` | passed | `tests/test_task_anchor.py` | PASS |
 | M2-9 | 兼容包装器不擦除锚且推进修订号 | `test_legacy_message_api_preserves_anchor_and_bumps_revision` | passed | 同上 | PASS |
 | M2-10 | M2-B 相同 seq 的 pin/压缩并发只有一个提交 | `test_revision_cas_rejects_concurrent_pin_update`、`test_revision_cas_rejects_concurrent_compaction` | passed | 同上 | PASS |
-| M2-11 | 锚构建零模型调用 | `test_build_anchor_is_pure_without_model_calls` | passed | 同上 | PASS |
+| M2-11 | 锚构建无网络/子进程外部 IO，重复构建一致 | `test_build_anchor_is_pure_without_external_io` | passed | 同上 | PASS |
 | M2-12 | 全量回归与静态检查 | `pytest -o addopts="" -q`、`ruff check`、`ruff format --check` | 见 §5 | 命令输出 | PASS |
+| M2-13 | CAS 作用域：原地更新用 `expected_revision`；追加路径携带旧修订号必须显式失败，仅用 `expected_seq` 可提交 | `test_expected_revision_is_scoped_to_in_place_updates` | passed | 同上 | PASS |
 
 ## 4. 裁决记录（Ruling）
 
@@ -85,3 +86,16 @@
   - 文档一致性：`M0_CALL_SITES.md` 已回填 M2 的签名变更与 M6a 接线要求；本文档未声称已具备
     未实现的保护（CAS 明确为可选）。
 - 遗留（非缺陷）：重复读取既有快照两次（预检 + CAS 判定），可在后续合并为一次读；不影响正确性。
+
+**自审 #3（`a96e88f` 复评，M6a 前置）**
+
+- 结论：核心逻辑无高危缺陷；修正两处“表述与实现不完全对齐”的问题，不改变运行行为。
+- 发现 1（已修，测试质量）：`test_build_anchor_is_pure_without_model_calls` 原断言只检查序列化串含
+  `t`/`p`，无法证明“零模型/零外部依赖”，属诚实标注缺口。已重写为 `..._without_external_io`：
+  monkeypatch `socket.socket`/`create_connection`/`subprocess.Popen`/`run` 抛错后构建仍成功，并校验重复构建哈希一致。
+- 发现 2（已记录，接口边界）：`expected_revision` 只能用于**水位线不变**的原地更新。实测在追加后携带旧
+  修订号保存会抛 `ValueError("...必须推进 snapshot_revision...")`。这是**有意**的：若允许，两个写者会在同一
+  修订号上先后覆盖，CAS 失效。追加路径由 `expected_seq` 提供互斥，应只传 `expected_seq`。已新增
+  `test_expected_revision_is_scoped_to_in_place_updates` 固化该契约，供 M6a 接线遵循。
+- 发现 3（非缺陷，已确认）：`save_active_context` 在传入 `expected_revision` 时要求写入推进修订号，
+  因此“读取后原样回写”会被拒绝；命令层必须先经 `with_pins`/`with_anchor` 产生真实变更再保存。
