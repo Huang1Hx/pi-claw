@@ -36,6 +36,8 @@ class JournalMixin:
         self.load(session_id, root)
         with self._session_write_lock(session_dir):
             info = self._read_state(session_dir)
+            # 版本/格式预检必须先于任何 journal/state/snapshot 修改；未知或畸形快照直接失败。
+            self._precheck_snapshot_unlocked(session_dir)
             current_seq = self._journal_last_seq(session_dir)
             # 排他锁保护这次读改写；序号再防止“拿旧上下文、等到锁后覆盖新消息”。
             self._check_expected_seq(expected_seq, current_seq)
@@ -72,8 +74,9 @@ class JournalMixin:
             if active_messages is not None:
                 self._save_active_messages_unlocked(session_dir, active_messages, sequence)
             elif active_path.exists():
-                active, _loaded_seq = self._load_active_messages_unlocked(session_dir)
-                self._save_active_messages_unlocked(session_dir, active, sequence)
+                # 吸收本次新消息序号，同时保留快照里已有的 pins/anchor。
+                active_context, _loaded_seq = self._load_active_context_unlocked(session_dir)
+                self._save_active_messages_unlocked(session_dir, active_context.messages, sequence)
             return sequence
 
     def load_messages(

@@ -1,0 +1,62 @@
+# M0 调用点清单（M0_CALL_SITES）
+
+- 阶段：M0
+- 日期：2026-10-14
+- 代码基线：`optimize` @ `993881f`（M0 改动尚未提交）
+- 主计划：`newplan.md` §5、§6、§8(M0)
+- 结论：**ACCEPTED**
+
+## 字段说明
+
+- 触发入口：用户/宿主动作。
+- 读写接口：调用的公开或内部接口。
+- seq/revision：序号与修订号的来源和更新方式。
+- 保留字段：写入时是否必须保留 `pins/anchor`。
+- 阶段：该调用点的接线/扩展归属。
+
+## 1. 产品调用点（必须覆盖）
+
+| # | 文件/函数 | 触发入口 | 读写接口 | seq/revision 来源与更新 | 目标签名/适配 | 保留字段 | 回归测试 | 阶段 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | `src/interfaces/repl.py:121` `CodingRepl.__init__` | 启动/`--session`/`--continue` | `load_active_snapshot` | seq=journal last seq；revision=快照原值（读不推进） | 不变 | 只读 | `test_session.py::test_repl_loads_explicit_session_and_latest` | M0 |
+| 2 | `src/interfaces/repl.py:126` `CodingRepl.__init__` | 启动回写 | `save_active_messages` | seq=上一步返回；revision 仅原地编辑推进 | 不变 | 保留 pins/anchor | `test_active_context.py::test_store_message_save_does_not_erase_pins_or_anchor` | M0/M1 |
+| 3 | `src/interfaces/repl.py:222` `CodingRepl.run_turn` | 用户回合 | `append_message` | seq=current+1（锁内）；写前预检快照 | 不变 | 保留 pins/anchor | `test_active_context.py::test_unknown_snapshot_version_fails_before_any_write` | M0 |
+| 4 | `src/interfaces/repl.py:325` `CodingRepl.run_turn` | 模型返回 usage | `record_usage` | run_id 幂等；不占 seq | 不变 | 无 | `test_session_repository_contract.py::test_usage_is_idempotent_per_run` | M0 |
+| 5 | `src/interfaces/repl.py:329` `CodingRepl.run_turn` | 回合结束 | `save_active_messages` | seq=上一步返回；revision 原地推进 | M1 起需物化 pins/anchor | 保留 pins/anchor | `test_context.py::test_repl_compact_only_changes_active_context_not_raw_session` | M1/M6a |
+| 6 | `src/commands/sessions.py:9,14` `/new` | 斜杠命令 | `load_active_snapshot` + `save_active_messages` | 新会话 seq=1 | 不变 | 保留（新会话为空） | `test_skills_commands.py` 相关命令回归 | M6a |
+| 7 | `src/commands/sessions.py:73,78` `/resume` | 斜杠命令 | `load_active_snapshot` + `save_active_messages` | seq=目标会话 last seq | 不变 | 保留 pins/anchor | `test_session.py::test_repl_loads_explicit_session_and_latest` | M6a |
+| 8 | `src/commands/context.py:8` `/compact` | 斜杠命令 | `save_active_messages` | seq 不变；revision 原地 +1 | M6a 增强显示 | 保留 pins/anchor | `test_context.py::test_repl_compact_only_changes_active_context_not_raw_session` | M1/M6a |
+| 9 | `src/persistence/session_store.py:77,82` `create` | 新会话 | `append_message` + `save_active_messages` | seq 0→1；revision=0（水位线推进不计数） | 不变 | 新会话为空 | `test_session.py::test_session_create_load_append_and_list` | M0 |
+| 10 | `src/persistence/journal.py:73,76-77` `append_message` | 内部追加快照推进 | `_save_active_messages_unlocked` / `_precheck_snapshot_unlocked` | seq=新消息序号；先预检后写 journal | 私有签名不变 | 保留 pins/anchor | `test_session.py` 崩溃恢复组 | M0 |
+
+## 2. 新增公开接口（暂无产品调用点）
+
+| 接口 | 位置 | 用途 | 阶段 |
+| --- | --- | --- | --- |
+| `load_active_context` | `src/persistence/checkpoint.py:55` | 读取含 pins/锚/修订号的完整上下文 | M1/M2 |
+| `save_active_context` | `src/persistence/checkpoint.py:165` | 保存 pins/锚（不追加消息） | M1/M2 |
+| `SessionRepository` 协议 | `src/persistence/repository.py` | files/sqlite 统一契约 | M0 定义，M3 扩展实现 |
+
+## 3. 兼容包装器与内部推进
+
+| 位置 | 说明 | 保留字段 | 测试 |
+| --- | --- | --- | --- |
+| `src/persistence/checkpoint.py:16` `load_active_messages` | 兼容入口，返回消息列表 | 读不涉及 | `test_active_context.py::test_v2_snapshot_loads_through_active_context` |
+| `_read_snapshot_unlocked` | v1/v2/v3 解析，未知版本 fail closed | 读不涉及 | `test_active_context.py::test_unsupported_payload_versions_are_rejected` |
+| `_read_preserved_snapshot` | 写入前读回保留 pins/anchor；未知/畸形 fail closed | 保留 | `test_unknown_snapshot_version_fails_before_any_write` |
+| `_save_active_context_unlocked` | 脱敏并写 v3 | 写全部字段 | `test_payload_round_trips_pins_and_anchor` |
+
+## 4. 测试替身与测试直接调用
+
+| 位置 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| `tests/test_session.py`（多处 `monkeypatch.setattr(store, "_save_active_messages_unlocked", …)`） | 崩溃注入替身 | 私有签名保持 `(session_dir, messages, through_seq)` | M0 未改签名，替身继续可用 |
+| `tests/test_runtime_features.py:198` | 直接调用 | `save_active_messages`/`load_active_messages` | 语义不变 |
+| `tests/test_active_context.py` | 新契约测试 | 16 项 + M0-B 3 项 | v3/升级/降级/预检 |
+| `tests/test_session_repository_contract.py` | 双后端契约（当前 files） | M3 扩展 `BACKENDS` | 端口一致性 |
+
+## 5. 结论
+
+- 全部产品调用点均已定位；M0 未改变任何公开签名，私有 `_save_active_messages_unlocked` 签名保持稳定。
+- 写入路径在 M0 增加了“预检先于写入”的 fail-closed 行为，`append_message` 与 `save_active_messages` 已覆盖。
+- M1/M2/M6a 接线后必须回填本清单的“目标签名/适配”与“保留字段”列，签名变更不得留下静默丢字段或跳过 CAS 的旧调用者。

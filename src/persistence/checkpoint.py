@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from core.active_context import ActiveContext, ActiveContextError, Pin, TaskAnchor
 from persistence.trace import redact
 
 
@@ -45,71 +46,99 @@ class CheckpointMixin:
         session_dir = self._session_dir(session_id, root)
         self.load(session_id, root)
         with self._session_write_lock(session_dir):
-            return self._load_active_messages_unlocked(
+            context, sequence = self._load_active_context_unlocked(
                 session_dir,
                 repair_incomplete=repair_incomplete,
             )
+            return context.messages, sequence
 
-    def _load_active_messages_unlocked(
+    def load_active_context(
+        self,
+        session_id: str,
+        workspace: str | Path,
+        *,
+        repair_incomplete: bool = False,
+    ) -> ActiveContext:
+        """加载完整活动上下文（含 pins、任务锚、快照修订号），并补齐 journal 尾部。"""
+
+        root = self._workspace_root(workspace)
+        session_dir = self._session_dir(session_id, root)
+        self.load(session_id, root)
+        with self._session_write_lock(session_dir):
+            context, _sequence = self._load_active_context_unlocked(
+                session_dir,
+                repair_incomplete=repair_incomplete,
+            )
+            return context
+
+    def _read_snapshot_unlocked(self, session_dir: Path) -> tuple[ActiveContext, int]:
+        """持锁读取并解析快照，返回 (上下文, 快照字节数)。
+
+        v1（list）没有水位线，无法证明吸收到哪一段，回退到完整 journal 以免丢尾；
+        v2/v3 由 ActiveContext 解析，v2 自动升级为当前格式且 pins/anchor 为空。
+        """
+
+        active_path = session_dir / "active_context.json"
+        if not active_path.exists():
+            return ActiveContext.empty(), 0
+        self._reject_symlink(active_path)
+        try:
+            raw = active_path.read_bytes()
+        except OSError as exc:
+            raise ValueError("无法读取会话活动上下文") from exc
+        if len(raw) > self.max_bytes:
+            raise ValueError(f"会话活动上下文超过读取字节上限 {self.max_bytes}")
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise ValueError("会话活动上下文不是有效 UTF-8") from exc
+        except json.JSONDecodeError as exc:
+            raise ValueError("会话活动上下文不是有效 JSON") from exc
+        if isinstance(value, list):
+            # v1 旧格式：以 durable journal 为准，宁可暂时失去压缩也不能丢尾消息。
+            messages = self._load_all_messages_unlocked(session_dir)
+            through_seq = self._journal_last_seq(session_dir)
+            return ActiveContext(messages=messages, through_seq=through_seq), 0
+        try:
+            context = ActiveContext.from_payload(value)
+        except ActiveContextError as exc:
+            raise ValueError(str(exc)) from exc
+        if context.through_seq > self._journal_last_seq(session_dir):
+            raise ValueError("会话活动上下文领先于 journal，拒绝跳过历史")
+        return context, len(raw)
+
+    def _load_active_context_unlocked(
         self,
         session_dir: Path,
         *,
         repair_incomplete: bool = False,
-    ) -> tuple[list[dict[str, Any]], int]:
-        """在调用方已持锁时读取 checkpoint 并补齐 journal 尾部，返回活动消息和最新序号。"""
-        active_path = session_dir / "active_context.json"
-        if not active_path.exists():
-            messages: list[dict[str, Any]] = []
-            through_seq = 0
-            checkpoint_bytes = 0
-        else:
-            self._reject_symlink(active_path)
-            try:
-                raw = active_path.read_bytes()
-            except OSError as exc:
-                raise ValueError("无法读取会话活动上下文") from exc
-            if len(raw) > self.max_bytes:
-                raise ValueError(f"会话活动上下文超过读取字节上限 {self.max_bytes}")
-            checkpoint_bytes = len(raw)
-            try:
-                value = json.loads(raw.decode("utf-8"))
-            except UnicodeDecodeError as exc:
-                raise ValueError("会话活动上下文不是有效 UTF-8") from exc
-            except json.JSONDecodeError as exc:
-                raise ValueError("会话活动上下文不是有效 JSON") from exc
-            if isinstance(value, list):
-                # v1 旧格式没有 checkpoint 序号，无法证明它吸收了 journal 的哪一段。
-                # 迁移时以 durable journal 为准，宁可暂时失去压缩也不能丢尾消息。
-                messages = self._load_all_messages_unlocked(session_dir)
-                through_seq = self._journal_last_seq(session_dir)
-                checkpoint_bytes = 0
-            elif isinstance(value, dict):
-                if value.get("version") != 2:
-                    raise ValueError("会话活动上下文版本不受支持")
-                messages = value.get("messages")
-                through_seq = value.get("through_seq")
-            else:
-                raise ValueError("会话活动上下文格式无效")
-            if not isinstance(messages, list) or not all(
-                isinstance(item, dict) for item in messages
-            ):
-                raise ValueError("会话活动上下文必须包含消息对象数组")
-            if not isinstance(through_seq, int) or through_seq < 0:
-                raise ValueError("会话活动上下文 through_seq 无效")
-            if through_seq > self._journal_last_seq(session_dir):
-                raise ValueError("会话活动上下文领先于 journal，拒绝跳过历史")
+    ) -> tuple[ActiveContext, int]:
+        """持锁读取快照并补齐 journal 尾部，返回 (完整上下文, 最新序号)。
+
+        读取不推进快照修订号：修订号只在实际写回时增加，避免读操作伪造新版本。
+        """
+
+        context, checkpoint_bytes = self._read_snapshot_unlocked(session_dir)
         # checkpoint 可以落后于 journal：仅重读 through_seq 之后的消息，避免丢尾或重复。
         tail = self._load_journal_after(
             session_dir,
-            through_seq,
+            context.through_seq,
             max_bytes=self.max_bytes - checkpoint_bytes,
         )
+        messages = list(context.messages)
         messages.extend(tail)
         if repair_incomplete:
             messages = self._repair_incomplete_tool_calls(messages)
         if len(messages) > self.max_events:
             raise ValueError(f"会话活动上下文超过消息上限 {self.max_events}")
-        return messages, self._journal_last_seq(session_dir)
+        recovered = ActiveContext(
+            messages=messages,
+            through_seq=context.through_seq,
+            snapshot_revision=context.snapshot_revision,
+            pins=context.pins,
+            anchor=context.anchor,
+        )
+        return recovered, self._journal_last_seq(session_dir)
 
     def save_active_messages(
         self,
@@ -133,20 +162,107 @@ class CheckpointMixin:
             self._check_expected_seq(expected_seq, current_seq)
             self._save_active_messages_unlocked(session_dir, messages, current_seq)
 
+    def save_active_context(
+        self,
+        session_id: str,
+        workspace: str | Path,
+        context: ActiveContext,
+        *,
+        expected_seq: int | None = None,
+    ) -> None:
+        """原子保存完整活动上下文（含 pins、任务锚与修订号）。"""
+
+        if not isinstance(context, ActiveContext):
+            raise TypeError("context 必须是 ActiveContext")
+        root = self._workspace_root(workspace)
+        session_dir = self._session_dir(session_id, root)
+        self.load(session_id, root)
+        with self._session_write_lock(session_dir):
+            current_seq = self._journal_last_seq(session_dir)
+            self._check_expected_seq(expected_seq, current_seq)
+            self._save_active_context_unlocked(session_dir, context)
+
     def _save_active_messages_unlocked(
         self,
         session_dir: Path,
         messages: list[dict[str, Any]],
         through_seq: int,
     ) -> None:
-        """在调用方已持锁时写入脱敏的 v2 快照，through_seq 表示已吸收的日志位置。"""
-        checkpoint = {
-            "version": 2,
-            "through_seq": through_seq,
-            "messages": redact(messages),
-        }
+        """在调用方已持锁时写入消息窗口；保留既有 pins/anchor，避免旧接口擦除新字段。
+
+        旧签名保持稳定，供 journal 追加路径和历史测试沿用；新增字段通过
+        _read_preserved_snapshot 读回后在写回时保留，并推进快照修订号。
+        """
+
+        existing = self._read_preserved_snapshot(session_dir)
+        updated = existing.with_messages(list(messages), through_seq)
+        self._save_active_context_unlocked(session_dir, updated)
+
+    def _read_preserved_snapshot(self, session_dir: Path) -> ActiveContext:
+        """读回现有快照以保留 pins/anchor。
+
+        缺失或 v1（list）返回空上下文；未知版本或畸形 v3 **fail closed**，绝不静默覆盖，
+        从而保证写入路径不会丢弃旧程序无法理解的新字段。
+        """
+
+        path = session_dir / "active_context.json"
+        if not path.exists():
+            return ActiveContext.empty()
+        self._reject_symlink(path)
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise ValueError("无法读取会话活动上下文") from exc
+        if len(raw) > self.max_bytes:
+            raise ValueError(f"会话活动上下文超过读取字节上限 {self.max_bytes}")
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise ValueError("会话活动上下文不是有效 UTF-8") from exc
+        except json.JSONDecodeError as exc:
+            raise ValueError("会话活动上下文不是有效 JSON") from exc
+        if isinstance(value, list):
+            # v1 没有 pins/anchor，保留字段按空处理。
+            return ActiveContext.empty()
+        try:
+            return ActiveContext.from_payload(value)
+        except ActiveContextError as exc:
+            raise ValueError(str(exc)) from exc
+
+    def _precheck_snapshot_unlocked(self, session_dir: Path) -> None:
+        """在任何写入前校验既有快照版本/格式；未知或畸形直接失败，避免先写 journal 再踩坏快照。"""
+
+        self._read_preserved_snapshot(session_dir)
+
+    def _save_active_context_unlocked(self, session_dir: Path, context: ActiveContext) -> None:
+        """在调用方已持锁时写入脱敏后的当前版本快照。"""
+
+        redacted = ActiveContext(
+            messages=redact(context.messages),
+            through_seq=context.through_seq,
+            snapshot_revision=context.snapshot_revision,
+            pins=tuple(
+                Pin(
+                    pin_id=pin.pin_id,
+                    text=redact(pin.text),
+                    seq=pin.seq,
+                    created_at=pin.created_at,
+                )
+                for pin in context.pins
+            ),
+            anchor=(
+                None
+                if context.anchor is None
+                else TaskAnchor.build(
+                    text=redact(context.anchor.text),
+                    covered_through_seq=context.anchor.covered_through_seq,
+                    sources=context.anchor.sources,
+                    updated_at=context.anchor.updated_at,
+                )
+            ),
+        )
         encoded = json.dumps(
-            checkpoint,
+            redacted.to_payload(),
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
