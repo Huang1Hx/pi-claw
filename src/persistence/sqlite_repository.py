@@ -699,3 +699,92 @@ class SqliteSessionRepository:
     def close(self) -> None:
         """关闭连接；调用方也可依赖进程退出回收。"""
         self._conn.close()
+
+    def usage_records(self, session_id: str, workspace: str | Path) -> dict[str, dict[str, int]]:
+        """返回按 run_id 分组的原始账本；用于迁移时保留幂等键。"""
+        root = self._workspace_root(workspace)
+        self._fetch_info(session_id, root)
+        rows = self._conn.execute(
+            "SELECT * FROM usage_ledger WHERE session_id=?", (session_id,)
+        ).fetchall()
+        records: dict[str, dict[str, int]] = {}
+        for row in rows:
+            records[row["run_id"]] = {key: int(row[key]) for key in _USAGE_FIELDS}
+        self._sum_usage(rows)  # 顺带校验计数一致
+        return records
+
+    def import_session(
+        self,
+        info: SessionInfo,
+        messages: list[dict[str, Any]],
+        context: ActiveContext,
+        usage: dict[str, dict[str, int]],
+    ) -> bool:
+        """单个事务导入一个会话；同名冲突显式失败，重复导入幂等。"""
+        if not isinstance(info, SessionInfo):
+            raise TypeError("info 必须是 SessionInfo")
+        if not isinstance(messages, list) or not all(isinstance(m, dict) for m in messages):
+            raise TypeError("messages 必须是消息对象数组")
+        if not isinstance(context, ActiveContext):
+            raise TypeError("context 必须是 ActiveContext")
+        if len(messages) > self.max_events:
+            raise ValueError(f"会话消息超过上限 {self.max_events}")
+        SessionStore._validate_runtime_metadata(info.provider, info.model, info.base_url)
+        root = self._workspace_root(info.workspace)
+        if Path(info.workspace) != root:
+            raise ValueError("会话所属工作区与请求工作区不一致")
+        self._validate_session_id(info.session_id)
+        for record in usage.values():
+            if any(type(record.get(k)) is not int or record[k] < 0 for k in _USAGE_FIELDS):
+                raise ValueError("无效用量计数")
+
+        with self._write_txn() as conn:
+            existing = conn.execute(
+                "SELECT created_at FROM sessions WHERE session_id=?", (info.session_id,)
+            ).fetchone()
+            if existing is not None:
+                if existing["created_at"] != info.created_at:
+                    raise ValueError("目标已存在同名但不同的会话，拒绝覆盖")
+                return False
+            conn.execute(
+                "INSERT INTO sessions(session_id, workspace, workspace_hash, title, provider,"
+                " model, base_url, approved_tools, created_at, updated_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    info.session_id,
+                    info.workspace,
+                    self._workspace_hash(root),
+                    info.title,
+                    info.provider,
+                    info.model,
+                    info.base_url,
+                    json.dumps(list(info.approved_tools), ensure_ascii=False),
+                    info.created_at,
+                    info.updated_at,
+                ),
+            )
+            for sequence, message in enumerate(messages, start=1):
+                conn.execute(
+                    "INSERT INTO events(session_id, seq, message, created_at) VALUES(?,?,?,?)",
+                    (
+                        info.session_id,
+                        sequence,
+                        json.dumps(redact(message), ensure_ascii=False),
+                        info.updated_at,
+                    ),
+                )
+            self._write_snapshot(conn, info.session_id, context, updated_at=info.updated_at)
+            for run_id, record in usage.items():
+                conn.execute(
+                    "INSERT INTO usage_ledger(session_id, run_id, prompt_tokens,"
+                    " completion_tokens, total_tokens, requests, requests_with_usage,"
+                    " requests_without_usage, retries, created_at)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        info.session_id,
+                        run_id,
+                        *(record[k] for k in _USAGE_FIELDS),
+                        info.updated_at,
+                    ),
+                )
+        return True

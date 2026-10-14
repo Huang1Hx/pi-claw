@@ -106,3 +106,13 @@ M6b 接线时必须：工厂接入全部实际入口后，把 `/pin`、`/goal`�
 | `SqliteSessionRepository.integrity_check()`、`close()` | 同上 | 新方法；不改既有调用点 | `test_integrity_check_and_file_permissions` | M4 |
 
 M6b 接线时必须：`/context` 报告实际后端；迁移/故障反馈不得回退陈旧数据或谎报成功。
+
+## 9. M5 接口回填（2026-10-14）
+
+| 变更 | 位置 | 兼容性 | 回归测试 | 阶段 |
+| --- | --- | --- | --- | --- |
+| `SessionRepository.usage_records()` | `src/persistence/repository.py` + files/sqlite | 新只读方法；保留 run_id 幂等键 | `tests/test_migration.py` | M5 |
+| `SessionRepository.import_session(info, messages, context, usage) -> bool` | 同上 | 新方法；幂等/冲突语义两后端一致 | `tests/test_migration.py` | M5 |
+| `migrate_workspace(source, target, workspace)` | `src/persistence/migrate.py` | 新迁移编排；两阶段（预检→导入） | `test_files_to_sqlite_round_trip_equality` 等 | M5 |
+
+M6b 接线时必须：把迁移入口接到 CLI/REPL 并显式切换后端；不得在迁移失败时报成功或自动回退陈旧数据。

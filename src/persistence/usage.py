@@ -47,6 +47,15 @@ class UsageMixin:
             records = self._read_usage(session_dir)
         return self._sum_usage(records)
 
+    def usage_records(self, session_id: str, workspace: str | Path) -> dict[str, dict[str, int]]:
+        """返回按 run_id 分组的原始账本；用于迁移时保留幂等键，不重算历史。"""
+        session_dir = self._session_dir(session_id, self._workspace_root(workspace))
+        self.load(session_id, workspace)
+        with self._session_write_lock(session_dir):
+            records = self._read_usage(session_dir)
+        self._sum_usage(records)  # 顺带校验字段完整与计数一致
+        return {run_id: {k: int(v[k]) for k in v} for run_id, v in records.items()}
+
     @staticmethod
     def _sum_usage(records: dict[str, Any]) -> dict[str, int]:
         """聚合一个完整账本；拒绝损坏的回合，避免部分字段被当作零或静默少计。"""

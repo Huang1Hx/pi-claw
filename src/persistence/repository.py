@@ -166,3 +166,21 @@ class SessionRepository(Protocol):
     def workspace_usage(self, workspace: str | Path) -> dict[str, Any]:
         """聚合当前工作区所有会话的用量。"""
         ...
+
+    def usage_records(self, session_id: str, workspace: str | Path) -> dict[str, dict[str, int]]:
+        """返回按 run_id 分组的用量账本，用于迁移时保留幂等键。"""
+        ...
+
+    def import_session(
+        self,
+        info: SessionInfo,
+        messages: list[dict[str, Any]],
+        context: ActiveContext,
+        usage: dict[str, dict[str, int]],
+    ) -> bool:
+        """导入一个会话（M5 迁移专用）：保留 session_id/created_at。
+
+        返回是否实际写入；同名同 created_at 视为幂等重复（返回 False），
+        同名不同 created_at 视为目标冲突并显式失败。
+        """
+        ...

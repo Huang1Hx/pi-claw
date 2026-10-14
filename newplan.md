@@ -27,7 +27,7 @@ Skill 继续提供单回合执行指导。可选长期记忆使用独立的数�
   成功，环境为 Ubuntu 24.04 / Python 3.12，Lint、Format、Compile、Test、Build 步骤通过。
   该证据只覆盖这次运行的配置，不证明本地历史 4 项失败已消失或属于既有缺陷，也不替代专门的 Docker 验收。
 - M0、M1、M2、M6a、M7a 已 ACCEPTED，第一批可发布（合并 `main` 待用户最终审核）；
-  M3、M4 已 ACCEPTED，下一步 M5（迁移和一致性）；E 阶段为条件扩展。
+  M3、M4、M5 已 ACCEPTED，下一步 M6b（后端切换、迁移接线与观测补齐）；E 阶段为条件扩展。
 - 先阅读适用的 AGENTS.md、Git 状态、最近提交及现有计划；保留用户已有修改，不覆盖或丢弃。
 - 优先使用 `optimize`。分支不同或有重叠修改时先检查原因，不能强行切换或覆盖。
 
@@ -200,7 +200,7 @@ M0 保持独立，不因提前交付合并或削弱基线、版本及调用点�
 | M7a | ACCEPTED | M6a ACCEPTED | `docs/acceptance/session-context/M7A_CONTEXT_RELEASE.md` |
 | M3 | ACCEPTED | M7a ACCEPTED | `docs/acceptance/session-context/M3_SQLITE_REPOSITORY.md` |
 | M4 | ACCEPTED | M3 ACCEPTED | `docs/acceptance/session-context/M4_CONCURRENCY_AND_RECOVERY.md` |
-| M5 | NOT_STARTED | M4 ACCEPTED | `M5_MIGRATION.md` |
+| M5 | ACCEPTED | M4 ACCEPTED | `docs/acceptance/session-context/M5_MIGRATION.md` |
 | M6b | NOT_STARTED | M5 ACCEPTED | `M6B_BACKEND_COMMANDS.md` |
 | M7b-前置 | NOT_STARTED | M3 起可并行准备；执行须 M6b ACCEPTED | 归入 `M7B_EVALUATION_AND_RELEASE.md` §前置 |
 | M7b | NOT_STARTED | M6b ACCEPTED | `M7B_EVALUATION_AND_RELEASE.md` |
@@ -322,11 +322,11 @@ M7a 通过代表第一批可发布，不代表 M6/M7 父阶段或整个融合方
 测试覆盖的进程崩溃不丢已确认提交数据；integrity_check 通过；权限、锁超时和连接/临时文件清理符合设计。
 不得把进程 kill 测试描述为断电或硬件故障证明。
 
-### M5：迁移和一致性
+### M5：迁移和一致性（ACCEPTED）
 
-- [ ] 先测试旧数据、尾消息、pin、anchor、Usage、元数据及版本关系的往返、重复和中断场景。
-- [ ] 实现预检、备份、一致读取、目标校验与显式切换，覆盖切换后新增数据的反向迁移。
-- [ ] 审核失败路径，完成 `M5_MIGRATION.md`。
+- [x] 先测试旧数据、尾消息、pin、anchor、Usage、元数据及版本关系的往返、重复和中断场景。
+- [x] 实现预检、备份、一致读取、目标校验与显式切换，覆盖切换后新增数据的反向迁移。
+- [x] 审核失败路径，完成 `M5_MIGRATION.md`。
 
 **验收标准 M5-A：** 固定迁移语料的规范化业务内容往返相等；重复导入无重复事件/Usage；
 中断不损坏源数据、半成品不可用；目标冲突报错；SQLite 新写入可完整迁回 files 后再切换。

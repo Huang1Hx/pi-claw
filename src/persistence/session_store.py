@@ -5,10 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import uuid
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
+from core.active_context import ActiveContext
 from persistence.checkpoint import CheckpointMixin
 from persistence.journal import JournalMixin
 from persistence.locking import LockingMixin
@@ -191,6 +194,72 @@ class SessionStore(JournalMixin, CheckpointMixin, LockingMixin, StorageMixin, Us
             )
             self._write_state(session_dir, updated)
             return updated
+
+    def import_session(
+        self,
+        info: SessionInfo,
+        messages: list[dict[str, Any]],
+        context: ActiveContext,
+        usage: dict[str, dict[str, Any]],
+    ) -> bool:
+        """原子导入一个会话（M5 迁移专用）；同名冲突显式失败，重复导入幂等。
+
+        先在临时目录写全 state/journal/snapshot/usage，再原子重命名到目标目录；
+        因此中断只会留下不可见的临时目录，不会产生“半成品会话”。
+        """
+        if not isinstance(info, SessionInfo):
+            raise TypeError("info 必须是 SessionInfo")
+        if not isinstance(messages, list) or not all(isinstance(m, dict) for m in messages):
+            raise TypeError("messages 必须是消息对象数组")
+        if not isinstance(context, ActiveContext):
+            raise TypeError("context 必须是 ActiveContext")
+        if len(messages) > self.max_events:
+            raise ValueError(f"会话消息超过上限 {self.max_events}")
+        self._validate_runtime_metadata(info.provider, info.model, info.base_url)
+        root = self._workspace_root(info.workspace)
+        if Path(info.workspace) != root:
+            raise ValueError("会话所属工作区与请求工作区不一致")
+        if not _SESSION_ID_PATTERN.fullmatch(info.session_id):
+            raise ValueError("session_id 格式不安全")
+        self._sum_usage(usage)  # 迁移前校验账本，坏账本不写入
+
+        group = self._workspace_group(root)
+        session_dir = self._session_dir(info.session_id, root)
+        if session_dir.exists():
+            existing = self.load(info.session_id, root)
+            if existing.created_at != info.created_at:
+                raise ValueError("目标已存在同名但不同的会话，拒绝覆盖")
+            return False
+
+        group.mkdir(parents=True, exist_ok=True)
+        group.chmod(0o700)
+        staging = group / f".{info.session_id}.import"
+        if staging.exists():
+            shutil.rmtree(staging)
+        staging.mkdir(parents=True)
+        try:
+            self._write_state(staging, info)
+            journal_path = staging / "context.jsonl"
+            with journal_path.open("w", encoding="utf-8") as stream:
+                for sequence, message in enumerate(messages, start=1):
+                    row = {"seq": sequence, "message": redact(message)}
+                    stream.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            journal_path.chmod(0o600)
+            self._save_active_context_unlocked(staging, context)
+            usage_path = staging / "usage.json"
+            if usage:
+                self._atomic_write(
+                    usage_path, json.dumps(usage, ensure_ascii=False).encode("utf-8")
+                )
+            staging.chmod(0o700)
+            os.rename(staging, session_dir)
+            self._fsync_directory(group)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        return True
 
     @staticmethod
     def _workspace_root(workspace: str | Path) -> Path:
