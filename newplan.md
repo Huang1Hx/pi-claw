@@ -27,7 +27,7 @@ Skill 继续提供单回合执行指导。可选长期记忆使用独立的数�
   成功，环境为 Ubuntu 24.04 / Python 3.12，Lint、Format、Compile、Test、Build 步骤通过。
   该证据只覆盖这次运行的配置，不证明本地历史 4 项失败已消失或属于既有缺陷，也不替代专门的 Docker 验收。
 - M0、M1、M2、M6a、M7a 已 ACCEPTED，第一批可发布（合并 `main` 待用户最终审核）；
-  M3（SQLite SessionRepository）已 ACCEPTED，下一步 M4（并发和崩溃耐久）；E 阶段为条件扩展。
+  M3、M4 已 ACCEPTED，下一步 M5（迁移和一致性）；E 阶段为条件扩展。
 - 先阅读适用的 AGENTS.md、Git 状态、最近提交及现有计划；保留用户已有修改，不覆盖或丢弃。
 - 优先使用 `optimize`。分支不同或有重叠修改时先检查原因，不能强行切换或覆盖。
 
@@ -199,7 +199,7 @@ M0 保持独立，不因提前交付合并或削弱基线、版本及调用点�
 | M6a | ACCEPTED | M2 ACCEPTED | `docs/acceptance/session-context/M6A_CONTEXT_COMMANDS.md` |
 | M7a | ACCEPTED | M6a ACCEPTED | `docs/acceptance/session-context/M7A_CONTEXT_RELEASE.md` |
 | M3 | ACCEPTED | M7a ACCEPTED | `docs/acceptance/session-context/M3_SQLITE_REPOSITORY.md` |
-| M4 | NOT_STARTED | M3 ACCEPTED | `M4_CONCURRENCY_AND_RECOVERY.md` |
+| M4 | ACCEPTED | M3 ACCEPTED | `docs/acceptance/session-context/M4_CONCURRENCY_AND_RECOVERY.md` |
 | M5 | NOT_STARTED | M4 ACCEPTED | `M5_MIGRATION.md` |
 | M6b | NOT_STARTED | M5 ACCEPTED | `M6B_BACKEND_COMMANDS.md` |
 | M7b-前置 | NOT_STARTED | M3 起可并行准备；执行须 M6b ACCEPTED | 归入 `M7B_EVALUATION_AND_RELEASE.md` §前置 |
@@ -312,11 +312,11 @@ M7a 通过代表第一批可发布，不代表 M6/M7 父阶段或整个融合方
 **验收标准 M3-A：** 已列举双后端契约用例通过率 100%；Usage 不重复累计；工作区不混读；
 消息、审批状态和活动上下文语义等价；关键业务更新具有明确的原子提交结果。
 
-### M4：并发和崩溃耐久
+### M4：并发和崩溃耐久（ACCEPTED）
 
-- [ ] 先用真实多进程构造日志竞争和相同 seq 的仅快照竞争，定义受控故障注入点。
-- [ ] 完成版本冲突与事务/落盘边界处理；验证超时、权限和资源清理。
-- [ ] 执行恢复及 integrity_check，完成 `M4_CONCURRENCY_AND_RECOVERY.md`。
+- [x] 先用真实多进程构造日志竞争和相同 seq 的仅快照竞争，定义受控故障注入点。
+- [x] 完成版本冲突与事务/落盘边界处理；验证超时、权限和资源清理。
+- [x] 执行恢复及 integrity_check，完成 `M4_CONCURRENCY_AND_RECOVERY.md`。
 
 **验收标准 M4-A：** 两类竞争均无静默覆盖，冲突方明确失败；崩溃仅恢复完整旧状态或完整新状态；
 测试覆盖的进程崩溃不丢已确认提交数据；integrity_check 通过；权限、锁超时和连接/临时文件清理符合设计。

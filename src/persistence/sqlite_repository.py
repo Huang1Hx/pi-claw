@@ -93,11 +93,15 @@ class SqliteSessionRepository:
         *,
         max_events: int = 10_000,
         max_bytes: int = 20_000_000,
+        busy_timeout_ms: int = 5_000,
     ) -> None:
         if max_events <= 0 or max_bytes <= 0:
             raise ValueError("会话事件与总字节上限必须大于 0")
+        if type(busy_timeout_ms) is not int or busy_timeout_ms <= 0:
+            raise ValueError("busy_timeout_ms 必须是正整数")
         self.max_events = max_events
         self.max_bytes = max_bytes
+        self.busy_timeout_ms = busy_timeout_ms
         self.path = Path(db_path).expanduser()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
@@ -105,7 +109,7 @@ class SqliteSessionRepository:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
         self._conn.execute("PRAGMA synchronous=FULL")
         # executescript 自行管理事务，不能包在 BEGIN IMMEDIATE 里。
         self._conn.executescript(_SCHEMA)
@@ -113,15 +117,16 @@ class SqliteSessionRepository:
             "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
             (str(_SCHEMA_VERSION),),
         )
-        os.chmod(self.path, 0o600)
+        self._secure_files()
 
     # ---- 事务与路径 ----
 
     class _Txn:
         """上下文管理器：BEGIN IMMEDIATE 起写事务，异常回滚，正常提交。"""
 
-        def __init__(self, conn: sqlite3.Connection) -> None:
-            self._conn = conn
+        def __init__(self, repo: SqliteSessionRepository) -> None:
+            self._repo = repo
+            self._conn = repo._conn
 
         def __enter__(self) -> sqlite3.Connection:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -132,10 +137,24 @@ class SqliteSessionRepository:
                 self._conn.execute("COMMIT")
             else:
                 self._conn.execute("ROLLBACK")
+            # 每次事务结束都收紧数据库及其 WAL/SHM 文件权限（可能在本事务中新建）。
+            self._repo._secure_files()
             return False
 
     def _write_txn(self) -> _Txn:
-        return SqliteSessionRepository._Txn(self._conn)
+        return SqliteSessionRepository._Txn(self)
+
+    def _secure_files(self) -> None:
+        """把库文件与其 WAL/SHM 收紧为 0600；缺失文件跳过。"""
+        for suffix in ("", "-wal", "-shm"):
+            candidate = Path(f"{self.path}{suffix}")
+            if candidate.exists():
+                os.chmod(candidate, 0o600)
+
+    def integrity_check(self) -> str:
+        """返回 SQLite `PRAGMA integrity_check` 结果；正常为 "ok"。"""
+        row = self._conn.execute("PRAGMA integrity_check").fetchone()
+        return str(row[0])
 
     @staticmethod
     def _workspace_root(workspace: str | Path) -> Path:

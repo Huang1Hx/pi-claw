@@ -96,3 +96,13 @@ CAS 启用范围必须区分两种写入，否则会误伤：
 
 M6b 接线时必须：工厂接入全部实际入口后，把 `/pin`、`/goal`、`/context` 与 `commit_context` 参数化为
 双后端；`/context` 补充实际后端信息；复用上述 CAS/Trace 路径，不得绕过 `expected_revision`。
+
+## 8. M3/M4 接口回填（2026-10-14）
+
+| 变更 | 位置 | 兼容性 | 回归测试 | 阶段 |
+| --- | --- | --- | --- | --- |
+| 新增 `SqliteSessionRepository`（实现同一 `SessionRepository` 协议） | `src/persistence/sqlite_repository.py` | 新后端；files 默认不变，入口接线在 M6b | `tests/test_session_repository_contract.py`（双后端）、`tests/test_sqlite_repository.py` | M3 |
+| `SqliteSessionRepository(busy_timeout_ms=…)` | 同上 | 新增关键字参数，默认 5000 与既有等待一致 | `test_write_lock_timeout_fails_explicitly` | M4 |
+| `SqliteSessionRepository.integrity_check()`、`close()` | 同上 | 新方法；不改既有调用点 | `test_integrity_check_and_file_permissions` | M4 |
+
+M6b 接线时必须：`/context` 报告实际后端；迁移/故障反馈不得回退陈旧数据或谎报成功。
