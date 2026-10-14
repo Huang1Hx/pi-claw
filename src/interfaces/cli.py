@@ -19,7 +19,8 @@ from core.completion import default_completion_verifier
 from core.schemas import ModelReply, RunStatus, ToolCall
 from evaluation.runner import EvalRunner, load_eval_suite, write_eval_report
 from interfaces.repl import CodingRepl
-from persistence.session_store import SessionStore
+from persistence.factory import SUPPORTED_BACKENDS, open_session_store
+from persistence.migrate import MigrationConflict, migrate_workspace
 from persistence.trace import TraceReplay, TraceWriter
 from providers import OfflineCodingProvider, OpenAICompatibleProvider, ScriptedProvider
 from routing import RoutedProvider
@@ -63,6 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     resume_group.add_argument("--session", help="恢复指定 session id")
     chat.add_argument("--data-dir", type=Path, help="覆盖会话数据目录，主要用于测试")
+    chat.add_argument(
+        "--session-backend",
+        choices=SUPPORTED_BACKENDS,
+        default=None,
+        help="会话后端；默认继承 PI_CLAW_SESSION_BACKEND，否则 files",
+    )
     chat.add_argument("--print", action="store_true", dest="print_only", help="执行首条任务后退出")
     chat.add_argument("--yes", action="store_true", help="自动批准策略允许的副作用，仅限可信工作区")
     chat.add_argument(
@@ -74,6 +81,25 @@ def build_parser() -> argparse.ArgumentParser:
     sessions = subparsers.add_parser("sessions", help="列出当前工作区的历史会话")
     sessions.add_argument("--workspace", type=Path, help="工作区目录；默认启动目录/projects")
     sessions.add_argument("--data-dir", type=Path, help="覆盖会话数据目录，主要用于测试")
+    sessions.add_argument(
+        "--session-backend",
+        choices=SUPPORTED_BACKENDS,
+        default=None,
+        help="会话后端；默认继承 PI_CLAW_SESSION_BACKEND，否则 files",
+    )
+
+    migrate = subparsers.add_parser(
+        "migrate", help="在 files 与 sqlite 后端之间迁移一个工作区的会话"
+    )
+    migrate.add_argument("--workspace", type=Path, required=True, help="要迁移的工作区目录")
+    migrate.add_argument(
+        "--from", dest="from_backend", choices=SUPPORTED_BACKENDS, required=True, help="源后端"
+    )
+    migrate.add_argument(
+        "--to", dest="to_backend", choices=SUPPORTED_BACKENDS, required=True, help="目标后端"
+    )
+    migrate.add_argument("--data-dir", type=Path, help="两个后端共用的会话数据目录根")
+    migrate.add_argument("--trace", type=Path, help="可选 JSONL 审计轨迹路径")
 
     demo = subparsers.add_parser("demo", help="在临时目录运行确定性的离线修复演示")
     demo.add_argument(
@@ -325,7 +351,7 @@ def _run_chat(args: argparse.Namespace) -> int:
     workspace = resolve_workspace(args.workspace)
     trace = _trace(args.trace)
     print(f"审计轨迹：{trace.path}")
-    store = SessionStore(args.data_dir)
+    store = open_session_store(args.data_dir, backend=args.session_backend)
     resumed = None
     if args.session:
         resumed = store.load(args.session, workspace)
@@ -384,13 +410,62 @@ def _list_sessions(args: argparse.Namespace) -> int:
     if not workspace.exists():
         print("当前工作区没有会话。")
         return 0
-    sessions = SessionStore(args.data_dir).list_sessions(workspace)
+    sessions = open_session_store(args.data_dir, backend=args.session_backend).list_sessions(
+        workspace
+    )
     if not sessions:
         print("当前工作区没有会话。")
         return 0
     for info in sessions:
         model = f"/{info.model}" if info.model else ""
         print(f"{info.session_id}\t{info.updated_at}\t{info.provider}{model}\t{info.title}")
+    return 0
+
+
+def _run_migrate(args: argparse.Namespace) -> int:
+    """在两个后端之间迁移一个工作区的会话；失败显式报错且不触碰源数据。"""
+    if args.from_backend == args.to_backend:
+        print("错误：源后端与目标后端相同，无需迁移。", file=sys.stderr)
+        return 2
+    workspace = resolve_workspace(args.workspace, create=False)
+    if not workspace.exists():
+        print("当前工作区没有会话。")
+        return 0
+    source = open_session_store(args.data_dir, backend=args.from_backend)
+    target = open_session_store(args.data_dir, backend=args.to_backend)
+    trace = _trace(args.trace) if args.trace else None
+    payload = {
+        "workspace": str(workspace),
+        "from_backend": args.from_backend,
+        "to_backend": args.to_backend,
+    }
+    try:
+        report = migrate_workspace(source, target, workspace)
+    except (MigrationConflict, OSError, RuntimeError, ValueError) as exc:
+        reason = "conflict" if isinstance(exc, MigrationConflict) else type(exc).__name__
+        if trace is not None:
+            trace.record("session_migration_failed", {**payload, "reason": reason})
+        print(f"迁移失败：{exc}", file=sys.stderr)
+        return 2
+    finally:
+        for store in (source, target):
+            close = getattr(store, "close", None)
+            if callable(close):
+                close()
+    if trace is not None:
+        trace.record(
+            "session_migrated",
+            {
+                **payload,
+                "total": report.total,
+                "imported": report.imported,
+                "skipped": report.skipped,
+            },
+        )
+    print(
+        f"迁移完成：{args.from_backend} -> {args.to_backend}；"
+        f"总数 {report.total}，导入 {report.imported}，幂等跳过 {report.skipped}"
+    )
     return 0
 
 
@@ -472,6 +547,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_chat(args)
         if args.command == "sessions":
             return _list_sessions(args)
+        if args.command == "migrate":
+            return _run_migrate(args)
         if args.command == "demo":
             return _run_demo(args)
         if args.command == "run":

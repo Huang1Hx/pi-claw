@@ -4,6 +4,7 @@ import json
 
 from commands.model import current_model
 from config.models import SandboxSettings
+from persistence.factory import store_backend
 
 
 def _sandbox_status(repl) -> tuple[str, str]:
@@ -47,6 +48,7 @@ def status(repl, argument: str) -> bool:
         print(
             f"工作区：{repl.workspace}\n会话：{repl.session.session_id}\n"
             f"模型：{current_model(repl)}\n审批：{approval}\n"
+            f"会话后端：{store_backend(repl.store)}\n"
             f"执行后端：{backend}\n资源限制：{resource_limits}\n"
             f"Skill：{skill_label}\n"
             f"最近结果：{result}\n"
@@ -57,6 +59,7 @@ def status(repl, argument: str) -> bool:
     value = {
         "workspace": str(repl.workspace),
         "session": repl.session.session_id,
+        "session_backend": store_backend(repl.store),
         "provider": repl.provider_name,
         "model": repl.model,
         "messages": len(repl.messages),

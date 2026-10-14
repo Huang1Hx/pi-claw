@@ -265,6 +265,10 @@ REPL：`/help`、`/status [--verbose]`、`/model [模型ID|auto|别名]`、`/new
 字段解释与验证记录见 [Iteration 012](docs/iterations/ITERATION_012_COMMANDS_AND_PROJECT_USAGE.md)。
 
 会话默认保存在 `~/.pi-claw/sessions/`，可用 `PI_CLAW_HOME` 或 `--data-dir` 调整。
+会话后端默认 `files`；设 `PI_CLAW_SESSION_BACKEND=sqlite` 或传 `--session-backend sqlite` 可改用
+数据目录下单个 `sessions.sqlite3`（CLI 参数优先于环境变量）。已有会话用 `pi-claw migrate
+--workspace <目录> --from files --to sqlite --data-dir <数据目录>` 一次性迁移，源数据保留、
+重复运行幂等、冲突在写入前报错；`/context` 会显示当前实际后端。
 Trace 和 Eval 报告默认保存在忽略跟踪的 `runs/` 中。
 
 ## 目录

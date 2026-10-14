@@ -23,7 +23,8 @@ from core.schemas import RunStatus
 from core.task_anchor import AnchorInputs, build_anchor
 from interfaces.rendering import ReplyDisplay
 from interfaces.terminal_input import TerminalInput
-from persistence.session_store import SessionInfo, SessionStore
+from persistence.repository import SessionRepository
+from persistence.session_store import SessionInfo
 from persistence.trace import TraceWriter, redact
 from providers import OfflineCodingProvider, Provider
 from routing import RoutedProvider
@@ -56,7 +57,7 @@ class CodingRepl:
         provider_name: str = "scripted",
         model: str | None = None,
         base_url: str | None = None,
-        store: SessionStore,
+        store: SessionRepository,
         trace: TraceWriter,
         max_steps: int = 12,
         session_id: str | None = None,

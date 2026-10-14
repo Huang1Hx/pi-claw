@@ -27,7 +27,7 @@ Skill 继续提供单回合执行指导。可选长期记忆使用独立的数�
   成功，环境为 Ubuntu 24.04 / Python 3.12，Lint、Format、Compile、Test、Build 步骤通过。
   该证据只覆盖这次运行的配置，不证明本地历史 4 项失败已消失或属于既有缺陷，也不替代专门的 Docker 验收。
 - M0、M1、M2、M6a、M7a 已 ACCEPTED，第一批可发布（合并 `main` 待用户最终审核）；
-  M3、M4、M5 已 ACCEPTED，下一步 M6b（后端切换、迁移接线与观测补齐）；E 阶段为条件扩展。
+  M3、M4、M5、M6b 已 ACCEPTED，下一步 M7b（锚 off/on 对照与双后端综合评测）；E 阶段为条件扩展。
 - 先阅读适用的 AGENTS.md、Git 状态、最近提交及现有计划；保留用户已有修改，不覆盖或丢弃。
 - 优先使用 `optimize`。分支不同或有重叠修改时先检查原因，不能强行切换或覆盖。
 
@@ -201,7 +201,7 @@ M0 保持独立，不因提前交付合并或削弱基线、版本及调用点�
 | M3 | ACCEPTED | M7a ACCEPTED | `docs/acceptance/session-context/M3_SQLITE_REPOSITORY.md` |
 | M4 | ACCEPTED | M3 ACCEPTED | `docs/acceptance/session-context/M4_CONCURRENCY_AND_RECOVERY.md` |
 | M5 | ACCEPTED | M4 ACCEPTED | `docs/acceptance/session-context/M5_MIGRATION.md` |
-| M6b | NOT_STARTED | M5 ACCEPTED | `M6B_BACKEND_COMMANDS.md` |
+| M6b | ACCEPTED | M5 ACCEPTED | `docs/acceptance/session-context/M6B_BACKEND_COMMANDS.md` |
 | M7b-前置 | NOT_STARTED | M3 起可并行准备；执行须 M6b ACCEPTED | 归入 `M7B_EVALUATION_AND_RELEASE.md` §前置 |
 | M7b | NOT_STARTED | M6b ACCEPTED | `M7B_EVALUATION_AND_RELEASE.md` |
 | E1 | DEFERRED | M0–M7 ACCEPTED 且有跨会话重复调查证据 | `E1_EXPLICIT_MEMORY.md` |
@@ -333,11 +333,11 @@ M7a 通过代表第一批可发布，不代表 M6/M7 父阶段或整个融合方
 
 ### M6b：后端切换、迁移接线和观测补齐
 
-- [ ] 先写后端配置优先级、迁移切换、恢复和数据库故障反馈的端到端测试。
-- [ ] 工厂接入全部实际入口，将 M6a 命令参数化为双后端，`/context` 补充实际后端信息。
-- [ ] 复用 M6a 的基础 Trace，补齐 `session_migrated` 等后端事件，只保留安全元数据。
-- [ ] 回归 M6a 支持矩阵和命令行为，核对 M0 调用点清单，完成 `M6B_BACKEND_COMMANDS.md`。
-- [ ] **真实 REPL 会话落到 SQLite 并用独立连接核对**：以 `PI_CLAW_SESSION_BACKEND=sqlite` 跑一次真实
+- [x] 先写后端配置优先级、迁移切换、恢复和数据库故障反馈的端到端测试。
+- [x] 工厂接入全部实际入口，将 M6a 命令参数化为双后端，`/context` 补充实际后端信息。
+- [x] 复用 M6a 的基础 Trace，补齐 `session_migrated` 等后端事件，只保留安全元数据。
+- [x] 回归 M6a 支持矩阵和命令行为，核对 M0 调用点清单，完成 `M6B_BACKEND_COMMANDS.md`。
+- [x] **真实 REPL 会话落到 SQLite 并用独立连接核对**：以 `PI_CLAW_SESSION_BACKEND=sqlite` 跑一次真实
   REPL/CLI 会话（含 `/goal`、`/pin`、工具写入），再用**独立 sqlite3 连接直读原始行**验证消息/pins/锚/
   usage 已落库、凭据已脱敏、`through_seq=MAX(seq)`、`integrity_check=ok`；不得仅用同源 API 读回自证。
 

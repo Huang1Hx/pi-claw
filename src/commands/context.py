@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from core.active_context import MAX_PINS
 from core.task_anchor import ANCHOR_PINS_BUDGET
+from persistence.factory import store_backend
 
 
 def compact(repl, argument: str) -> bool:
@@ -48,6 +49,7 @@ def context(repl, argument: str) -> bool:
         f"tokens≈{repl.context.estimate_tokens(repl.messages)}",
         file=repl.output,
     )
+    print(f"会话后端：{store_backend(repl.store)}", file=repl.output)
     print(
         f"水位线：through_seq={active.through_seq} "
         f"修订号：snapshot_revision={active.snapshot_revision}",

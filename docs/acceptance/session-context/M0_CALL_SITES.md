@@ -58,6 +58,24 @@
 ## 5. 结论
 
 - 全部产品调用点均已定位；M0 未改变任何公开签名，私有 `_save_active_messages_unlocked` 签名保持稳定。
+
+## 6. M6b 后端切换接线（2026-10-14 追加）
+
+新增 `src/persistence/factory.py`（`open_session_store` / `resolve_backend` / `store_backend`），
+把“选择文件后端还是 SQLite”收敛到单一工厂；调用点只依赖 `SessionRepository` 协议，不再直接 new
+具体后端。选择优先级：显式参数 > `PI_CLAW_SESSION_BACKEND` > 默认 `files`；未知取值显式报错。
+
+| # | 文件/函数 | 触发入口 | 读写接口 | 目标签名/适配 | 后端 | 回归测试 | 阶段 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 11 | `src/interfaces/cli.py:_run_chat` | `chat`（`--session-backend` / env） | `open_session_store` | 取代 `SessionStore(args.data_dir)` | files/sqlite | `test_backend_commands.py::test_cli_sessions_flag_overrides_env` | M6b |
+| 12 | `src/interfaces/cli.py:_list_sessions` | `sessions`（`--session-backend` / env） | `open_session_store().list_sessions` | 同上 | files/sqlite | `test_backend_commands.py::test_cli_sessions_flag_overrides_env` | M6b |
+| 13 | `src/interfaces/cli.py:_run_migrate` | `migrate --from --to` | `open_session_store` + `migrate_workspace` | 新增；失败不碰源数据 | files↔sqlite | `test_backend_commands.py::test_cli_migrate_and_trace`、`::test_migration_conflict_fails_without_partial_acceptance` | M6b |
+| 14 | `src/interfaces/repl.py:CodingRepl.__init__` | 装配 REPL | `store: SessionRepository` | 类型注解由 `SessionStore` 放宽到协议 | files/sqlite | `test_backend_commands.py::test_real_repl_sqlite_rows_are_independently_readable` | M6b |
+| 15 | `src/commands/context.py:context` | `/context` | — | 增列“会话后端：files/sqlite” | files/sqlite | `test_backend_commands.py::test_context_reports_actual_backend` | M6b |
+| 16 | `src/commands/status.py:status` | `/status` | — | 增列会话后端（简明与 `--verbose` 均含） | files/sqlite | `test_backend_commands.py`、`test_pin_commands.py` 回归 | M6b |
+
+Trace 事件：`session_migrated`（成功，含 `from_backend/to_backend/total/imported/skipped`）与
+`session_migration_failed`（冲突，仅含 `reason=conflict`），不含正文或凭据。
 - 写入路径在 M0 增加了“预检先于写入”的 fail-closed 行为，`append_message` 与 `save_active_messages` 已覆盖。
 - M1/M2/M6a 接线后必须回填本清单的“目标签名/适配”与“保留字段”列，签名变更不得留下静默丢字段或跳过 CAS 的旧调用者。
 
