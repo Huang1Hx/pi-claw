@@ -202,6 +202,7 @@ M0 保持独立，不因提前交付合并或削弱基线、版本及调用点�
 | M4 | NOT_STARTED | M3 ACCEPTED | `M4_CONCURRENCY_AND_RECOVERY.md` |
 | M5 | NOT_STARTED | M4 ACCEPTED | `M5_MIGRATION.md` |
 | M6b | NOT_STARTED | M5 ACCEPTED | `M6B_BACKEND_COMMANDS.md` |
+| M7b-前置 | NOT_STARTED | M3 起可并行准备；执行须 M6b ACCEPTED | 归入 `M7B_EVALUATION_AND_RELEASE.md` §前置 |
 | M7b | NOT_STARTED | M6b ACCEPTED | `M7B_EVALUATION_AND_RELEASE.md` |
 | E1 | DEFERRED | M0–M7 ACCEPTED 且有跨会话重复调查证据 | `E1_EXPLICIT_MEMORY.md` |
 | E2 | DEFERRED | E1 ACCEPTED | `E2_SKILL_MEMORY_RETRIEVAL.md` |
@@ -341,6 +342,15 @@ M7a 通过代表第一批可发布，不代表 M6/M7 父阶段或整个融合方
 故障不报成功或回退陈旧数据；files 默认及锚关闭路径兼容；M6a 既有验收无回归。
 
 ### M7b：双后端综合评测与第二批交付
+
+#### M7b 前置：锚 off/on 开关与对照协议冻结（属第二批，不在第一批合并范围）
+
+- [ ] 增加**单一隔离**的锚开关（env 或评测参数）：`off` 只跳过任务锚临时块，**不**改变 pins 注入、
+  不改变审批/Policy/Sandbox、不改变默认行为；`off` 时记录明确事件，不得静默忽略。
+- [ ] 冻结对照协议：任务集、提示词、模型/Skill 设置、时间/Token/步数预算、评分器、样本量、
+  随机性控制与成功判据，全部在运行前固定并入库（脱敏、无凭据），复用现有评测入口，不污染已冻结评测。
+- [ ] 顺序：M3–M5 期间可并行完成离线准备；实际锚 off/on 与 files/sqlite 对照在 **M6b 代码冻结后**于 M7b 执行，
+  避免后端/命令改动使对照证据失效。开关只允许改变“是否注入锚”这一个变量。
 
 - [ ] 先冻结任务、约束、评分器、模型/Skill 设置、重试和时间预算，再执行对照。
 - [ ] 对照 anchor off/on 与 files/sqlite；两组 Skill 设置一致，不能混合归因。
