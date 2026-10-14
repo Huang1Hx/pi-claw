@@ -139,3 +139,11 @@ def test_request_with_pins_preserves_tool_protocol() -> None:
     compacted = manager.compact(request)
     ContextManager._validate_tool_protocol(compacted)
     assert all(not ContextManager.is_ephemeral(m) for m in compacted)
+
+
+def test_compaction_of_only_ephemeral_messages_returns_empty() -> None:
+    """过滤掉临时块后可能为空，不能因 copied[-1] 触发 IndexError。"""
+    manager = ContextManager(max_messages=4, max_chars=1_000, keep_recent=2)
+    only_ephemeral = [{"role": "system", "content": PIN, EPHEMERAL_KEY: True}]
+    assert manager.compact(only_ephemeral) == []
+    assert manager.prune_tool_results(only_ephemeral) == ([], 0)

@@ -41,7 +41,16 @@
 | M1-5 | 工具正文不能成为 pin/授权，只能作为低信任数据 | `test_tool_output_cannot_become_pin` | passed | 同上 | PASS |
 | M1-6 | 插入 pins 不破坏 tool 调用配对 | `test_request_with_pins_preserves_tool_protocol` | passed | 同上 | PASS |
 | M1-7 | 既有 Skill 单回合注入/剥离语义兼容 | `tests/test_skills_agent_injection.py` | 3 passed | 同上 | PASS |
-| M1-8 | 全量回归与静态检查 | `pytest -o addopts="" -q`、`ruff check`、`ruff format --check` | `4 failed(既有), 933 passed, 3 skipped`；Ruff/格式通过 | 命令输出 | PASS |
+| M1-8 | 全量回归与静态检查 | `pytest -o addopts="" -q`、`ruff check`、`ruff format --check` | `4 failed(既有), 934 passed, 3 skipped`；Ruff/格式通过 | 命令输出 | PASS |
+| M1-9 | 过滤后仅剩临时块时不触发 IndexError | `test_compaction_of_only_ephemeral_messages_returns_empty` | passed | §4 复审 | PASS |
+
+## 3b. M1 复审（diff `f0b54be..128431a`）
+
+- 复审结论：设计成立，无高危问题；发现 1 个边界缺陷并修复。
+- 缺陷：`compact()` 过滤临时块后若结果为空，会走到 `copied[-1]` 抛 `IndexError`。已加空列表守卫，
+  补 `test_compaction_of_only_ephemeral_messages_returns_empty`（同时覆盖 `prune_tool_results`）。
+- 记录（非缺陷，后续阶段处理）：临时块是否应计入“触发压缩”的预算判断属 M6a 接线优化；
+  M1 按计划采用“合计超限即明确失败”。
 
 ## 4. 裁决记录（Ruling）
 

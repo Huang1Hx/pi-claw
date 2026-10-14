@@ -162,6 +162,9 @@ class ContextManager:
 
         # 深拷贝保证压缩过程不会修改调用方仍在使用的原始消息；临时块只在本回合请求中出现，直接丢弃。
         copied = [m for m in copy.deepcopy(messages) if not self.is_ephemeral(m)]
+        if not copied:
+            # 全是临时块（或过滤后为空）时没有可保留内容，直接返回空窗口。
+            return []
         first_system = next((item for item in copied if item.get("role") == "system"), None)
         conversational = [item for item in copied if item is not first_system]
 
