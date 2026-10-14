@@ -26,7 +26,7 @@ Skill 继续提供单回合执行指导。可选长期记忆使用独立的数�
 - 2026-10-14 已核实：`993881f` 的 [常规 CI 运行 38428830418](https://github.com/Huang1Hx/pi-claw/actions/runs/38428830418)
   成功，环境为 Ubuntu 24.04 / Python 3.12，Lint、Format、Compile、Test、Build 步骤通过。
   该证据只覆盖这次运行的配置，不证明本地历史 4 项失败已消失或属于既有缺陷，也不替代专门的 Docker 验收。
-- M0、M1 已 ACCEPTED；M2 进行中（锚构建器与修订号 CAS 已落地，恢复接线与验收文档待完成）；E 阶段为条件扩展。
+- M0、M1、M2 已 ACCEPTED；下一步 M6a（第一批上下文交互与基础观测）；E 阶段为条件扩展。
 - 先阅读适用的 AGENTS.md、Git 状态、最近提交及现有计划；保留用户已有修改，不覆盖或丢弃。
 - 优先使用 `optimize`。分支不同或有重叠修改时先检查原因，不能强行切换或覆盖。
 
@@ -194,7 +194,7 @@ M0 保持独立，不因提前交付合并或削弱基线、版本及调用点�
 | --- | --- | --- | --- |
 | M0 | ACCEPTED | 现状核实 | `docs/acceptance/session-context/M0_BASELINE_AND_CONTRACT.md`、`docs/acceptance/session-context/M0_CALL_SITES.md` |
 | M1 | ACCEPTED | M0 ACCEPTED | `docs/acceptance/session-context/M1_PINNED_CONTEXT.md` |
-| M2 | IN_PROGRESS | M1 ACCEPTED | `M2_TASK_ANCHOR.md` |
+| M2 | ACCEPTED | M1 ACCEPTED | `docs/acceptance/session-context/M2_TASK_ANCHOR.md` |
 | M6a | NOT_STARTED | M2 ACCEPTED | `M6A_CONTEXT_COMMANDS.md` |
 | M7a | NOT_STARTED | M6a ACCEPTED | `M7A_CONTEXT_RELEASE.md` |
 | M3 | NOT_STARTED | M7a ACCEPTED | `M3_SQLITE_REPOSITORY.md` |
@@ -262,7 +262,7 @@ M0 保持独立，不因提前交付合并或削弱基线、版本及调用点�
 **验收标准 M1-A：** 固定语料连续至少 20 次压缩，已接受 pins 保留率 100%；工具协议无孤立或缺配对；
 超预算明确失败；工具正文不能成为 pin 或授权；下一回合无上回合 Skill 原文及摘要残留。
 
-### M2：TaskAnchor 与文件后端恢复（IN_PROGRESS）
+### M2：TaskAnchor 与文件后端恢复（ACCEPTED）
 
 - [ ] 先写确定性、重启、目标切换、pin 撤销、写入证据不完整和旧验证失效测试。
 - [ ] 实现有界锚、证据引用、更新/重置和覆盖水位线，接入文件快照。

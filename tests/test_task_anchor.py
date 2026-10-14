@@ -174,3 +174,52 @@ def test_revision_cas_rejects_concurrent_compaction(workspace, tmp_path) -> None
             expected_seq=seq,
             expected_revision=revision,
         )
+
+
+def test_anchor_survives_interrupted_append_then_recovery(workspace, tmp_path, monkeypatch) -> None:
+    """快照已含锚；追加时中断后恢复，锚仍在且 journal 尾部不丢。"""
+    from core.active_context import TaskAnchor
+
+    store, session = _seed(workspace, tmp_path)
+    messages, seq = store.load_active_snapshot(session.session_id, workspace)
+    context = store.load_active_context(session.session_id, workspace).with_anchor(
+        TaskAnchor.build(text="任务锚：目标=修复回归", covered_through_seq=seq, sources=("task",))
+    )
+    store.save_active_context(session.session_id, workspace, context)
+
+    original = store._save_active_messages_unlocked
+
+    def crash(*_args, **_kwargs):
+        raise OSError("interrupted")
+
+    monkeypatch.setattr(store, "_save_active_messages_unlocked", crash)
+    with pytest.raises(OSError):
+        store.append_message(session.session_id, workspace, {"role": "user", "content": "tail"})
+    monkeypatch.setattr(store, "_save_active_messages_unlocked", original)
+
+    recovered = store.load_active_context(session.session_id, workspace)
+    assert recovered.anchor is not None and recovered.anchor.text == "任务锚：目标=修复回归"
+    assert [m.get("content") for m in recovered.messages] == ["system", "tail"]
+
+
+def test_legacy_message_api_preserves_anchor_and_bumps_revision(workspace, tmp_path) -> None:
+    """兼容包装器 save_active_messages 不得擦除锚，且原地压缩推进修订号。"""
+    from core.active_context import TaskAnchor
+
+    store, session = _seed(workspace, tmp_path)
+    messages, seq = store.load_active_snapshot(session.session_id, workspace)
+    context = store.load_active_context(session.session_id, workspace).with_anchor(
+        TaskAnchor.build(text="任务锚：目标=修复回归", covered_through_seq=seq, sources=("task",))
+    )
+    store.save_active_context(session.session_id, workspace, context)
+    before = store.load_active_context(session.session_id, workspace).snapshot_revision
+
+    store.save_active_messages(
+        session.session_id,
+        workspace,
+        messages + [{"role": "assistant", "content": "压缩摘要"}],
+    )
+
+    after = store.load_active_context(session.session_id, workspace)
+    assert after.anchor is not None and after.anchor.text == "任务锚：目标=修复回归"
+    assert after.snapshot_revision == before + 1

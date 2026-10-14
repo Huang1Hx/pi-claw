@@ -60,3 +60,19 @@
 - 全部产品调用点均已定位；M0 未改变任何公开签名，私有 `_save_active_messages_unlocked` 签名保持稳定。
 - 写入路径在 M0 增加了“预检先于写入”的 fail-closed 行为，`append_message` 与 `save_active_messages` 已覆盖。
 - M1/M2/M6a 接线后必须回填本清单的“目标签名/适配”与“保留字段”列，签名变更不得留下静默丢字段或跳过 CAS 的旧调用者。
+
+
+## 6. M2 接口变更回填（2026-10-14）
+
+M2 未新增产品调用点，但扩展了持久化与请求组装签名，必须同步：
+
+| 变更 | 位置 | 兼容性 | 回归测试 | 阶段 |
+| --- | --- | --- | --- | --- |
+| `save_active_messages(..., expected_revision=None)` | `src/persistence/checkpoint.py` | 新增关键字参数，默认 `None` 不改变既有行为 | `test_revision_cas_rejects_concurrent_compaction` | M2-B |
+| `save_active_context(..., expected_revision=None)` | `src/persistence/checkpoint.py` | 同上 | `test_revision_cas_rejects_concurrent_pin_update` | M2-B |
+| `_save_active_messages_unlocked(..., *, expected_revision=None)` | `src/persistence/checkpoint.py` | 私有签名新增关键字参数；崩溃注入替身用 `*_args/**kwargs` 仍可用 | `test_session.py` 崩溃恢复组、`test_task_anchor.py` 中断恢复 | M2 |
+| `Agent.run(..., pins=None, anchor=None)` | `src/core/agent.py` | 新增关键字参数，默认不注入 | `test_pinned_context.py`、`test_task_anchor.py` | M2 |
+| `core/task_anchor.build_anchor(AnchorInputs)` | `src/core/task_anchor.py` | 新纯函数，无副作用 | `tests/test_task_anchor.py` | M2 |
+
+M6a 接线时必须：REPL 传入 `pins`/`anchor`（`anchor` 由 `build_anchor` 从运行中数据构建），
+并在 `save_active_context`/`save_active_messages` 传 `expected_revision` 以启用 CAS。
