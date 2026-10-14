@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -185,3 +186,46 @@ def test_snapshot_save_preserves_goal_and_anchor(tmp_path, workspace):
     loaded = repo.load_active_context(session.session_id, workspace)
     assert loaded.goal == "修复回归"
     assert loaded.anchor is not None and loaded.anchor.text == "目标：修复回归"
+
+
+def test_raw_rows_are_redacted_and_independently_readable(tmp_path, workspace):
+    """用独立 sqlite3 连接直读原始行（不经仓库 API），确认脱敏、结构与一致性。"""
+    repo = make_repo(tmp_path)
+    session = repo.create(workspace, "system")
+    repo.append_message(
+        session.session_id,
+        workspace,
+        {"role": "user", "content": "使用 api_key=sk-REALSECRET1234567890 调用"},
+    )
+    context = repo.load_active_context(session.session_id, workspace)
+    repo.save_active_context(
+        session.session_id,
+        workspace,
+        context.with_goal("修复回归"),
+        expected_revision=context.snapshot_revision,
+    )
+    repo.close()
+
+    raw = sqlite3.connect(tmp_path / "sessions.sqlite3")
+    try:
+        assert raw.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        tables = {
+            row[0] for row in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert {"sessions", "events", "snapshots", "usage_ledger", "meta"} <= tables
+
+        # 原始文本中不得出现被 redact 的凭据；事件与快照都不例外。
+        blobs = [row[0] for row in raw.execute("SELECT message FROM events")]
+        blobs += [row[0] for row in raw.execute("SELECT context FROM snapshots")]
+        assert all("sk-REALSECRET1234567890" not in blob for blob in blobs)
+        assert any("[REDACTED]" in blob for blob in blobs)
+
+        seq = raw.execute(
+            "SELECT COALESCE(MAX(seq),0) FROM events WHERE session_id=?", (session.session_id,)
+        ).fetchone()[0]
+        through = raw.execute(
+            "SELECT through_seq FROM snapshots WHERE session_id=?", (session.session_id,)
+        ).fetchone()[0]
+        assert seq == through == 2
+    finally:
+        raw.close()

@@ -37,6 +37,7 @@
 | M4-4 | 已提交后 kill：数据仍在，不丢已确认提交 | `test_kill_after_commit_preserves_data` | passed | PASS |
 | M4-5 | integrity_check=ok；库/WAL/SHM 权限 0600 | `test_integrity_check_and_file_permissions` | passed | PASS |
 | M4-6 | 写锁被占用时按 busy_timeout 显式失败，不无限阻塞 | `test_write_lock_timeout_fails_explicitly` | passed | PASS |
+| M4-8 | **独立连接直读原始行**：脱敏生效、结构与水位线一致、integrity ok | `test_raw_rows_are_redacted_and_independently_readable` | passed | PASS |
 | M4-7 | 全量回归与静态检查 | 见 §5 | — | PASS |
 
 ## 4. 边界与如实说明
@@ -48,7 +49,10 @@
 ## 5. 证据与结论
 
 - 专项：`tests/test_sqlite_concurrency.py` → `6 passed`（真实子进程）。
-- 契约+专项：`tests/test_session_repository_contract.py`（双后端 14）、`tests/test_sqlite_repository.py`（8）。
+- 契约+专项：`tests/test_session_repository_contract.py`（双后端 14）、`tests/test_sqlite_repository.py`（9）。
+- 独立核对：除 API 读回外，已用 `sqlite3` CLI 与**独立 sqlite3 连接**直接 dump 原始表，确认凭据被 `[REDACTED]`、
+  `through_seq=MAX(seq)`、`integrity_check=ok`、库/WAL/SHM 权限 0600；并固化为永久回归用例 M4-8。
+- 仍**未**验证的：尚无真实交互式产品会话落库（入口接线属 M6b）；未做规模/长时压力基准。
 - 全量：`pytest -o addopts="" -q` → `4 failed（既有沙箱限制）, 993 passed, 3 skipped`。
 - Ruff/格式：通过。
 
