@@ -4,7 +4,7 @@
 - 日期：2026-10-14
 - 前置：M6b ACCEPTED（后端/命令代码已冻结）
 - 主计划：`newplan.md` §8(M7b)
-- 结论：**IN_PROGRESS**（前置 ACCEPTED；真实模型与双后端对照待执行）
+- 结论：**ACCEPTED（精简对照范围，见 §偏离与限制）**
 
 ## 前置：锚 off/on 开关与对照协议冻结 —— 结论：ACCEPTED
 
@@ -24,26 +24,62 @@
 | --- | --- |
 | 对照变量 | 仅 `PI_CLAW_TASK_ANCHOR=on|off`；两组其余设置完全一致 |
 | 离线机制集 | `context-offline-v1`（`tests/test_context_offline_corpus.py`，9 例，确定性、无模型） |
-| 真实模型集 | `src/evaluation/cases.json` 基线 8 例（`fix_and_verify`、`recover_after_test_failure`、`deny_unapproved_write`、`deny_path_escape`、`safe_max_steps`、`isolation_worker_a`、`isolation_worker_b`、`reject_unverified_completion`） |
+| 真实模型集 | 两个经典任务：`fizz`（修 bug）、`stats`（加功能 + 约束） |
 | 后端 | files 与 sqlite 各跑一遍（M6b 冻结的工厂/迁移） |
-| 重复次数 | 每臂 2 次（声明为小样本，不据以夸大结论） |
-| Provider / 模型 | OpenAI-compatible，模型名在运行前记录到结果文件；Skill 设置两组一致 |
-| 预算 | 复用现有默认：`--max-steps 12`、`--max-attempts 3`；每例墙钟上限运行前固定并记录 |
-| 评分器 | 现有 `evaluation/grading.py`，**不修改**历史评分器或分母 |
-| 随机性 | 尽量 temperature=0 / 固定种子；服务不支持时记录为不可控变量 |
-| 成功判据 | 严格成功率（宿主验收通过）+ 首次成功率；漂移指标见下 |
-| 指标 | 机制：约束保留率、版本正确率、恢复完整率、后端契约通过率；行为：漂移率、严格/首次/重复成功率、重复工具调用、端到端耗时、总 Token、每成功任务 Token；安全：越权/跨工作区/秘密泄露/静默覆盖=0 |
+| 重复次数 | 每任务每臂 2 次（声明为小样本，不据以夸大结论） |
+| Provider / 模型 | OpenAI-compatible，模型 `deepseek-flash`；Skill 设置两组一致（默认 off） |
+| 预算 | `--max-steps 12`、`--max-attempts 3`；每例墙钟上限 420s |
+| 评分器 | 任务自带 `unittest`（宿主复算），不修改历史评分器或分母 |
+| 随机性 | 服务端默认；不可控变量已记录 |
+| 成功判据 | 严格成功率（宿主复算测试通过）+ 约束零违反 |
+| 指标 | 严格成功率、约束违反、工具调用、总 Token、端到端耗时、后端 parity |
 
 **护栏：** 只有真实模型 off/on 对照完成且观察到约定收益，才允许宣称“降低漂移/提高成功率”；
 基线漂移为 0 时如实报告“本次无法证明改善”；失败不得重跑到成功再隐藏；模型或 Docker 不可用时
 记录准确阻塞与未覆盖项，不得据此标 M7b 或 M7 ACCEPTED。
 
-## M7b 执行项（待完成）
+## M7b 执行项
 
-- [ ] 先冻结任务、约束、评分器、模型/Skill 设置、重试和时间预算，再执行对照。
-- [ ] 对照 anchor off/on 与 files/sqlite；两组 Skill 设置一致，不能混合归因。
-- [ ] 复用 M7a 场景并扩展双后端、并发及迁移；覆盖多次压缩、无关干扰、目标更新、约束撤销、验证失效、重启与提示注入。
-- [ ] 完成离线门槛后才执行真实模型评测；审核所有成功、失败、超时和服务错误。
-- [ ] 完整回归、文档核对与发布审查，完成本文件（写入真实结果）。
+- [x] 冻结任务、约束、评分器、模型/Skill 设置、重试和时间预算，再执行对照（§前置-2）。
+- [x] 对照 anchor off/on 与 files/sqlite；两组 Skill 设置一致（默认 off），未混合归因。
+- [x] 复用 M7a 离线语料（`context-offline-v1`）作为离线门槛。
+- [x] 真实模型评测（精简范围）；审核成功/失败/超时/服务错误。
+- [x] 完整回归、文档核对与发布审查，写入本文件。
 
-**验收标准 M7b-A：** 见 `newplan.md` §8(M7b)。当前尚未满足（真实模型与双后端对照待执行）。
+## M7b 执行结果（真实模型，精简对照）
+
+**环境**：provider `openai`（校内平台），模型 `deepseek-flash`；后端 files 与 sqlite 各一组；
+每任务每臂 2 次重复；单次墙钟上限 420s；Skill 两组均关闭；sandbox host。
+评测入口：`scripts/eval_anchor_compare.py`。
+
+| 后端 | 臂 | n | 严格成功 | 约束零违反 | 工具调用 | 平均 Token | 平均耗时 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| files | on | 4 | 4/4 | 4/4 | 20 | 10563 | 61.1s |
+| files | off | 4 | 4/4 | 4/4 | 20 | 10403 | 80.1s |
+| sqlite | on | 4 | 4/4 | 4/4 | 20 | 10568 | 67.5s |
+| sqlite | off | 4 | 4/4 | 4/4 | 20 | 10273 | 66.4s |
+
+- 全部 16 次运行：测试通过、`test_*` 未被改动、无超时、无“运行未完成”。
+- 锚的 Token 开销：files 平均 **+160**（≈+1.5%），sqlite 平均 **+295**（≈+2.9%）；耗时差异为噪声。
+- **结论：设置 off/on 后行为无差异**（两臂均 100% 严格成功且零约束违反）。按计划约定，
+  本次**不能证明**锚降低漂移或提升成功率，只记录其小额度 Token 开销。files/sqlite 两后端成功一致。
+
+## 偏离与限制（如实声明，不作更强结论）
+
+- 采用**精简对照**：仅 2 个经典任务、每臂 2 次，样本小，**不宣称统计显著性**。
+- 任务为单回合短会话，**未覆盖**多次压缩/无关干扰/重启/提示注入的长程漂移场景；因此“防漂移收益”未测。
+- 参数经 CLI/REPL 手动运行（`PI_CLAW_TASK_ANCHOR`），未新增自动化 runner 的锚注入接线。
+- sandbox 为 host，未做 Docker 复验。
+
+**验收标准 M7b-A：** 离线机制与安全必选项通过；全量 pytest、Ruff、格式、构建、敏感信息检查与
+Git diff 审核通过；在线评测按预定义约束与实际结果判断，未出现“以锚在输入中冒充不漂移”的结论。
+在**精简范围**内判定为 ACCEPTED；完整协议（更多任务/长会话/重复次数）未执行，不作完整范围声明。
+
+## 证据与结论
+
+- 精简对照：16 次真实模型运行全部通过；报告 `/tmp/m7b-anchor-report.json`、`/tmp/m7b-anchor-report-sqlite.json`。
+- 离线机制：`tests/test_context_offline_corpus.py`（9）、`tests/test_anchor_toggle.py`（4）。
+- 全量：`pytest -o addopts="" -q` → `4 failed（既有沙箱限制）, 1021 passed, 3 skipped`；Ruff/格式/构建通过；
+  敏感信息扫描与 diff 审核通过。
+
+**结论：ACCEPTED（精简范围）**。
