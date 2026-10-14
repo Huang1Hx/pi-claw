@@ -94,6 +94,7 @@ class Agent:
         control: ExecutionControl | None = None,
         skill_guidance: str | None = None,
         pins: list[str] | None = None,
+        anchor: str | None = None,
         run_id: str | None = None,
     ) -> RunResult:
         """执行一个用户回合，返回包含终态、用量和路由摘要的 RunResult。
@@ -115,6 +116,8 @@ class Agent:
             not isinstance(pins, list) or not all(isinstance(p, str) and p.strip() for p in pins)
         ):
             raise ValueError("pins 必须是非空字符串数组或 None")
+        if anchor is not None and (not isinstance(anchor, str) or not anchor.strip()):
+            raise ValueError("anchor 必须是非空字符串或 None")
         if run_id is not None and (not isinstance(run_id, str) or not run_id.strip()):
             raise ValueError("run_id 必须是非空字符串或 None")
         self._running = True
@@ -139,6 +142,7 @@ class Agent:
                 run_id=run_id,
                 skill_guidance=skill_guidance,
                 pins=pins,
+                anchor=anchor,
             )
             finish_run = getattr(self.provider, "finish_run", None)
             if callable(finish_run):
@@ -209,6 +213,7 @@ class Agent:
         run_id: str,
         skill_guidance: str | None = None,
         pins: list[str] | None = None,
+        anchor: str | None = None,
     ) -> RunResult:
         """在给定会话历史上完成一个用户回合。
 
@@ -226,6 +231,8 @@ class Agent:
         ephemeral_blocks: list[str] = []
         if skill_guidance:
             ephemeral_blocks.append(skill_guidance)
+        if anchor:
+            ephemeral_blocks.append(anchor)
         ephemeral_blocks.extend(pins or [])
         self._append_message(history, {"role": "user", "content": task})
         self.last_messages = history

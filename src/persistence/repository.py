@@ -121,8 +121,12 @@ class SessionRepository(Protocol):
         messages: list[dict[str, Any]],
         *,
         expected_seq: int | None = None,
+        expected_revision: int | None = None,
     ) -> None:
-        """保存压缩后的活动窗口；不得擦除既有 pins/anchor。"""
+        """保存压缩后的活动窗口；不得擦除既有 pins/anchor。
+
+        expected_revision 为加载时观察到的修订号，用于保护水位线不变的原地压缩。
+        """
         ...
 
     def save_active_context(
@@ -132,8 +136,11 @@ class SessionRepository(Protocol):
         context: ActiveContext,
         *,
         expected_seq: int | None = None,
+        expected_revision: int | None = None,
     ) -> None:
         """保存完整活动上下文（含 pins 与任务锚）。
+
+        expected_revision 为加载时观察到的修订号：与已存修订号不一致时显式失败。
 
         契约：写入前必须校验既有快照版本/格式，并拒绝超预算或领先 journal 的水位线。
         `snapshot_revision` 目前仅随写入递增用于版本标注，**尚未**作为并发 CAS 依据；

@@ -147,3 +147,39 @@ def test_compaction_of_only_ephemeral_messages_returns_empty() -> None:
     only_ephemeral = [{"role": "system", "content": PIN, EPHEMERAL_KEY: True}]
     assert manager.compact(only_ephemeral) == []
     assert manager.prune_tool_results(only_ephemeral) == ([], 0)
+
+
+def test_anchor_materialized_in_request_but_not_persisted(workspace) -> None:
+    provider = ProbeProvider([ModelReply.final("done")])
+    agent = _agent(provider, workspace, system_prompt="SYS", context_manager=ContextManager())
+    messages: list[dict] = []
+    anchor = "任务锚：目标=修复回归；已改 a.py"
+    agent.run("继续", messages=messages, anchor=anchor)
+
+    assert any(m.get("content") == anchor for m in provider.seen[0])
+    assert anchor not in json.dumps(messages, ensure_ascii=False)
+
+
+def test_anchor_survives_restart_and_appears_in_request(workspace, tmp_path) -> None:
+    from core.active_context import TaskAnchor
+    from persistence.session_store import SessionStore
+
+    data_dir = tmp_path / "sessions"
+    store = SessionStore(data_dir)
+    session = store.create(workspace, "system")
+    messages, seq = store.load_active_snapshot(session.session_id, workspace)
+    context = store.load_active_context(session.session_id, workspace)
+    context = context.with_anchor(
+        TaskAnchor.build(text="任务锚：目标=修复回归", covered_through_seq=seq, sources=("task",))
+    )
+    store.save_active_context(session.session_id, workspace, context)
+
+    # 新进程实例从磁盘恢复
+    reloaded = SessionStore(data_dir).load_active_context(session.session_id, workspace)
+    assert reloaded.anchor is not None
+    assert reloaded.anchor.covered_through_seq == seq
+
+    provider = ProbeProvider([ModelReply.final("done")])
+    agent = _agent(provider, workspace, system_prompt="SYS", context_manager=ContextManager())
+    agent.run("继续", messages=messages, anchor=reloaded.anchor.text)
+    assert any(m.get("content") == reloaded.anchor.text for m in provider.seen[0])

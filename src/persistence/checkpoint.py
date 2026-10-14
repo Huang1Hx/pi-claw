@@ -143,6 +143,16 @@ class CheckpointMixin:
         )
         return recovered, last_seq
 
+    @staticmethod
+    def _check_expected_revision(expected_revision: int | None, current_revision: int) -> None:
+        """修订号 CAS：比较调用方加载时观察到的快照修订号，冲突时拒绝覆盖。"""
+        if expected_revision is None:
+            return
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ValueError("expected_revision 必须是非负整数或 None")
+        if expected_revision != current_revision:
+            raise RuntimeError("会话快照已被另一个进程更新；为避免覆盖，请重新加载 session")
+
     def save_active_messages(
         self,
         session_id: str,
@@ -150,8 +160,12 @@ class CheckpointMixin:
         messages: list[dict[str, Any]],
         *,
         expected_seq: int | None = None,
+        expected_revision: int | None = None,
     ) -> None:
-        """原子保存压缩后的活动窗口；不修改 context.jsonl 原始历史。"""
+        """原子保存压缩后的活动窗口；不修改 context.jsonl 原始历史。
+
+        expected_revision 用于保护水位线不变的原地压缩：与已存修订号不一致时显式失败。
+        """
 
         if not isinstance(messages, list) or not all(isinstance(item, dict) for item in messages):
             raise TypeError("messages 必须是消息对象数组")
@@ -163,7 +177,9 @@ class CheckpointMixin:
         with self._session_write_lock(session_dir):
             current_seq = self._journal_last_seq(session_dir)
             self._check_expected_seq(expected_seq, current_seq)
-            self._save_active_messages_unlocked(session_dir, messages, current_seq)
+            self._save_active_messages_unlocked(
+                session_dir, messages, current_seq, expected_revision=expected_revision
+            )
 
     def save_active_context(
         self,
@@ -172,8 +188,12 @@ class CheckpointMixin:
         context: ActiveContext,
         *,
         expected_seq: int | None = None,
+        expected_revision: int | None = None,
     ) -> None:
-        """原子保存完整活动上下文（含 pins、任务锚与修订号）。"""
+        """原子保存完整活动上下文（含 pins、任务锚与修订号）。
+
+        expected_revision 为调用方加载时观察到的修订号；不一致时显式失败，防止丢失更新。
+        """
 
         if not isinstance(context, ActiveContext):
             raise TypeError("context 必须是 ActiveContext")
@@ -190,6 +210,13 @@ class CheckpointMixin:
                 raise ValueError(f"活动上下文超过消息上限 {self.max_events}")
             if context.through_seq > current_seq:
                 raise ValueError("会话活动上下文领先于 journal，拒绝写入")
+            existing = self._read_preserved_snapshot(session_dir)
+            self._check_expected_revision(expected_revision, existing.snapshot_revision)
+            if (
+                expected_revision is not None
+                and context.snapshot_revision <= existing.snapshot_revision
+            ):
+                raise ValueError("保存完整上下文时必须推进 snapshot_revision")
             self._save_active_context_unlocked(session_dir, context)
 
     def _save_active_messages_unlocked(
@@ -197,6 +224,8 @@ class CheckpointMixin:
         session_dir: Path,
         messages: list[dict[str, Any]],
         through_seq: int,
+        *,
+        expected_revision: int | None = None,
     ) -> None:
         """在调用方已持锁时写入消息窗口；保留既有 pins/anchor，避免旧接口擦除新字段。
 
@@ -205,7 +234,13 @@ class CheckpointMixin:
         """
 
         existing = self._read_preserved_snapshot(session_dir)
+        self._check_expected_revision(expected_revision, existing.snapshot_revision)
         updated = existing.with_messages(list(messages), through_seq)
+        if (
+            expected_revision is not None
+            and updated.snapshot_revision <= existing.snapshot_revision
+        ):
+            raise ValueError("保存活动窗口时必须推进 snapshot_revision（内容需变化）")
         self._save_active_context_unlocked(session_dir, updated)
 
     def _read_preserved_snapshot(self, session_dir: Path) -> ActiveContext:
