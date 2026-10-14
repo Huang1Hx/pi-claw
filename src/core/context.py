@@ -4,9 +4,49 @@ from __future__ import annotations
 
 import copy
 import json
+from collections.abc import Sequence
 from typing import Any
 
 _TRUNCATED = "[TRUNCATED]"
+
+# 临时指令（pins、任务锚、本回合 Skill 指导）的标记键：带此键的消息只在本回合请求中出现，
+# 不写回活动窗口，因此不会被摘要、不会持久化、也不会在下一回合残留。
+EPHEMERAL_KEY = "_ephemeral_guidance"
+
+
+def assemble_request(
+    messages: list[dict[str, Any]],
+    *,
+    ephemeral: Sequence[str] = (),
+) -> list[dict[str, Any]]:
+    """构造发给模型的请求：在首个 system 之后插入临时信令块，不修改入参。
+
+    临时块带 ``EPHEMERAL_KEY`` 标记，只在本回合请求中出现；它们从不写回 messages，
+    因此不会被 compact() 摘要、不会进入持久化历史，也不会在下一回合残留。
+    只把显式传入的字符串当作临时块；既有消息（含工具正文）永不被提升为临时块。
+    """
+
+    if not isinstance(messages, list) or not all(isinstance(item, dict) for item in messages):
+        raise TypeError("messages 必须是消息对象数组")
+    blocks: list[dict[str, Any]] = []
+    for text in ephemeral:
+        if text is None:
+            continue
+        if not isinstance(text, str):
+            raise TypeError("ephemeral 必须是字符串序列")
+        if text.strip():
+            blocks.append({"role": "system", "content": text, EPHEMERAL_KEY: True})
+    base = [item for item in messages if not item.get(EPHEMERAL_KEY)]
+    request: list[dict[str, Any]] = []
+    inserted = False
+    for message in base:
+        request.append(message)
+        if not inserted and message.get("role") == "system":
+            request.extend(blocks)
+            inserted = True
+    if not inserted:
+        request = blocks + request
+    return request
 
 
 class ContextManager:
@@ -33,7 +73,7 @@ class ContextManager:
         self, messages: list[dict[str, Any]]
     ) -> tuple[list[dict[str, Any]], int]:
         """只裁剪较早用户回合的大工具结果，保留调用配对、退出码与失败原因。"""
-        copied = copy.deepcopy(messages)
+        copied = [m for m in copy.deepcopy(messages) if not self.is_ephemeral(m)]
         user_indices = [i for i, m in enumerate(copied) if m.get("role") == "user"]
         if len(user_indices) < 2:
             return copied, 0
@@ -71,6 +111,23 @@ class ContextManager:
         return copied, count
 
     @staticmethod
+    def is_ephemeral(message: dict[str, Any]) -> bool:
+        """判断消息是否为仅本回合有效的临时块（不持久化、不参与摘要）。"""
+        return bool(isinstance(message, dict) and message.get(EPHEMERAL_KEY))
+
+    def build_request(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        ephemeral: Sequence[str] = (),
+    ) -> list[dict[str, Any]]:
+        """按预算构造请求：临时块与活动窗口合计超限时明确失败，不静默截断约束。"""
+        request = assemble_request(messages, ephemeral=ephemeral)
+        if self.estimate_chars(request) > self.max_chars:
+            raise ValueError(f"上下文超过上限：临时指导与活动窗口合计超过 {self.max_chars} 字符")
+        return request
+
+    @staticmethod
     def estimate_chars(messages: list[dict[str, Any]]) -> int:
         """计算当前消息序列的序列化字符数。"""
         return len(json.dumps(messages, ensure_ascii=False, default=str, separators=(",", ":")))
@@ -103,8 +160,8 @@ class ContextManager:
         if not messages:
             return []
 
-        # 深拷贝保证压缩过程不会修改调用方仍在使用的原始消息。
-        copied = copy.deepcopy(messages)
+        # 深拷贝保证压缩过程不会修改调用方仍在使用的原始消息；临时块只在本回合请求中出现，直接丢弃。
+        copied = [m for m in copy.deepcopy(messages) if not self.is_ephemeral(m)]
         first_system = next((item for item in copied if item.get("role") == "system"), None)
         conversational = [item for item in copied if item is not first_system]
 

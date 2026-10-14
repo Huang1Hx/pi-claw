@@ -26,7 +26,7 @@ Skill 继续提供单回合执行指导。可选长期记忆使用独立的数�
 - 2026-10-14 已核实：`993881f` 的 [常规 CI 运行 38428830418](https://github.com/Huang1Hx/pi-claw/actions/runs/38428830418)
   成功，环境为 Ubuntu 24.04 / Python 3.12，Lint、Format、Compile、Test、Build 步骤通过。
   该证据只覆盖这次运行的配置，不证明本地历史 4 项失败已消失或属于既有缺陷，也不替代专门的 Docker 验收。
-- M0（基线与共享契约）已 ACCEPTED；M1 及后续尚未开始；E 阶段为条件扩展。历史实现进度不能代替本轮验收。
+- M0（基线与共享契约）、M1（有界 pinned context）已 ACCEPTED；M2 及后续尚未开始；E 阶段为条件扩展。
 - 先阅读适用的 AGENTS.md、Git 状态、最近提交及现有计划；保留用户已有修改，不覆盖或丢弃。
 - 优先使用 `optimize`。分支不同或有重叠修改时先检查原因，不能强行切换或覆盖。
 
@@ -193,7 +193,7 @@ M0 保持独立，不因提前交付合并或削弱基线、版本及调用点�
 | 阶段 | 当前状态 | 前置条件 | 验收文档（拟） |
 | --- | --- | --- | --- |
 | M0 | ACCEPTED | 现状核实 | `docs/acceptance/session-context/M0_BASELINE_AND_CONTRACT.md`、`docs/acceptance/session-context/M0_CALL_SITES.md` |
-| M1 | NOT_STARTED | M0 ACCEPTED | `M1_PINNED_CONTEXT.md` |
+| M1 | ACCEPTED | M0 ACCEPTED | `docs/acceptance/session-context/M1_PINNED_CONTEXT.md` |
 | M2 | NOT_STARTED | M1 ACCEPTED | `M2_TASK_ANCHOR.md` |
 | M6a | NOT_STARTED | M2 ACCEPTED | `M6A_CONTEXT_COMMANDS.md` |
 | M7a | NOT_STARTED | M6a ACCEPTED | `M7A_CONTEXT_RELEASE.md` |
@@ -252,11 +252,12 @@ M0 保持独立，不因提前交付合并或削弱基线、版本及调用点�
 
 **M0-C：** 调用点清单完整且有测试映射；历史 4 项失败与当前 CI 分开取证，没有“CI 绿所以本地也绿”的推断。
 
-### M1：有界 pinned context 与压缩
+### M1：有界 pinned context 与压缩（ACCEPTED）
 
-- [ ] 先写多次压缩、工具配对、超预算和 Skill 原文/摘要残留测试。
-- [ ] 实现结构化 pins、总预算和请求前物化，保持 system 安全规则及工具协议。
-- [ ] 验证 Skill 深拷贝后单回合生命周期，完成 `M1_PINNED_CONTEXT.md`。
+- [x] 先写多次压缩、工具配对、超预算和 Skill 原文/摘要残留测试。
+- [x] 实现结构化 pins、总预算和请求前物化，保持 system 安全规则及工具协议。
+- [x] 验证 Skill 深拷贝后单回合生命周期，完成 `M1_PINNED_CONTEXT.md`。
+      验收：`docs/acceptance/session-context/M1_PINNED_CONTEXT.md`（ACCEPTED）。
 
 **验收标准 M1-A：** 固定语料连续至少 20 次压缩，已接受 pins 保留率 100%；工具协议无孤立或缺配对；
 超预算明确失败；工具正文不能成为 pin 或授权；下一回合无上回合 Skill 原文及摘要残留。

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from core.completion import CompletionCheck, CompletionVerifier, ToolObservation
-from core.context import ContextManager
+from core.context import ContextManager, assemble_request
 from core.control import ExecutionCancelled, ExecutionControl, ExecutionDeadlineExceeded
 from core.events import AgentEvent
 from core.hooks import HookBus, HookDecision
@@ -85,7 +85,6 @@ class Agent:
         self._running = False
         self._workflow_generation = 0
         self._control: ExecutionControl | None = None
-        self._guidance_message: dict[str, Any] | None = None
 
     def run(
         self,
@@ -94,6 +93,7 @@ class Agent:
         messages: list[dict[str, Any]] | None = None,
         control: ExecutionControl | None = None,
         skill_guidance: str | None = None,
+        pins: list[str] | None = None,
         run_id: str | None = None,
     ) -> RunResult:
         """执行一个用户回合，返回包含终态、用量和路由摘要的 RunResult。
@@ -111,6 +111,10 @@ class Agent:
             not isinstance(skill_guidance, str) or not skill_guidance.strip()
         ):
             raise ValueError("skill_guidance 必须是非空字符串或 None")
+        if pins is not None and (
+            not isinstance(pins, list) or not all(isinstance(p, str) and p.strip() for p in pins)
+        ):
+            raise ValueError("pins 必须是非空字符串数组或 None")
         if run_id is not None and (not isinstance(run_id, str) or not run_id.strip()):
             raise ValueError("run_id 必须是非空字符串或 None")
         self._running = True
@@ -130,7 +134,11 @@ class Agent:
                 begin_run(task)
             self._fire_hook("run_start", {"task": task}, 0, run_id)
             result = self._run(
-                task, messages=messages, run_id=run_id, skill_guidance=skill_guidance
+                task,
+                messages=messages,
+                run_id=run_id,
+                skill_guidance=skill_guidance,
+                pins=pins,
             )
             finish_run = getattr(self.provider, "finish_run", None)
             if callable(finish_run):
@@ -152,15 +160,10 @@ class Agent:
             self._control = None
 
     def _strip_guidance(self, messages: list[dict[str, Any]] | None) -> None:
-        """按对象身份移除本回合注入的 Skill 指导，避免进入活动窗口或后续回合。"""
-        guidance = self._guidance_message
-        self._guidance_message = None
-        if guidance is None or messages is None:
+        """移除残留的临时块。历史本不应包含它们，这里是防御性兜底，按标记而非对象身份。"""
+        if messages is None:
             return
-        for index, message in enumerate(messages):
-            if message is guidance:
-                del messages[index]
-                return
+        messages[:] = [message for message in messages if not ContextManager.is_ephemeral(message)]
 
     def rollback_run(self, result: RunResult) -> RunResult:
         """按运行结果执行显式回滚，并把不含正文的摘要附回 RunResult。
@@ -205,6 +208,7 @@ class Agent:
         messages: list[dict[str, Any]] | None,
         run_id: str,
         skill_guidance: str | None = None,
+        pins: list[str] | None = None,
     ) -> RunResult:
         """在给定会话历史上完成一个用户回合。
 
@@ -217,13 +221,12 @@ class Agent:
         history = messages if messages is not None else []
         if not history and self.system_prompt:
             self._append_message(history, {"role": "system", "content": self.system_prompt})
-        # Skill 指导是本回合的受限指令：插在系统提示之后、用户任务之前，
-        # 不经过 on_message 持久化，并在 run() 结束时按对象身份剥离。
-        self._guidance_message = None
+        # pins 与本回合 Skill 指导都是受限临时指令：只在请求组装时物化为带标记的 system 块，
+        # 绝不写回 history，从而不会被压缩摘要、不会持久化、也不会在下一回合残留。
+        ephemeral_blocks: list[str] = []
         if skill_guidance:
-            guidance_message = {"role": "system", "content": skill_guidance}
-            history.append(guidance_message)
-            self._guidance_message = guidance_message
+            ephemeral_blocks.append(skill_guidance)
+        ephemeral_blocks.extend(pins or [])
         self._append_message(history, {"role": "user", "content": task})
         self.last_messages = history
         self._record("run_started", {"task": task, "max_steps": self.max_steps}, 0, run_id)
@@ -256,7 +259,12 @@ class Agent:
                     )
                     self._fire_hook("after_compact", {"messages": len(history)}, step, run_id)
                 schemas = self.tool_executor.registry.openai_schemas()
-                reply = self._model_reply(history, schemas, step, run_id)
+                request = (
+                    self.context_manager.build_request(history, ephemeral=ephemeral_blocks)
+                    if self.context_manager
+                    else assemble_request(history, ephemeral=ephemeral_blocks)
+                )
+                reply = self._model_reply(request, schemas, step, run_id)
                 if self._control is not None:
                     self._control.checkpoint()
                 if not isinstance(reply, ModelReply):
