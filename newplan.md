@@ -337,6 +337,9 @@ M7a 通过代表第一批可发布，不代表 M6/M7 父阶段或整个融合方
 - [ ] 工厂接入全部实际入口，将 M6a 命令参数化为双后端，`/context` 补充实际后端信息。
 - [ ] 复用 M6a 的基础 Trace，补齐 `session_migrated` 等后端事件，只保留安全元数据。
 - [ ] 回归 M6a 支持矩阵和命令行为，核对 M0 调用点清单，完成 `M6B_BACKEND_COMMANDS.md`。
+- [ ] **真实 REPL 会话落到 SQLite 并用独立连接核对**：以 `PI_CLAW_SESSION_BACKEND=sqlite` 跑一次真实
+  REPL/CLI 会话（含 `/goal`、`/pin`、工具写入），再用**独立 sqlite3 连接直读原始行**验证消息/pins/锚/
+  usage 已落库、凭据已脱敏、`through_seq=MAX(seq)`、`integrity_check=ok`；不得仅用同源 API 读回自证。
 
 **验收标准 M6b-A：** 双后端配置、新建、恢复、迁移全链路通过；Trace 不泄露凭据/私有正文；
 故障不报成功或回退陈旧数据；files 默认及锚关闭路径兼容；M6a 既有验收无回归。
