@@ -20,7 +20,7 @@ from core.context import ContextManager
 from core.events import AgentEvent
 from core.prompts import build_system_prompt
 from core.schemas import RunStatus
-from core.task_anchor import AnchorInputs, build_anchor
+from core.task_anchor import AnchorInputs, build_anchor, resolve_anchor_enabled
 from interfaces.rendering import ReplyDisplay
 from interfaces.terminal_input import TerminalInput
 from persistence.repository import SessionRepository
@@ -71,6 +71,7 @@ class CodingRepl:
         max_attempts: int = 3,
         command_runner: CommandRunner | None = None,
         skills_registry: SkillRegistry | None = None,
+        task_anchor_enabled: bool | None = None,
     ) -> None:
         """恢复或创建会话、加载带序号的活动快照并装配运行时；模型在用户回合才调用。"""
         self.workspace = Path(workspace).expanduser().resolve(strict=True)
@@ -93,6 +94,8 @@ class CodingRepl:
             settings.sandbox if settings is not None else Settings().sandbox
         )
         self.max_attempts = max_attempts
+        # M7b 前置：隔离的锚开关，仅影响是否注入任务锚；默认沿用环境变量或 on。
+        self.task_anchor_enabled = resolve_anchor_enabled(task_anchor_enabled)
         self.commands = create_commands()
         self.skills = (
             skills_registry if skills_registry is not None else SkillRegistry.from_builtin()
@@ -325,13 +328,18 @@ class CodingRepl:
         prepared = self._prepare_skill(text, run_id)
         guidance = prepared.guidance if prepared is not None else None
         # pins 与任务锚都是受限临时指令：只在请求组装时物化，不写回活动窗口。
-        try:
-            anchor = self.refresh_anchor()
-        except (ValueError, OSError) as exc:
-            # 锚刷新失败不中断本回合；约束仍单独注入，失败已由 refresh_anchor/commit 记录。
-            print(f"任务锚未更新：{exc}", file=self.output)
-            anchor = self._context.anchor
-        anchor_text = anchor.text if anchor is not None else None
+        if self.task_anchor_enabled:
+            try:
+                anchor = self.refresh_anchor()
+            except (ValueError, OSError) as exc:
+                # 锚刷新失败不中断本回合；约束仍单独注入，失败已由 refresh_anchor/commit 记录。
+                print(f"任务锚未更新：{exc}", file=self.output)
+                anchor = self._context.anchor
+            anchor_text = anchor.text if anchor is not None else None
+        else:
+            # 关闭锚只跳过本回合的锚临时块；pins、审批与 Policy 均不改变，并显式记录。
+            anchor_text = None
+            self.trace.record("anchor_disabled", {"run_id": run_id})
         pins = [pin.text for pin in self._context.pins]
         workflow = getattr(self.provider, "workflow", None) is not None
         if workflow and (pins or anchor_text):

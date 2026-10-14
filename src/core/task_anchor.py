@@ -7,9 +7,17 @@
 
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from core.active_context import ANCHOR_MAX_CHARS, TaskAnchor
+
+# M7b 前置：单一、隔离的锚开关。它只控制“是否把任务锚注入本回合请求”，
+# 不改变 pins 注入、审批/Policy/Sandbox 或任何默认行为；默认 on。
+ANCHOR_ENV = "PI_CLAW_TASK_ANCHOR"
+_TRUTHY = frozenset({"1", "on", "true", "yes"})
+_FALSY = frozenset({"0", "off", "false", "no"})
 
 # 锚内各段的字符预算；命令层（如 /pin、/goal）据此在写入前拒绝放不下的输入，
 # 避免把“放不下”推迟到请求组装时才报错。
@@ -17,6 +25,26 @@ ANCHOR_TASK_BUDGET = 800
 ANCHOR_PINS_BUDGET = 1_200
 ANCHOR_REASON_BUDGET = 300
 _MAX_LISTED_FILES = 20
+
+
+def resolve_anchor_enabled(
+    value: bool | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> bool:
+    """解析锚开关：显式参数优先于环境变量；非法取值显式报错，不静默取默认。"""
+    if value is not None:
+        return bool(value)
+    source: Mapping[str, str] = os.environ if env is None else env
+    raw = source.get(ANCHOR_ENV)
+    if raw is None or not str(raw).strip():
+        return True
+    token = str(raw).strip().lower()
+    if token in _TRUTHY:
+        return True
+    if token in _FALSY:
+        return False
+    raise ValueError(f"未知锚开关取值：{raw}；可选 on/off")
 
 
 def _one_line(text: str, limit: int) -> str:

@@ -27,7 +27,7 @@ Skill 继续提供单回合执行指导。可选长期记忆使用独立的数�
   成功，环境为 Ubuntu 24.04 / Python 3.12，Lint、Format、Compile、Test、Build 步骤通过。
   该证据只覆盖这次运行的配置，不证明本地历史 4 项失败已消失或属于既有缺陷，也不替代专门的 Docker 验收。
 - M0、M1、M2、M6a、M7a 已 ACCEPTED，第一批可发布（合并 `main` 待用户最终审核）；
-  M3、M4、M5、M6b 已 ACCEPTED，下一步 M7b（锚 off/on 对照与双后端综合评测）；E 阶段为条件扩展。
+  M3、M4、M5、M6b、M7b-前置 已 ACCEPTED，下一步 M7b（真实模型锚 off/on 与双后端综合评测）；E 阶段为条件扩展。
 - 先阅读适用的 AGENTS.md、Git 状态、最近提交及现有计划；保留用户已有修改，不覆盖或丢弃。
 - 优先使用 `optimize`。分支不同或有重叠修改时先检查原因，不能强行切换或覆盖。
 
@@ -202,7 +202,7 @@ M0 保持独立，不因提前交付合并或削弱基线、版本及调用点�
 | M4 | ACCEPTED | M3 ACCEPTED | `docs/acceptance/session-context/M4_CONCURRENCY_AND_RECOVERY.md` |
 | M5 | ACCEPTED | M4 ACCEPTED | `docs/acceptance/session-context/M5_MIGRATION.md` |
 | M6b | ACCEPTED | M5 ACCEPTED | `docs/acceptance/session-context/M6B_BACKEND_COMMANDS.md` |
-| M7b-前置 | NOT_STARTED | M3 起可并行准备；执行须 M6b ACCEPTED | 归入 `M7B_EVALUATION_AND_RELEASE.md` §前置 |
+| M7b-前置 | ACCEPTED | M6b ACCEPTED | `docs/acceptance/session-context/M7B_EVALUATION_AND_RELEASE.md` §前置 |
 | M7b | NOT_STARTED | M6b ACCEPTED | `M7B_EVALUATION_AND_RELEASE.md` |
 | E1 | DEFERRED | M0–M7 ACCEPTED 且有跨会话重复调查证据 | `E1_EXPLICIT_MEMORY.md` |
 | E2 | DEFERRED | E1 ACCEPTED | `E2_SKILL_MEMORY_RETRIEVAL.md` |
@@ -348,9 +348,9 @@ M7a 通过代表第一批可发布，不代表 M6/M7 父阶段或整个融合方
 
 #### M7b 前置：锚 off/on 开关与对照协议冻结（属第二批，不在第一批合并范围）
 
-- [ ] 增加**单一隔离**的锚开关（env 或评测参数）：`off` 只跳过任务锚临时块，**不**改变 pins 注入、
+- [x] 增加**单一隔离**的锚开关（env 或评测参数）：`off` 只跳过任务锚临时块，**不**改变 pins 注入、
   不改变审批/Policy/Sandbox、不改变默认行为；`off` 时记录明确事件，不得静默忽略。
-- [ ] 冻结对照协议：任务集、提示词、模型/Skill 设置、时间/Token/步数预算、评分器、样本量、
+- [x] 冻结对照协议：任务集、提示词、模型/Skill 设置、时间/Token/步数预算、评分器、样本量、
   随机性控制与成功判据，全部在运行前固定并入库（脱敏、无凭据），复用现有评测入口，不污染已冻结评测。
 - [ ] 顺序：M3–M5 期间可并行完成离线准备；实际锚 off/on 与 files/sqlite 对照在 **M6b 代码冻结后**于 M7b 执行，
   避免后端/命令改动使对照证据失效。开关只允许改变“是否注入锚”这一个变量。
