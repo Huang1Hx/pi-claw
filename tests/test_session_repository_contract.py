@@ -13,10 +13,11 @@ import pytest
 from core.active_context import ActiveContext, Pin, TaskAnchor
 from persistence.repository import SessionRepository
 from persistence.session_store import SessionStore
+from persistence.sqlite_repository import SqliteSessionRepository
 
 RepositoryFactory = Callable[[], SessionRepository]
 
-BACKENDS = ("files",)
+BACKENDS = ("files", "sqlite")
 
 
 @pytest.fixture(params=BACKENDS)
@@ -25,6 +26,8 @@ def repo_factory(request: pytest.FixtureRequest, tmp_path: Path) -> RepositoryFa
     name = request.param
     if name == "files":
         return lambda: SessionStore(tmp_path / "sessions")
+    if name == "sqlite":
+        return lambda: SqliteSessionRepository(tmp_path / "sessions.sqlite3")
     raise AssertionError(f"未知后端：{name}")
 
 
@@ -124,10 +127,6 @@ def test_usage_is_idempotent_per_run(repo_factory: RepositoryFactory, workspace:
 
 
 def test_update_state_and_runtime(repo_factory: RepositoryFactory, workspace: Path) -> None:
-    from persistence.session_store import SessionStore as _SessionStore
-
-    if not isinstance(repo_factory(), _SessionStore):
-        pytest.skip("runtime 元数据校验目前只在文件后端契约中约定")
     repo = repo_factory()
     session = repo.create(workspace, "system")
     titled = repo.update_state(session.session_id, workspace, title="focused", approved_tools=["a"])
