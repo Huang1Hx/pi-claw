@@ -60,6 +60,7 @@ def _add_pin(repl, text: str) -> bool:
         event="context_pinned",
         payload={"action": "add", "pin_id": new_pin.pin_id, "count": len(updated.pins)},
     )
+    repl.sync_anchor()
     print(f"已添加约束 {new_pin.pin_id}：{new_pin.text}", file=repl.output)
     return True
 
@@ -78,6 +79,7 @@ def _remove_pin(repl, pin_id: str) -> bool:
         event="context_pinned",
         payload={"action": "remove", "pin_id": pin_id, "count": len(remaining)},
     )
+    repl.sync_anchor()
     print(f"已删除约束 {pin_id}。", file=repl.output)
     return True
 
@@ -117,11 +119,13 @@ def goal(repl, argument: str) -> bool:
     if arg == "reset":
         updated = context.with_goal("").with_anchor(None)
         repl.commit_context(updated, event="anchor_updated", payload={"action": "reset"})
+        repl.sync_anchor()
         print("已重置当前目标与任务锚。", file=repl.output)
         return True
     if len(arg) > GOAL_MAX_CHARS:
         raise ValueError(f"目标超长（{len(arg)} > {GOAL_MAX_CHARS} 字符）")
     updated = context.with_goal(arg)
     repl.commit_context(updated, event="anchor_updated", payload={"action": "set"})
+    repl.sync_anchor()
     print(f"已设置当前目标：{arg}", file=repl.output)
     return True

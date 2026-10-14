@@ -40,6 +40,10 @@ from tools import ToolExecutor
 
 InputFunction = Callable[[str], str]
 
+# 宿主写工具：只有这些工具的成功提交才计入“已改文件”，只读工具（read_file/search_text）
+# 即使在结果里带 path 也不得被当作改动。
+_WRITE_TOOLS = frozenset({"write_or_replace", "apply_patch"})
+
 
 class CodingRepl:
     """管理 REPL、持久 Session、审批状态与多轮 Agent 历史。"""
@@ -454,7 +458,7 @@ class CodingRepl:
     def _build_anchor(self) -> TaskAnchor | None:
         """由已在手数据（目标、约束、写入记录）构建有界锚；零模型调用。"""
         journal = getattr(self.executor, "journal", None)
-        files = tuple(record.relative_name for record in journal.records) if journal else ()
+        files = self._collect_changed_files()
         incomplete = bool(getattr(journal, "incomplete", False))
         return build_anchor(
             AnchorInputs(
@@ -465,6 +469,37 @@ class CodingRepl:
                 covered_through_seq=self._session_seq,
             )
         )
+
+    def _collect_changed_files(self) -> tuple[str, ...]:
+        """合并进程内写入日志与持久化消息中的成功写入，保证重启后锚不丢已改文件证据。
+
+        WriteJournal 只存在于当前进程；重启后从活动消息里成功的写工具结果重建路径列表，
+        这些结果本身已在活动快照中，属“已在手数据”，无需新存储。只读工具的结果即使带 path
+        也不计入，避免把“读过”误报为“改过”。
+        """
+        names: list[str] = []
+        journal = getattr(self.executor, "journal", None)
+        if journal is not None:
+            for record in journal.records:
+                if record.path not in names:
+                    names.append(record.path)
+        for message in self.messages:
+            if message.get("role") != "tool":
+                continue
+            try:
+                result = json.loads(str(message.get("content", "{}")))
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(result, dict) or result.get("ok") is not True:
+                continue
+            tool_name = result.get("tool_name") or message.get("name")
+            if tool_name not in _WRITE_TOOLS:
+                continue
+            output = result.get("output")
+            path = output.get("path") if isinstance(output, dict) else None
+            if isinstance(path, str) and path and path not in names:
+                names.append(path)
+        return tuple(names)
 
     def refresh_anchor(self) -> TaskAnchor | None:
         """重建锚；内容变化时以 CAS 持久化，返回当前应注入模型的锚。"""
@@ -494,6 +529,13 @@ class CodingRepl:
             },
         )
         return self._context.anchor
+
+    def sync_anchor(self) -> None:
+        """命令修改 goal/pins 后重建并持久化锚；失败只告警，不否定已成功的约束写入。"""
+        try:
+            self.refresh_anchor()
+        except (ValueError, OSError) as exc:
+            print(f"任务锚未同步：{exc}", file=self.output)
 
     def _prepare_skill(self, text: str, run_id: str):
         """按当前模式选择并准备 Skill；关闭或未匹配时返回 None。"""

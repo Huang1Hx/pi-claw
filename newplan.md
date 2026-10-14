@@ -26,7 +26,8 @@ Skill 继续提供单回合执行指导。可选长期记忆使用独立的数�
 - 2026-10-14 已核实：`993881f` 的 [常规 CI 运行 38428830418](https://github.com/Huang1Hx/pi-claw/actions/runs/38428830418)
   成功，环境为 Ubuntu 24.04 / Python 3.12，Lint、Format、Compile、Test、Build 步骤通过。
   该证据只覆盖这次运行的配置，不证明本地历史 4 项失败已消失或属于既有缺陷，也不替代专门的 Docker 验收。
-- M0、M1、M2、M6a 已 ACCEPTED；下一步 M7a（第一批专项验收与可展示交付）；E 阶段为条件扩展。
+- M0、M1、M2、M6a、M7a 已 ACCEPTED，第一批可发布（合并 `main` 待用户最终审核）；
+  下一步进入第二批 M3（SQLite SessionRepository）；E 阶段为条件扩展。
 - 先阅读适用的 AGENTS.md、Git 状态、最近提交及现有计划；保留用户已有修改，不覆盖或丢弃。
 - 优先使用 `optimize`。分支不同或有重叠修改时先检查原因，不能强行切换或覆盖。
 
@@ -196,7 +197,7 @@ M0 保持独立，不因提前交付合并或削弱基线、版本及调用点�
 | M1 | ACCEPTED | M0 ACCEPTED | `docs/acceptance/session-context/M1_PINNED_CONTEXT.md` |
 | M2 | ACCEPTED | M1 ACCEPTED | `docs/acceptance/session-context/M2_TASK_ANCHOR.md` |
 | M6a | ACCEPTED | M2 ACCEPTED | `docs/acceptance/session-context/M6A_CONTEXT_COMMANDS.md` |
-| M7a | NOT_STARTED | M6a ACCEPTED | `M7A_CONTEXT_RELEASE.md` |
+| M7a | ACCEPTED | M6a ACCEPTED | `docs/acceptance/session-context/M7A_CONTEXT_RELEASE.md` |
 | M3 | NOT_STARTED | M7a ACCEPTED | `M3_SQLITE_REPOSITORY.md` |
 | M4 | NOT_STARTED | M3 ACCEPTED | `M4_CONCURRENCY_AND_RECOVERY.md` |
 | M5 | NOT_STARTED | M4 ACCEPTED | `M5_MIGRATION.md` |
@@ -286,13 +287,13 @@ M0 保持独立，不因提前交付合并或削弱基线、版本及调用点�
 **验收标准 M6a-A：** 用户可实际设置、查看、撤销和恢复约束；关闭锚后兼容；正常退出或重启后展示与模型
 实际输入一致；旧任务/Skill 无残留；不支持组合不静默忽略 pin；存储失败不显示保存成功。
 
-### M7a：第一批专项验收与可展示交付（在 M3 前执行）
+### M7a：第一批专项验收与可展示交付（ACCEPTED）
 
-- [ ] 冻结文件后端的上下文离线语料、验收项和预期；覆盖长会话多次压缩、撤销/改目标、旧验证失效、
+- [x] 冻结文件后端的上下文离线语料、验收项和预期；覆盖长会话多次压缩、撤销/改目标、旧验证失效、
   提示注入、重启、旧版兼容和基本快照竞争。
-- [ ] 完成 M0–M2 与 M6a 的端到端演示、完整离线回归、构建、文档和差异审核。
-- [ ] 用 `M7A_CONTEXT_RELEASE.md` 记录第一批范围、机制指标、命令演示、升级/回退方法及尚未实施的第二批。
-- [ ] 如本批运行真实模型 anchor off/on，对照前固定预算/评分并完成离线前置；否则明确记为未执行，
+- [x] 完成 M0–M2 与 M6a 的端到端演示、完整离线回归、构建、文档和差异审核。
+- [x] 用 `M7A_CONTEXT_RELEASE.md` 记录第一批范围、机制指标、命令演示、升级/回退方法及尚未实施的第二批。
+- [x] 如本批运行真实模型 anchor off/on，对照前固定预算/评分并完成离线前置；否则明确记为未执行，
   该行为收益验证保留为 M7b 必选项，不影响已经预先限定为离线机制验收的第一批结论。
 
 **验收标准 M7a-A：** 所有第一批必选项、全量 pytest、Ruff、格式、构建和秘密检查通过；可演示设置约束→
