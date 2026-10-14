@@ -138,4 +138,7 @@
 
 ## CI 记录
 
-- 待本批提交推送后补充具体 run 链接与结论。
+- Run：`ci` **38566617780**，提交 SHA `d03d4ec316bc9d693e4bdc920df52f8b758aa7d5`（`optimize`），
+  触发/结论：push / **success**（Ubuntu，Python 3.12；Lint、Format、Compile、Test、Build 步骤通过）。
+- URL：https://github.com/Huang1Hx/pi-claw/actions/runs/38566617780
+- 说明：CI（Linux）通过不改变本地 4 项 macOS 环境相关失败的既有判定；两者证据分开记录，不互相推断。
