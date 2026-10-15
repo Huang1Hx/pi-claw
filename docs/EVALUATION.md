@@ -7,6 +7,9 @@
 `subagent_timeouts`、`failed_subagents` 和 `partial_handoff`（部分交接）。任务、模型分配、
 公式、复现命令及原始产物结构见 [三种 Agent 架构对照评测](AGENT_MODE_COMPARISON.md)。
 
+三套任务集（自建确定性回归 90-trial、SWE-bench Verified 子集、锚 off/on 精简对照）的**名称、
+代表性与选取理由**集中见 [评测任务集说明](EVALUATION_TASKSETS.md)。
+
 三种架构的当前入口为：
 
 ```bash
