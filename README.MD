@@ -1,10 +1,13 @@
 # Pi-Claw
 
-使用 Python 3.12 和 uv 的本地 Coding Agent。提供可恢复会话、流式回复、受控工具执行、
-宿主完成验收和离线回归评测。
+使用 Python 3.12 和 uv 的本地 Coding Agent。提供流式回复、受控工具执行、宿主完成验收、
+任务锚与 pinned context、files / SQLite 可插拔会话存储，以及分层回归评测。
 
-> **一句话定位**：一个**可审计、可回放、权限受控**的本地 Coding Agent —— 多模型路由、
-> 自动规划/编码/审查、Docker 命令隔离，以及**用公开数据集做外生对照的离线回归评测**。
+> **一句话定位**：把模型的工具调用放进可审计、可恢复、可验收的执行框架（Agent harness），
+> 分别处理“模型看见什么”“状态如何保存”“操作是否允许”和“任务是否完成”。
+>
+> 文档核对：2026-10-16，代码基线 `bd75def`。M7b 仅完成精简短任务对照，
+> 不代表长会话防漂移收益或跨机器分布式能力已经得到验证。
 
 ## 快速开始
 
@@ -59,24 +62,33 @@ uv run --frozen pi-claw demo --yes
 
 ```mermaid
 flowchart TD
-  CLI["interfaces · CLI / REPL"] --> CMD["commands · /status /model /usage ..."]
-  CLI --> CORE["core · Agent / Team / 完成验收"]
-  CORE --> ROUT["routing · 复杂度分类 / 模型路由 / 规划-编码-审查"]
-  CORE --> TOOLS["tools · ToolExecutor / 内置工具"]
-  CORE --> PERS["persistence · session / journal / checkpoint / trace"]
-  TOOLS --> SEC["security · Policy / Approval / Workspace"]
-  TOOLS --> SBX["sandbox · host / docker"]
-  ROUT --> PROV["providers · scripted / OpenAI 兼容 SSE"]
-  CORE --> PROV
-  EVAL["evaluation · 离线验收 / 三架构对照 / 攻击回归"] --> CORE
-  EVAL --> SEC
+  CLI["CLI / REPL"] --> CMD["宿主命令 /goal /pin /context /usage"]
+  CLI --> LOOP["Agent Loop / 顺序 Workflow / 只读 Team"]
+  CLI <--> REPO["SessionRepository：事件 / v3 ActiveContext / Usage"]
+  CMD <--> REPO
+  REPO --> FILES["默认 files：journal + checkpoint + flock"]
+  REPO --> SQL["可选 SQLite：WAL + 事务 + 双版本 CAS"]
+  CLI --> ANCHOR["TaskAnchor：显式目标 + pins + 成功写入证据"]
+  SKILL["声明式 Skill：默认 off / 不扩权"] --> CTX
+  ANCHOR --> CTX["ContextManager：裁剪 / 压缩 / 请求前临时注入"]
+  LOOP --> CTX
+  CTX --> ROUT["模型路由 / 角色预算"]
+  ROUT --> MODEL["Provider：scripted / OpenAI-compatible SSE"]
+  MODEL --> TOOL["Tool Call → Hook / Policy / Approval / ToolExecutor"]
+  TOOL --> EXEC["安全文件读写 / Host 或 Docker 命令运行器"]
+  EXEC --> RESULT["ToolResult → 上下文 / Session / Trace"]
+  RESULT --> LOOP
+  LOOP --> VERIFY["CompletionVerifier：写后验证证据"]
+  VERIFY --> OUT["RunResult / Usage / 脱敏 Trace"]
+  EVAL["Eval harness：评分 → bad case 归因 → 有界修复 → 复测"] -.-> LOOP
 ```
 
 一条任务的端到端数据流：
 
 ```text
 用户任务
-  → SessionStore 追加消息，裁剪旧回合的大工具结果 / 必要时压缩活动窗口
+  → SessionRepository 保存事件与活动窗口，裁剪旧工具结果 / 必要时压缩
+  → 支持的单 Agent 路径按请求临时组装 pins、任务锚和本回合 Skill 指导
   → Provider 流式返回 text_delta / tool_call_delta
   → before_tool Hook → Policy → Approval（需要批准则暂停，不静默放行）
   → ToolExecutor 执行（可选 Docker 断网隔离）→ ToolResult 写回上下文与原始日志
@@ -84,7 +96,22 @@ flowchart TD
   → RunResult 携带 usage → 幂等写入用量账本 + 可回放 Trace
 ```
 
-设计要点：
+图中是模块关系，不代表所有能力组合都已接通：pins/锚与 Skill 的已验证路径以单 Agent 为主，
+Workflow / Team 的限制见下方“能力边界”。Trace 回放只复盘事件，不重新执行工具副作用。
+
+### 关键取舍
+
+| 选择 | 解决的问题 | 代价与边界 |
+| --- | --- | --- |
+| 手写 Agent harness，工具统一过宿主边界 | 可控制工具协议、预算、停止、恢复和验收 | 不提供通用图编排平台；模型自述不是成功证据 |
+| 结构化 pins/锚，请求前临时物化 | 避免压缩吞掉约束、指导污染后续摘要 | 增加输入 Token；超预算明确失败，不保证模型遵守 |
+| 确定性压缩与锚构建 | 零额外摘要模型请求，便于离线复现 | 历史细节有损；不是语义检索或跨会话记忆 |
+| files 默认，SQLite 可选 | 保留本地 CLI 的低依赖，同时提供事务与迁移 | files 多文件不是整体事务；SQLite 同库写入串行，不是分布式存储 |
+| 日志序号与快照修订号分开 | 追加消息与“不追加消息的 pin/压缩更新”分别检测冲突 | 调用方必须传入观察到的版本；CAS 不替代权限校验 |
+| 子 Agent 只读，主 Agent 唯一写者 | 减少并发写冲突，支持并行定位与独立复核 | 增加 Token、延迟与交接成本，并非所有任务都更合算 |
+| Host 默认、Docker 显式启用且失败不降级 | 兼容本地工具，同时提供更强的命令隔离 | Host 不是 OS 沙箱；Docker 仍共享内核 |
+
+工程约束：
 
 - **依赖方向单向**：`interfaces → core → tools/security/persistence`；Runtime 不导入
   `evaluation`，评测按需加载，评测逻辑不进入产品路径。
@@ -96,24 +123,63 @@ flowchart TD
 - **三套评测彼此独立**：内部冻结回归、内部分布外 holdout、外部 SWE-bench Verified 互不复用，
   避免“用自己出的题自证”。
 
-## 评测结果摘要
+## 指标与证据边界
 
-| 评测 | 规模 | 结果 |
-|---|---|---|
-| 内部冻结回归（阶段 3，同协议） | 10 任务 × 3 架构 × 3 次 = 90 trial | **严格 90/90**（single / workflow / team 各 30/30） |
-| 内部分布外 holdout（未见任务） | 3 任务 × 3 架构 × 3 次 = 27 trial | **27/27**（pass@3 = 1.0） |
-| 外部 **SWE-bench Verified**（公开集） | 37 个环境健康实例 | 首轮 **54.1%** → 坏例自修复后 **37/37**（Wilson 95% [90.6, 100]） |
-| Docker 沙箱攻击回归 | 11 类攻击 × 30 次连续运行 | 全部拦截，Host / Docker 结果一致 |
-| 离线单元测试 | 822 项 | `pytest`（另有独立的 `docker_integration` 标记用例） |
+以下真实模型/攻击数字引用历史验收记录，不是本次文档更新重新实跑的成绩；不同任务集、预算和
+修复口径不能混成一个总分。任务名称、筛选条件见 [任务集说明](docs/EVALUATION_TASKSETS.md)。
 
-产品侧闭环示例：外部评测里首轮坏例以 `loop_detected` 为主（13/17，模型反复发起**参数与结果都
-相同**的只读调用、最终空补丁）。把该结论回灌到 `src/core/agent.py`（单 Agent 模式加**软循环恢复**
-与**写优先提示**）后复测，循环事件 13 → 0、首轮 20/37 → 29/37，困难实例再由 checkpoint 修复兜底。
-详见 [Iteration 040](docs/iterations/ITERATION_040_SWEBENCH_VERIFIED_EXTERNAL_EVAL.md)。
+| 评测 | 结果 | 必须保留的口径 / 证据 |
+| --- | --- | --- |
+| 内部冻结基线 | **78/90**，单 trial 420s | 10 任务 × 3 架构 × 3 次；冻结基线不被后续成绩覆盖 |
+| 后续诊断、续跑和修复派生结果 | **90/90**，各模式 30/30 | 使用放宽至 1800s 的诊断预算并叠加修复/端点复测，不是原 420s 首次通过率；[Iteration 038](docs/iterations/ITERATION_038_STAGE3_FULL_REGRESSION.md) |
+| 独立 holdout | **27/27**，pass@3、pass³ 均 1.0 | 3 新任务 × 3 架构 × 3 次，420s；[Iteration 039](docs/iterations/ITERATION_039_STAGE3_HOLDOUT.md) |
+| SWE-bench Verified 健康子集 | 首轮 **20/37**；≤2 次修复后 relative **37/37** | 本地判定的 official_resolved 为 **24/37**，不是官方榜单成绩；[Iteration 040](docs/iterations/ITERATION_040_SWEBENCH_VERIFIED_EXTERNAL_EVAL.md) |
+| 沙箱专项 | **11/11** 攻击阻断；连续运行完成/清理 **30/30** | Host/Docker 确定性 parity；只覆盖列举攻击，不是安全证明；[Iteration 026](docs/iterations/ITERATION_026_SANDBOX_ATTACK_EVAL.md) |
+| pinned context 离线机制 | 连续 **20 次压缩**保留约束；锚构建额外模型请求 **0** | 固定语料机制验证，不等于模型漂移率为 0；[M1](docs/acceptance/session-context/M1_PINNED_CONTEXT.md)、[M7a](docs/acceptance/session-context/M7A_CONTEXT_RELEASE.md) |
+| 任务锚真实模型精简对照 | **16/16**，四组各 4/4、约束零违反 | 2 短任务 × on/off × files/sqlite × 2 次；两臂都成功，**不能证明降低漂移**；[M7b](docs/acceptance/session-context/M7B_EVALUATION_AND_RELEASE.md) |
 
-口径说明：外部数字来自本机 aarch64 固定镜像，用**同环境 gold 基线**抵消环境噪声，绝对值不与
-官方榜单直接比较；选样限定纯 Python、gold 补丁小、FAIL_TO_PASS ≤ 8，故 100% 不外推到整个
-Verified。“首轮 + 自动修复”是评测回路的一部分，已与“首轮”分开报告。
+成本同样需要报告：holdout 中 single / workflow / team 的每成功任务 Token 分别为
+**12,203.67 / 54,918.00 / 42,875.78**；三者均 9/9，但多角色不是免费收益。
+锚精简对照中，on 相对 off 平均输入/输出合计 Token 增加约 **1.5%（files）/ 2.9%（sqlite）**；
+样本小、未覆盖长会话，不能把耗时差异归因于锚或 SQLite 的性能提升。
+
+bad case 闭环示例：外部首轮 17 个失败中 13 个为重复只读调用。依据 Trace 增加软循环恢复与
+写优先提示后，在这 17 例重测中 9 例通过、循环事件 13→0。**29/37 是沿用原 20 个成功结果，
+再合入这 9 个成功的重构数字**，不是新版本全量独立重跑的 37 例首轮成绩。筛选限定轻量 Python
+实例，本地 aarch64 环境使用同环境 gold 基线；relative 37/37 不外推完整 Verified。
+
+2026-10-16 对 `bd75def` 的当前本地验证：解除执行环境限制后，
+`python -m pytest -o addopts='' -q` 为 **1028 passed**；Ruff、187 个文件格式检查和离线构建通过。
+受限环境同次复核为 `1021 passed, 4 failed, 3 skipped`，因此测试结果须同时说明环境。
+本次未重新调用模型评测；不能用上述工程测试数量代替真实任务成功率。
+
+## 会话上下文：结构化状态与可插拔存储
+
+`ActiveContext v3` 统一保存普通消息、`goal`、`pins`、`anchor`、`through_seq` 和
+`snapshot_revision`。`/goal` 显式设定当前目标，`/pin` 固定用户约束；任务锚从目标、约束和成功
+写入证据确定性构建，最多 2,000 字符，不额外调用模型。pins/锚/Skill 指导在请求前临时物化，
+不把合成消息写回普通历史，防止深拷贝或压缩后残留。它们依旧受宿主权限与总上下文预算限制。
+
+`SessionRepository` 隔离存储介质：默认 files 用 journal、原子 checkpoint 和 `flock`；SQLite 用
+WAL、`synchronous=FULL`、`BEGIN IMMEDIATE` 事务保存事件与快照。`expected_seq` 检测日志竞争，
+`expected_revision` 检测同一日志水位下的快照竞争；Usage 按 `run_id` 幂等记账。已有多进程竞争、
+事务中 kill、独立连接直读和双向迁移测试，见 [M4](docs/acceptance/session-context/M4_CONCURRENCY_AND_RECOVERY.md)、
+[M5](docs/acceptance/session-context/M5_MIGRATION.md)、[M6b](docs/acceptance/session-context/M6B_BACKEND_COMMANDS.md)。
+
+### 能力边界
+
+- 任务锚、pins 与 Skill 主要在单 Agent 路径验证；已识别的 Workflow 会警告不注入 pins/锚，
+  Team 未提供共享锚接线，不宣称三模式全覆盖。
+- 当前目标由 `/goal` 显式设置，不会自动识别所有自然语言目标变更。锚构建器支持验证指纹失效判断，
+  但 REPL 当前尚未把最近验证结果/工作区指纹传入，不能宣称这部分已经端到端闭环。
+- 默认锚开关开启；`PI_CLAW_TASK_ANCHOR=off` 只关闭回合内锚注入，不删除已保存状态，不关闭 pins
+  或安全检查。Skill 默认关闭；无自动技能生成、任意脚本插件或跨会话语义记忆。
+- Skill 激活只检查声明所需工具属于现有 Policy 允许集合，再注入指导；不会裁减 Agent 的工具集合。
+  “只读定位”是该 Skill 的流程指导，不等同于宿主强制禁写，硬权限仍由 Policy/Approval 控制。
+- SQLite 是单机嵌入式数据库，不是多机分布式存储；进程 kill 测试不等于断电耐久性证明。
+  files↔sqlite 为一次性迁移，非双向同步；迁移前停写，切换后不自动合并两边的新数据。
+- Host 后端不是 OS 沙箱；Docker 只隔离命令运行，不能替代文件工具权限检查或保证容器绝不逃逸。
+- 完成验收只证明配置要求的证据成立，不保证业务语义完全正确；Trace 回放不是副作用重放。
 
 ## 连接模型
 
@@ -209,11 +275,11 @@ uv run --frozen pi-claw chat --config pi-claw.toml --route auto --max-steps 24
 | 工具执行 | 文件读取、搜索、精确修改和白名单 argv 命令，统一经过 Policy/Approval |
 | 流式事件 | 文本/工具参数 delta、请求重试、工具结果、上下文变化和运行终态 |
 | Token 统计 | 累计服务端 usage；通过 `/usage` 查询当前会话与工作区历史累计，缺口显式提示 |
-| 上下文管理 | 确定性压缩、旧回合工具正文裁剪，保留原始日志和调用配对 |
+| 上下文管理 | 确定性压缩、工具正文裁剪、结构化 pins/任务锚与请求前临时注入 |
 | 请求重试 | 暂时性 HTTP/网络错误有限退避；部分流已输出后不重放 |
 | 重复检测 | 近期相同参数与结果重复出现时停止无进展循环 |
 | Hooks | 显式注入生命周期回调；前置工具 Hook 可拒绝，不能绕过审批 |
-| 会话恢复 | 分段 journal、checkpoint、文件锁和 expected_seq 并发冲突检查 |
+| 会话恢复 | files / SQLite 统一仓储、v3 快照、双版本冲突检查、双向一次性迁移 |
 | 完成验收 | 修改后缺少认可验证证据时拒绝完成声明，返回 unverified 或继续验证 |
 | 离线评测 | 真实工具链、独立工作区并发、机器可读报告和脱敏 Trace |
 | 模型路由 | 轻量模型分类、按复杂度分流、失败升级、固定 profile、分模型 Token 与请求上限 |
@@ -246,7 +312,7 @@ uv run --frozen pi-claw replay <TRACE_PATH>
 ```
 
 REPL：`/help`、`/status [--verbose]`、`/model [模型ID|auto|别名]`、`/new`、`/sessions`、`/resume <id>`、`/compact`、`/context`、
-`/usage`、`/history`、`/title <标题>`、`/exit`。
+`/pin [约束|-d <id>]`、`/goal [目标|reset]`、`/usage`、`/history`、`/title <标题>`、`/exit`。
 `/skills` 列出内置 Skill；`/skill auto|<id>|off` 启用自动选择、显式选择或关闭。
 
 在 `pi-claw>` 提示符下输入 `/` 即显示命令菜单，继续输入可筛选；Tab / ↑↓ 选择，回车执行。
@@ -271,6 +337,26 @@ REPL：`/help`、`/status [--verbose]`、`/model [模型ID|auto|别名]`、`/new
 重复运行幂等、冲突在写入前报错；`/context` 会显示当前实际后端。
 Trace 和 Eval 报告默认保存在忽略跟踪的 `runs/` 中。
 
+上下文与 SQLite 的离线交互演示（先启动，后在 `pi-claw>` 中输入命令）：
+
+```bash
+uv run --frozen pi-claw chat --provider scripted --session-backend sqlite
+```
+
+```text
+/goal 修复当前项目，保持公共接口兼容
+/pin 不修改测试文件
+/context
+/compact
+/context
+/pin -d p1
+/goal reset
+/exit
+```
+
+`/goal reset` 重置目标但保留 pins；`/context` 展示实际后端、水位线、修订号与锚构成。
+这段演示验证状态与命令，不调用真实模型，也不证明模型遵守了约束。
+
 ## 目录
 
 ```text
@@ -286,10 +372,12 @@ pi-claw/                  # Git/uv 项目根目录
 │   ├── commands/         # status/model/exit/sessions/help、上下文命令
 │   ├── config/           # 配置类型、.env 解析、TOML 加载
 │   ├── routing/          # 复杂度分类、模型路由、顺序工作流、用量账本
-│   ├── core/             # Agent、消息、上下文、事件、Hooks、完成验收
+│   ├── core/             # Agent、ActiveContext、任务锚、压缩、Hooks、完成验收
+│   ├── skills/           # 声明式 Manifest、确定性选择与单回合指导
 │   ├── security/         # Policy、Approval、Workspace
+│   ├── sandbox/          # Host / Docker 命令运行与清理
 │   ├── providers/        # 离线 Provider、HTTP/SSE
-│   ├── persistence/      # Session、journal、checkpoint、锁、Trace
+│   ├── persistence/      # SessionRepository、files/SQLite、迁移、Usage、Trace
 │   ├── evaluation/       # 正式 Runtime 离线验收与路由对照
 │   └── interfaces/       # CLI、REPL
 ├── external_eval/        # 独立外部评测（SWE-bench Verified）；不进入主 pytest/CI
@@ -327,6 +415,10 @@ uv build --no-config
 - [配置与模型路由](docs/CONFIGURATION_AND_ROUTING.md)
 - [安全与授权边界](docs/SECURITY.md)
 - [评测指标](docs/EVALUATION.md)
+- [评测任务名称、选择理由与限制](docs/EVALUATION_TASKSETS.md)
+- [上下文第一批机制验收](docs/acceptance/session-context/M7A_CONTEXT_RELEASE.md)
+- [SQLite 接线与独立落库验证](docs/acceptance/session-context/M6B_BACKEND_COMMANDS.md)
+- [任务锚精简真实模型对照](docs/acceptance/session-context/M7B_EVALUATION_AND_RELEASE.md)
 - [单 Agent、顺序工作流与主从多 Agent 对照](docs/AGENT_MODE_COMPARISON.md)
 - [外部评测：SWE-bench Verified 与坏例自修复](docs/iterations/ITERATION_040_SWEBENCH_VERIFIED_EXTERNAL_EVAL.md)
 - [声明式 Skill：边界、Manifest 与命令](docs/SKILLS.md)
