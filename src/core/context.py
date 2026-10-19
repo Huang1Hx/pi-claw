@@ -167,6 +167,16 @@ class ContextManager:
             return []
         first_system = next((item for item in copied if item.get("role") == "system"), None)
         conversational = [item for item in copied if item is not first_system]
+        # Chat Completions 要求请求里至少有一条 user 消息。截断最近窗口时用户请求
+        # 往往落在窗口之外，必须显式保留最后一条 user，否则压缩后请求会被网关拒绝。
+        last_user_index = next(
+            (
+                index
+                for index in range(len(conversational) - 1, -1, -1)
+                if conversational[index].get("role") == "user"
+            ),
+            None,
+        )
 
         reserved = 1 if first_system is not None else 0
         recent_slots = max(0, self.max_messages - reserved - 1)
@@ -180,13 +190,28 @@ class ContextManager:
             recent_start -= 1
         recent = conversational[recent_start:] if recent_count else []
         old = conversational[:recent_start] if recent_count else conversational
+        keep_user = (
+            last_user_index is not None
+            and last_user_index < recent_start
+            and conversational[last_user_index] not in recent
+        )
 
         result: list[dict[str, Any]] = []
         if first_system is not None and len(result) < self.max_messages:
             result.append(first_system)
-        if old and len(result) < self.max_messages - len(recent):
-            result.append(self._summary_message(old, instruction))
+        # 用户请求比摘要更重要：先保留 system + user + 最近窗口，再在剩余预算里放摘要。
+        if keep_user and len(result) < self.max_messages:
+            result.append(conversational[last_user_index])
+        # 工具调用组不可拆：放不下整组时宁可不带最近窗口，也不能留下孤立 tool 消息。
+        if len(recent) > self.max_messages - len(result):
+            recent = []
         result.extend(recent[: self.max_messages - len(result)])
+        if old and len(result) < self.max_messages:
+            result.insert(
+                1 if first_system is not None else 0, self._summary_message(old, instruction)
+            )
+        if keep_user and not any(item.get("role") == "user" for item in result):
+            raise ValueError("上下文预算无法同时保留用户请求与工具协议")
         if not result:
             result = [copied[-1]]
         fitted = self._fit_chars(result)

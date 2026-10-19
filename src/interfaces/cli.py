@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import tempfile
 import uuid
@@ -53,6 +54,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     chat.add_argument(
         "--max-attempts", type=_positive_int, default=3, help="模型请求最多尝试次数（1–10）"
+    )
+    chat.add_argument(
+        "--timeout",
+        type=_positive_float,
+        default=None,
+        help="单次模型请求读超时秒数；默认 120，或 OPENAI_TIMEOUT_SECONDS",
     )
     resume_group = chat.add_mutually_exclusive_group()
     resume_group.add_argument(
@@ -122,6 +129,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--model", help="OpenAI-compatible 模型名，也可使用 OPENAI_MODEL")
     run.add_argument("--base-url", help="OpenAI-compatible API 根地址")
     run.add_argument("--max-steps", type=_positive_int, default=8, help="最大模型轮数（默认：8）")
+    run.add_argument(
+        "--timeout",
+        type=_positive_float,
+        default=None,
+        help="单次模型请求读超时秒数；默认 120，或 OPENAI_TIMEOUT_SECONDS",
+    )
     run.add_argument("--trace", type=Path, help="可选 JSONL 轨迹输出路径")
     run.add_argument(
         "--rollback-on-cancel",
@@ -184,6 +197,33 @@ def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
         raise argparse.ArgumentTypeError("必须是正整数")
+    return parsed
+
+
+def _positive_float(value: str) -> float:
+    """将命令行文本解析为有限正数，供模型请求超时使用。"""
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("必须是有限正数")
+    return parsed
+
+
+def _request_timeout(value: float | None, environment: dict[str, str]) -> float:
+    """解析读超时：显式参数 > OPENAI_TIMEOUT_SECONDS > 120 秒。
+
+    30 秒默认值对大上下文和推理模型过短，会把正常但较慢的请求误判为失败。
+    """
+    if value is not None:
+        return value
+    raw = environment.get("OPENAI_TIMEOUT_SECONDS")
+    if raw is None or not str(raw).strip():
+        return 120.0
+    try:
+        parsed = float(str(raw).strip())
+    except ValueError as exc:
+        raise ValueError(f"OPENAI_TIMEOUT_SECONDS 必须是正数：{raw}") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise ValueError(f"OPENAI_TIMEOUT_SECONDS 必须是正数：{raw}")
     return parsed
 
 
@@ -303,6 +343,7 @@ def _run_agent(args: argparse.Namespace) -> int:
             api_key=env.get("OPENAI_API_KEY", ""),
             model=args.model or env.get("OPENAI_MODEL", ""),
             base_url=args.base_url or env.get("OPENAI_BASE_URL") or "https://api.openai.com/v1",
+            timeout=_request_timeout(args.timeout, env),
         )
     else:
         # 通用 scripted 模式只做一次有界只读枚举，然后诚实结束，适合离线冒烟测试。
@@ -381,6 +422,7 @@ def _run_chat(args: argparse.Namespace) -> int:
             model=model,
             base_url=base_url,
             max_attempts=args.max_attempts,
+            timeout=_request_timeout(args.timeout, args.settings.environment),
         )
     else:
         provider = OfflineCodingProvider()

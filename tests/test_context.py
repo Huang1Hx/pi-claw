@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import io
+import json
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,45 @@ def test_compaction_does_not_leave_orphan_tool_messages() -> None:
     assert compacted[-3:] == messages[-3:]
     call_ids = {item["id"] for item in compacted[-3]["tool_calls"]}
     assert {item["tool_call_id"] for item in compacted[-2:]} <= call_ids
+
+
+def test_compaction_keeps_user_request_when_window_starts_with_tool_group() -> None:
+    """长工具回合后压缩：最近窗口可能只剩工具调用组，必须保留原 user 请求。"""
+
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": "rules"},
+        {"role": "user", "content": "完成爱心网页项目"},
+    ]
+    for index in range(12):
+        call_id = f"call-{index}"
+        messages.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{}"},
+                    }
+                ],
+            }
+        )
+        messages.append(
+            {"role": "tool", "tool_call_id": call_id, "name": "read_file", "content": "ok"}
+        )
+
+    manager = ContextManager(max_messages=40, max_chars=200_000, keep_recent=8)
+    compacted = manager.compact(messages)
+
+    assert [item["role"] for item in compacted].count("user") == 1
+    assert "完成爱心网页项目" in json.dumps(compacted, ensure_ascii=False)
+    manager._validate_tool_protocol(compacted)
+
+    # 再次压缩也必须保留 user，避免重复压缩后再次丢失。
+    again = manager.compact(compacted)
+    assert any(item.get("role") == "user" for item in again)
+    manager._validate_tool_protocol(again)
 
 
 def test_repl_compact_only_changes_active_context_not_raw_session(

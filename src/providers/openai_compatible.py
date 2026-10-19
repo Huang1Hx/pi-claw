@@ -134,12 +134,12 @@ class OpenAICompatibleProvider:
                 self.control.checkpoint()
             emitted = False
             retry_after = None
+            request_timeout = (
+                self.control.limit_timeout(self.timeout)
+                if self.control is not None
+                else self.timeout
+            )
             try:
-                request_timeout = (
-                    self.control.limit_timeout(self.timeout)
-                    if self.control is not None
-                    else self.timeout
-                )
                 with urllib.request.urlopen(request, timeout=request_timeout) as response:
                     if stream:
                         for event in stream_events(response, self.max_response_bytes):
@@ -181,7 +181,13 @@ class OpenAICompatibleProvider:
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
                 if self.control is not None:
                     self.control.checkpoint()
-                error = self._sanitize_error(f"模型请求失败：{exc}")
+                if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
+                    error = self._sanitize_error(
+                        f"模型请求失败：读超时（{request_timeout:g}s，"
+                        f"可用 --timeout 或 OPENAI_TIMEOUT_SECONDS 调整）：{exc}"
+                    )
+                else:
+                    error = self._sanitize_error(f"模型请求失败：{exc}")
                 retryable = True
             # 一旦对外发出片段，自动重试会重复候选内容；此时必须失败并交给上层处理。
             if emitted or not retryable or attempt == self.max_attempts:
