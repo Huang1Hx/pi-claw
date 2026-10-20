@@ -26,8 +26,10 @@ uv run --frozen python -m evaluation.compare_modes \
 `report.json` 和可提交的字段白名单 `public-summary.json`；usage 缺口绝不按零计算。
 
 三模式评测对学校 DeepSeek 的暂时性 429/5xx、连接失败和读取超时最多尝试 3 次，默认等待 2 秒、
-4 秒，并把尝试上限和等待参数写入快照与报告。鉴权/请求错误不重试，已经输出流片段后不重放，
-Kimi 仍由 profile 收紧为单次尝试。420 秒是整个 trial 的墙钟上限，启用重试不会延长它。
+4 秒，并把尝试上限和等待参数写入快照与报告。鉴权/请求错误不重试；暂时性传输错误下，
+未完成的流式候选作废后可重试模型请求，已完成消息和工具副作用不重放。Kimi 仍由 profile
+收紧为单次尝试。420 秒是整个 trial 的墙钟上限，启用重试不会延长它。历史评测结果
+保留原运行版本的语义，不因本文更新而重新解释。
 
 grader 2.0 的原始历史基线为严格成功 `33/90`，含 22 个 Provider 错误；原始证据见
 [Iteration 017](iterations/ITERATION_017_CURRENT_MODEL_BASELINE.md)。使用 grader 2.1 只续跑这些

@@ -221,6 +221,36 @@ def test_apply_patch_is_atomic_when_later_edit_is_not_unique(tmp_path: Path) -> 
     assert target.read_text(encoding="utf-8") == original
 
 
+@pytest.mark.parametrize("tool_name", ["write_or_replace", "apply_patch"])
+def test_oversized_final_write_is_rejected_before_approval(tmp_path: Path, tool_name: str) -> None:
+    """单项替换值虽未超限，最终文件超限时也不能先请求审批。"""
+    target = tmp_path / "target.txt"
+    target.write_text("abcde", encoding="utf-8")
+    approvals = 0
+
+    def approve(*_args: object) -> bool:
+        nonlocal approvals
+        approvals += 1
+        return True
+
+    executor = ToolExecutor(
+        WorkspacePolicy(tmp_path, allow_write=True),
+        approval_callback=approve,
+        max_write_bytes=6,
+    )
+    arguments = (
+        {"old": "a", "new": "AAAA"}
+        if tool_name == "write_or_replace"
+        else {"edits": [{"old": "a", "new": "AAAA"}]}
+    )
+    result = execute(executor, tool_name, path="target.txt", **arguments)
+
+    assert not result.ok
+    assert "写入上限" in (result.error or "")
+    assert approvals == 0
+    assert target.read_text(encoding="utf-8") == "abcde"
+
+
 def test_write_approval_receives_bounded_unified_diff(tmp_path: Path) -> None:
     target = tmp_path / "target.txt"
     target.write_text("before\n", encoding="utf-8")
@@ -247,6 +277,30 @@ def test_write_approval_receives_bounded_unified_diff(tmp_path: Path) -> None:
     assert "+++ b/target.txt" in previews[0]
     assert "-before" in previews[0]
     assert "+after" in previews[0]
+
+
+def test_invalid_write_preview_fails_before_requesting_approval(tmp_path: Path) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("before\n", encoding="utf-8")
+    approvals: list[str | None] = []
+
+    def approve(_call: ToolCall, _decision: object, preview: str | None) -> bool:
+        approvals.append(preview)
+        return True
+
+    executor = ToolExecutor(WorkspacePolicy(tmp_path, allow_write=True), approval_callback=approve)
+    result = execute(
+        executor,
+        "write_or_replace",
+        path="target.txt",
+        old="missing",
+        new="after",
+    )
+
+    assert not result.ok
+    assert "无法预览：old 出现 0 次" in str(result.error)
+    assert approvals == []
+    assert target.read_text(encoding="utf-8") == "before\n"
 
 
 def test_write_refuses_when_target_changes_during_approval(tmp_path: Path) -> None:
@@ -276,7 +330,7 @@ def test_write_refuses_when_target_changes_during_approval(tmp_path: Path) -> No
 
 def test_session_write_approval_is_bound_to_reviewed_file_version(tmp_path: Path) -> None:
     target = tmp_path / "target.txt"
-    target.write_text("a\n", encoding="utf-8")
+    target.write_text("alpha\n", encoding="utf-8")
     answers = iter(["a", "n"])
     broker = TerminalApprovalBroker(
         input_fn=lambda _prompt: next(answers),
@@ -289,16 +343,16 @@ def test_session_write_approval_is_bound_to_reviewed_file_version(tmp_path: Path
     call = ToolCall(
         "write-versioned",
         "write_or_replace",
-        {"path": "target.txt", "old": "a", "new": "b"},
+        {"path": "target.txt", "old": "alpha", "new": "beta"},
     )
 
     assert executor.execute(call).ok
-    target.write_text("external change\na\n", encoding="utf-8")
+    target.write_text("changed\nalpha\n", encoding="utf-8")
     refused = executor.execute(call)
 
     assert not refused.ok
     assert "未获批准" in str(refused.error)
-    assert target.read_text(encoding="utf-8") == "external change\na\n"
+    assert target.read_text(encoding="utf-8") == "changed\nalpha\n"
 
 
 def test_atomic_replace_failure_preserves_original(

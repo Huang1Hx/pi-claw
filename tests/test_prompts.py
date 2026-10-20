@@ -48,3 +48,10 @@ def test_system_prompt_contains_workflow_safety_uv_and_project_context(
     assert "Python 项目优先使用 uv" in prompt
     assert "### 来源：README.md" in prompt
     assert "hello project" in prompt
+
+
+def test_system_prompt_scopes_inspection_to_workspace_dependent_tasks(tmp_path: Path) -> None:
+    prompt = build_system_prompt(tmp_path, "")
+    assert "纯问答" in prompt
+    assert "无需先读取工作区" in prompt
+    assert "新建" in prompt

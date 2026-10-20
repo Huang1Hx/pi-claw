@@ -1,5 +1,6 @@
 """离线 HTTP/SSE 合约测试，不访问真实模型、不读取真实 API key。"""
 
+import http.client
 import io
 import json
 import urllib.error
@@ -149,34 +150,40 @@ def test_retry_is_bounded_and_auth_errors_are_terminal(monkeypatch, code, expect
     assert "fake-key" not in str(error.value)
 
 
-def test_no_replay_after_partial_stream(monkeypatch, workspace):
+@pytest.mark.parametrize("interruption", ["timeout", "eof", "incomplete_read"])
+def test_partial_stream_retry_never_executes_incomplete_tool(monkeypatch, workspace, interruption):
     attempts = []
 
     class Interrupted(io.BytesIO):
         def readline(self, size=-1):
             value = super().readline(size)
             if not value:
-                raise TimeoutError("disconnected")
+                if interruption == "timeout":
+                    raise TimeoutError("disconnected")
+                if interruption == "incomplete_read":
+                    raise http.client.IncompleteRead(b"", 1)
             return value
 
     def open_fake(*a, **k):
         attempts.append(1)
-        return Interrupted(
-            frame(
-                {
-                    "tool_calls": [
-                        {
-                            "index": 0,
-                            "id": "write",
-                            "function": {
-                                "name": "write_or_replace",
-                                "arguments": '{"path":"new.txt"',
-                            },
-                        }
-                    ]
-                }
+        if len(attempts) == 1:
+            return Interrupted(
+                frame(
+                    {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "write",
+                                "function": {
+                                    "name": "write_or_replace",
+                                    "arguments": '{"path":"new.txt"',
+                                },
+                            }
+                        ]
+                    }
+                )
             )
-        )
+        return io.BytesIO(frame({"content": "服务恢复，未写文件"}, "stop") + b"data: [DONE]\n\n")
 
     monkeypatch.setattr(urllib.request, "urlopen", open_fake)
     result = Agent(
@@ -184,9 +191,100 @@ def test_no_replay_after_partial_stream(monkeypatch, workspace):
         ToolExecutor(WorkspacePolicy(workspace), approval_callback=lambda *a: True),
         streaming=True,
     ).run("write")
-    assert result.status is RunStatus.PROVIDER_ERROR
-    assert len(attempts) == 1
+    assert result.status is RunStatus.COMPLETED
+    assert len(attempts) == 2
+    assert result.usage["retries"] == 1
     assert not (workspace / "new.txt").exists()
+
+
+def test_partial_text_stream_retry_marks_old_candidate_invalid(monkeypatch):
+    class Interrupted(io.BytesIO):
+        def readline(self, size=-1):
+            value = super().readline(size)
+            if not value:
+                raise TimeoutError("read operation timed out")
+            return value
+
+    attempts = []
+
+    def open_fake(*_args, **_kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            return Interrupted(frame({"content": "partial"}))
+        return io.BytesIO(frame({"content": "complete"}, "stop") + b"data: [DONE]\n\n")
+
+    monkeypatch.setattr(urllib.request, "urlopen", open_fake)
+    events = list(provider(sleep=lambda _: None).stream([]))
+    assert [event.type for event in events] == [
+        "text_delta",
+        "llm_retry",
+        "text_delta",
+        "message_complete",
+    ]
+    assert events[1].data["partial_output_invalidated"] is True
+    assert events[-1].reply.final_text == "complete"
+    assert len(attempts) == 2
+
+
+@pytest.mark.parametrize("interruption", ["eof", "incomplete_read"])
+def test_truncated_stream_retries_without_accepting_partial_text(monkeypatch, interruption):
+    """传输截断可以重试；前一次没有 [DONE] 的内容不能成为正式回复。"""
+    attempts = []
+
+    class Interrupted(io.BytesIO):
+        def readline(self, size=-1):
+            value = super().readline(size)
+            if not value and interruption == "incomplete_read":
+                raise http.client.IncompleteRead(b"", 1)
+            return value
+
+    def open_fake(*_args, **_kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            return Interrupted(frame({"content": "incomplete"}))
+        return io.BytesIO(frame({"content": "complete"}, "stop") + b"data: [DONE]\n\n")
+
+    monkeypatch.setattr(urllib.request, "urlopen", open_fake)
+    events = list(provider(sleep=lambda _: None).stream([]))
+    assert [event.type for event in events] == [
+        "text_delta",
+        "llm_retry",
+        "text_delta",
+        "message_complete",
+    ]
+    assert events[-1].reply.final_text == "complete"
+    assert events[1].data["partial_output_invalidated"] is True
+    assert len(attempts) == 2
+
+
+def test_malformed_sse_does_not_retry(monkeypatch):
+    attempts = []
+
+    def open_fake(*_args, **_kwargs):
+        attempts.append(1)
+        return io.BytesIO(b"data: not-json\n\n")
+
+    monkeypatch.setattr(urllib.request, "urlopen", open_fake)
+    with pytest.raises(ProviderError, match="JSON"):
+        list(provider(sleep=lambda _: None).stream([]))
+    assert len(attempts) == 1
+
+
+def test_completed_stream_is_not_retried_if_close_fails(monkeypatch):
+    attempts = []
+
+    class CloseFails(io.BytesIO):
+        def __exit__(self, *_args):
+            raise TimeoutError("close timed out")
+
+    def open_fake(*_args, **_kwargs):
+        attempts.append(1)
+        return CloseFails(frame({"content": "complete"}, "stop") + b"data: [DONE]\n\n")
+
+    monkeypatch.setattr(urllib.request, "urlopen", open_fake)
+    with pytest.raises(ProviderError, match="读超时"):
+        list(provider(sleep=lambda _: None).stream([]))
+    assert len(attempts) == 1
 
 
 def test_network_retry_before_response(monkeypatch):

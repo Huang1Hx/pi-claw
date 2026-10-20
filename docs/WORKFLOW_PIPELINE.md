@@ -123,7 +123,8 @@ uv run --frozen pi-claw chat --config pi-claw.toml --route auto --max-steps 24
 
 规划/审查限额不是独立赠送的调用额度；全部还受总请求上限约束。外层一步可能在内部消费
 计划、编码完成说明及审查产物，所以 `steps` 不等于模型请求数。学校 profile 默认最多三次 HTTP
-尝试；Kimi profile 固定一次，不能用 `36 × 3` 推算实际付费次数。流中断后不重试或重放工具。
+尝试；Kimi profile 固定一次，不能用 `36 × 3` 推算实际付费次数。暂时性流中断时，
+DeepSeek 的未完成候选可在上限内作废并重试模型请求；已完成消息及工具副作用不重放。
 
 每个 `[models.*]` 可覆盖 `max_output_tokens`（1–32768）和 `timeout_seconds`（1–300）。
 学校模板为 economy 2048 / 120 秒，规划/编码/常规审查 8192 / 120 秒，Kimi 4096 / 120 秒；

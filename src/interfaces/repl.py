@@ -199,9 +199,14 @@ class CodingRepl:
         """即时显示候选文本；正式完成与否仍由宿主验收和最终状态决定。"""
         self.display.on_event(event)
         if event.type == "llm_retry":
+            invalidated = (
+                "，上一段未完成的流式候选已作废"
+                if event.data.get("partial_output_invalidated")
+                else ""
+            )
             print(
                 f"retry> 第 {event.data['next_attempt']} 次请求，"
-                f"等待 {event.data['delay_seconds']} 秒",
+                f"等待 {event.data['delay_seconds']} 秒{invalidated}",
                 file=self.output,
             )
         if event.type in {"model_routed", "route_escalated"}:

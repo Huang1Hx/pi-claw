@@ -60,7 +60,12 @@ class ReplyDisplay:
         if event.type in {"reasoning_progress", "usage_updated"}:
             return
         self.close_line()
-        if event.type == "model_routed":
+        if event.type == "llm_retry":
+            # 失败尝试的流式文本不再属于下一次候选，也不能参与正式回复去重。
+            self.current, self.overflow = "", False
+            if self.purpose in {"coding", "execution"}:
+                self.visible_candidate = ""
+        elif event.type == "model_routed":
             self.current, self.overflow = "", False
             self.purpose = event.data.get("purpose", "execution")
             if self.purpose in {"coding", "execution"}:

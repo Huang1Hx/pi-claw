@@ -306,8 +306,8 @@ def test_reasoning_stream_kept_private_and_rejects_invalid_tail():
         list(stream_events(io.BytesIO(bad + b"data: [DONE]\n\n"), 50000))
 
 
-def test_partial_reasoning_never_triggers_replay(monkeypatch):
-    """即使尚无可见正文，思考流中途断开也不能自动重复生成。"""
+def test_partial_reasoning_retry_is_bounded_and_does_not_publish_thoughts(monkeypatch):
+    """思考流中断后最多重试配置次数；私有推理仍不得进入正文。"""
     attempts = []
 
     class Interrupted(io.BytesIO):
@@ -330,7 +330,7 @@ def test_partial_reasoning_never_triggers_replay(monkeypatch):
         list(
             OpenAICompatibleProvider(api_key="fake", model="fake", sleep=lambda _: None).stream([])
         )
-    assert len(attempts) == 1
+    assert len(attempts) == 3
 
 
 @pytest.mark.parametrize("thought", [False, {}, ["bad"]])

@@ -118,8 +118,16 @@ class WorkspacePolicy:
         python_names = {"python", "python3", Path(sys.executable).name.lower()}
         if executable == sys.executable or basename in python_names:
             allowed = self._validate_unittest_argv(argv)
+            if self.command_profile == "coding":
+                allowed = (
+                    allowed
+                    or argv[1:] == ["--version"]
+                    or (argv[1:3] == ["-m", "pytest"] and self._validate_pytest_arguments(argv[3:]))
+                )
         elif basename == "uv" and self.command_profile == "coding":
             allowed = self._validate_uv_argv(argv)
+        elif basename == "node" and self.command_profile == "coding":
+            allowed = self._validate_node_argv(argv, resolved_cwd)
         elif basename == "git":
             if len(argv) >= 2 and argv[1] in {"push", "reset", "clean"}:
                 return PolicyDecision(PolicyAction.DENY, f"危险 git 子命令始终禁止：{argv[1]}")
@@ -149,6 +157,8 @@ class WorkspacePolicy:
 
         if len(argv) < 2:
             return False
+        if argv[1:] in (["--version"], ["run", "python", "--version"]):
+            return True
         if argv[1:] in (["sync", "--locked"], ["sync", "--frozen"], ["lock", "--check"]):
             return True
         if argv[1:3] == ["run", "pytest"]:
@@ -163,6 +173,31 @@ class WorkspacePolicy:
             if argv[4] == "compileall":
                 return self._validate_compileall_arguments(argv[5:])
         return False
+
+    def _validate_node_argv(self, argv: list[str], cwd: Path) -> bool:
+        """只放行版本查询与工作区内 JS 文件的语法检查，不执行脚本。"""
+
+        if argv[1:] == ["--version"]:
+            return True
+        if len(argv) != 3 or argv[1] != "--check":
+            return False
+        target = Path(argv[2])
+        if (
+            target.is_absolute()
+            or ".." in target.parts
+            or target.suffix
+            not in {
+                ".js",
+                ".mjs",
+                ".cjs",
+            }
+        ):
+            return False
+        try:
+            resolved = self.workspace.resolve(cwd / target)
+        except (OSError, WorkspaceViolation):
+            return False
+        return resolved.is_file()
 
     def _validate_pytest_arguments(self, arguments: list[str]) -> bool:
         """仅接受有限 pytest 开关与安全测试路径，拒绝额外选项。"""

@@ -254,6 +254,38 @@ def test_tool_whitespace_does_not_show_an_empty_candidate():
     assert output.getvalue().count("Hello") == 1
 
 
+def test_stream_retry_resets_candidate_deduplication():
+    """前一次不完整候选作废后，新候选的正式回复只显示一次。"""
+    output = io.StringIO()
+    display = ReplyDisplay(output)
+    display.on_event(event("text_delta", text="partial"))
+    display.on_event(event("llm_retry", partial_output_invalidated=True))
+    display.on_event(event("text_delta", text="complete"))
+    display.on_event(event("model_reply", final_text="complete"))
+    display.finish(RunResult(RunStatus.COMPLETED, "run", 1, final_text="complete"))
+    assert output.getvalue().count("partial") == 1
+    assert output.getvalue().count("complete") == 1
+    assert "assistant>" not in output.getvalue()
+
+
+def test_review_retry_keeps_previously_shown_coding_candidate():
+    """只重试审查请求时，已展示的编码候选仍只显示一次。"""
+    output = io.StringIO()
+    display = ReplyDisplay(output)
+    display.on_event(event("model_routed", purpose="coding"))
+    display.on_event(event("text_delta", text="已完成编码"))
+    display.on_event(
+        event("workflow_artifact", kind="coding_candidate", data={"summary": "已完成编码"})
+    )
+    display.on_event(event("model_routed", purpose="reviewing"))
+    display.on_event(event("llm_retry", partial_output_invalidated=True))
+    final = "已完成编码\n\n审查结论：通过"
+    display.on_event(event("model_reply", final_text=final))
+    display.finish(RunResult(RunStatus.COMPLETED, "run", 1, final_text=final))
+    assert output.getvalue().count("已完成编码") == 1
+    assert output.getvalue().count("审查结论：通过") == 1
+
+
 @pytest.mark.parametrize(
     "streamed,final,status",
     [

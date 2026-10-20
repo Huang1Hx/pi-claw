@@ -117,6 +117,17 @@ class ToolExecutor(
         if decision.action is PolicyAction.ASK and not approved:
             # diff、SHA 与审批绑定版本必须来自同一稳定快照，不能分三次读取目标。
             preview, prepared_version = self._preview_with_version(call)
+            if call.name in {"write_or_replace", "apply_patch"} and not isinstance(
+                prepared_version, SecureFileVersion
+            ):
+                # 无法形成可执行的文件版本时，不让用户批准一项必定失败的操作。
+                return ToolResult(
+                    call.id,
+                    call.name,
+                    False,
+                    error=f"审批预览无效，已拒绝执行：{preview or '无可用预览'}",
+                    metadata=policy_metadata,
+                )
             approved, rejection_reason = self._request_approval(call, decision, preview)
             if not approved:
                 return ToolResult(
@@ -124,18 +135,6 @@ class ToolExecutor(
                     call.name,
                     False,
                     error=f"未获批准：{rejection_reason or decision.reason}",
-                    metadata=policy_metadata,
-                )
-            if call.name in {"write_or_replace", "apply_patch"} and not isinstance(
-                prepared_version, SecureFileVersion
-            ):
-                return ToolResult(
-                    call.id,
-                    call.name,
-                    False,
-                    error=(
-                        f"审批预览未取得安全文件版本，已 fail closed：{preview or '无可用预览'}"
-                    ),
                     metadata=policy_metadata,
                 )
             if prepared_version != self._write_version(call):

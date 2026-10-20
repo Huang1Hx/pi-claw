@@ -43,6 +43,7 @@ addopts = "-q"
 testpaths = ["tests"]
 markers = [
   "docker_integration: requires a running Docker daemon and the pinned local sandbox image",
+  "live_model: opt-in real-model interactive smoke test, never runs in normal CI",
 ]
 
 [tool.ruff]

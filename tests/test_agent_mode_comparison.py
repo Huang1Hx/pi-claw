@@ -326,7 +326,11 @@ def test_approval_returns_actionable_fixed_command_and_workspace_errors(tmp_path
         ToolCall("wrong-cwd", "run_command", {"argv": VERIFY_ARGV, "cwd": "subdir"})
     )
     wrong_file = executor.execute(
-        ToolCall("wrong-file", "write_or_replace", {"path": "test_target.py", "content": "x"})
+        ToolCall(
+            "wrong-file",
+            "write_or_replace",
+            {"path": "test_target.py", "old": task.files["test_target.py"], "new": "x"},
+        )
     )
 
     assert wrong_command.ok is False

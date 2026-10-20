@@ -204,8 +204,18 @@ uv run --frozen pi-claw chat --provider openai
 
 chat 默认请求 SSE 流；供应商不支持时使用 `--no-stream`。使用 `--max-attempts 3`
 设置请求最多尝试次数。终端 `candidate(stream)>` 表示尚未验收的实时文本。
+流式响应中断后，尚未形成完整模型消息的候选会被明确标记作废，并在有界次数内重试；
+只有完整工具调用才可能进入审批与执行。单模型入口的读超时默认 120 秒，可用
+`--timeout` 或 `.env` 中的 `OPENAI_TIMEOUT_SECONDS` 调整。
 若正式回复与流式正文完全一致，只打印简短完成状态，不再重复整段 `assistant>`；
 工作流只追加新的审查结论。同步回复、修订结果、未完成状态仍会显示，完整消息照常保存。
+
+真实模型与默认交互链路需显式冒烟验证；该测试在临时工作区执行纯问答、`/status`、
+`/usage` 和 `/exit`，并检查没有多余工具调用。普通 CI 不发起真实模型请求：
+
+```bash
+PI_CLAW_LIVE_CHAT=1 uv run --frozen pytest -m live_model tests/test_live_interactive.py
+```
 
 ## 按复杂度选择模型
 
@@ -276,7 +286,7 @@ uv run --frozen pi-claw chat --config pi-claw.toml --route auto --max-steps 24
 | 流式事件 | 文本/工具参数 delta、请求重试、工具结果、上下文变化和运行终态 |
 | Token 统计 | 累计服务端 usage；通过 `/usage` 查询当前会话与工作区历史累计，缺口显式提示 |
 | 上下文管理 | 确定性压缩、工具正文裁剪、结构化 pins/任务锚与请求前临时注入 |
-| 请求重试 | 暂时性 HTTP/网络错误有限退避；部分流已输出后不重放 |
+| 请求重试 | 暂时性 HTTP/网络错误有限退避；未完成的流式候选作废后可重试，完整消息和工具不重放 |
 | 重复检测 | 近期相同参数与结果重复出现时停止无进展循环 |
 | Hooks | 显式注入生命周期回调；前置工具 Hook 可拒绝，不能绕过审批 |
 | 会话恢复 | files / SQLite 统一仓储、v3 快照、双版本冲突检查、双向一次性迁移 |

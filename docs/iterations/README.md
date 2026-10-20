@@ -70,3 +70,4 @@ Iteration 001–005 保留当时的路径与验证命令，不回写历史记录
 [Iteration 039](ITERATION_039_STAGE3_HOLDOUT.md)：阶段 3 新任务 holdout 基线与 `--holdout` 接线。
 [Iteration 040](ITERATION_040_SWEBENCH_VERIFIED_EXTERNAL_EVAL.md)：SWE-bench Verified 外部评测（37 例：首轮 54.1%，自修复后 37/37）与坏例自修复。
 [Iteration 041](ITERATION_041_SKILLS_MVP.md)：声明式 Skill MVP（Manifest + 确定性选择 + 单回合受限注入 + 生命周期 Trace）。
+[Iteration 042](ITERATION_042_INTERACTIVE_RELIABILITY.md)：默认交互可靠性（纯问答提示词、诊断命令、流式有限重试、无效预览先拒绝）。

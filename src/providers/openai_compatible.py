@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -15,11 +16,11 @@ from core.control import ExecutionControl
 from core.schemas import ModelReply
 from providers.base import ProviderError
 from providers.events import ProviderEvent
-from providers.streaming import parse_message, stream_events
+from providers.streaming import StreamInterruptedError, parse_message, stream_events
 
 
 class OpenAICompatibleProvider:
-    """重试只覆盖尚未输出内容的暂时性请求失败，不重放工具。"""
+    """暂时性请求失败可在完整消息前有界重试，绝不重放工具。"""
 
     RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 
@@ -103,7 +104,7 @@ class OpenAICompatibleProvider:
         *,
         stream: bool = False,
     ) -> Iterator[ProviderEvent]:
-        """401/400 不重试；部分流已输出后失败不重放。"""
+        """401/400 不重试；未完成的流式候选作废后可有界重试。"""
         if not self.api_key:
             raise ProviderError("缺少 OPENAI_API_KEY（也可通过构造参数传入）")
         if not self.model:
@@ -133,6 +134,7 @@ class OpenAICompatibleProvider:
             if self.control is not None:
                 self.control.checkpoint()
             emitted = False
+            completed = False
             retry_after = None
             request_timeout = (
                 self.control.limit_timeout(self.timeout)
@@ -146,6 +148,7 @@ class OpenAICompatibleProvider:
                             if self.control is not None:
                                 self.control.checkpoint()
                             emitted = True
+                            completed = completed or event.type == "message_complete"
                             yield event
                         if self.control is not None:
                             self.control.checkpoint()
@@ -163,6 +166,7 @@ class OpenAICompatibleProvider:
                             raise ProviderError(
                                 "模型响应格式无效：缺少完整 choices[0].message"
                             ) from exc
+                        completed = True
                         yield ProviderEvent("message_complete", reply=reply)
                         if self.control is not None:
                             self.control.checkpoint()
@@ -178,7 +182,13 @@ class OpenAICompatibleProvider:
                     self.control.checkpoint()
                 error = self._sanitize_error(f"模型服务返回 HTTP {status}：{detail}")
                 retryable = status in self.RETRY_STATUS
-            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            except (
+                urllib.error.URLError,
+                TimeoutError,
+                OSError,
+                http.client.IncompleteRead,
+                StreamInterruptedError,
+            ) as exc:
                 if self.control is not None:
                     self.control.checkpoint()
                 if isinstance(exc, TimeoutError) or "timed out" in str(exc).lower():
@@ -189,8 +199,9 @@ class OpenAICompatibleProvider:
                 else:
                     error = self._sanitize_error(f"模型请求失败：{exc}")
                 retryable = True
-            # 一旦对外发出片段，自动重试会重复候选内容；此时必须失败并交给上层处理。
-            if emitted or not retryable or attempt == self.max_attempts:
+            # 完整消息尚未交给 Agent 时，流式片段只是候选；工具也尚未执行。
+            # 可重新请求，但须显式告知上层将此前显示的候选作废。
+            if completed or not retryable or attempt == self.max_attempts:
                 raise ProviderError(error)
             delay = min(self.max_retry_delay, self.retry_base_delay * 2 ** (attempt - 1))
             try:
@@ -201,7 +212,12 @@ class OpenAICompatibleProvider:
             # 先通知再等待/重试，使路由预算层能在下一次 HTTP 请求前中止迭代。
             yield ProviderEvent(
                 "llm_retry",
-                {"attempt": attempt, "next_attempt": attempt + 1, "delay_seconds": delay},
+                {
+                    "attempt": attempt,
+                    "next_attempt": attempt + 1,
+                    "delay_seconds": delay,
+                    "partial_output_invalidated": emitted,
+                },
             )
             if self.control is None or self._custom_sleep:
                 self.sleep(delay)

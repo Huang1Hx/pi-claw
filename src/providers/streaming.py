@@ -10,6 +10,10 @@ from providers.base import ProviderError
 from providers.events import ProviderEvent
 
 
+class StreamInterruptedError(ProviderError):
+    """传输在 SSE 的 [DONE] 前结束；区别于格式错误，可由外层有界重试。"""
+
+
 def parse_message(message: Any, usage: Any = None) -> ModelReply:
     """同步和流式响应共享最终消息校验。"""
     try:
@@ -47,7 +51,7 @@ def iter_sse(response: Any, max_bytes: int) -> Iterator[dict[str, Any] | None]:
     while True:
         raw = response.readline(max_bytes - used + 1)
         if not raw:
-            raise ProviderError("模型流意外中断：未收到 [DONE]")
+            raise StreamInterruptedError("模型流意外中断：未收到 [DONE]")
         used += len(raw)
         if used > max_bytes:
             raise ProviderError(f"模型响应超过字节上限 {max_bytes}")

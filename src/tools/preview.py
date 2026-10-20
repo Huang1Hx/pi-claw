@@ -84,12 +84,19 @@ class PreviewTools:
                 assert isinstance(old, str) and isinstance(new, str)
                 if old == "":
                     if version.exists:
-                        return "无法预览：创建目标已经存在", version
+                        return "无法预览：创建目标已经存在", "invalid"
                     after = new
                 elif before.count(old) != 1:
-                    return f"无法预览：old 出现 {before.count(old)} 次，必须唯一", version
+                    count = before.count(old)
+                    detail = "文本不存在" if count == 0 else "必须唯一"
+                    return f"无法预览：old 出现 {count} 次，{detail}", "invalid"
                 else:
                     after = before.replace(old, new, 1)
+                    if len(after.encode("utf-8")) > self.max_write_bytes:
+                        return (
+                            f"无法预览：替换结果超过写入上限 {self.max_write_bytes} 字节",
+                            "invalid",
+                        )
             else:
                 assert isinstance(edits, list)
                 for index, edit in enumerate(edits, start=1):
@@ -97,12 +104,19 @@ class PreviewTools:
                     old = edit.get("old")
                     new = edit.get("new")
                     assert isinstance(old, str) and old and isinstance(new, str)
-                    if after.count(old) != 1:
+                    count = after.count(old)
+                    if count != 1:
                         return (
-                            f"无法预览：第 {index} 个 old 出现 {after.count(old)} 次",
-                            version,
+                            f"无法预览：第 {index} 个 edit 的 old 出现 {count} 次，必须唯一",
+                            "invalid",
                         )
                     after = after.replace(old, new, 1)
+                    if len(after.encode("utf-8")) > self.max_write_bytes:
+                        return (
+                            f"无法预览：第 {index} 个 edit 的补丁结果超过写入上限 "
+                            f"{self.max_write_bytes} 字节",
+                            "invalid",
+                        )
             display = relative.as_posix()
             diff = "".join(
                 difflib.unified_diff(

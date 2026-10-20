@@ -207,9 +207,8 @@ def test_preview_sha_and_diff_share_one_stable_preimage(
 
 def test_invalid_preview_sentinel_cannot_authorize_later_valid_write(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """未取得具体 SecureFileVersion 时，即使复核哨兵相等也不能进入 handler。"""
+    """未取得具体 SecureFileVersion 时，在审批之前拒绝进入 handler。"""
     target = tmp_path / "target.txt"
     target.write_text("before\n", encoding="utf-8")
     approvals = 0
@@ -224,15 +223,6 @@ def test_invalid_preview_sentinel_cannot_authorize_later_valid_write(
         approval_callback=approve,
     )
     executor.workspace.secure_fs.supported = False
-    original_write_version = executor._write_version
-
-    def invalid_then_enable(call: ToolCall):
-        result = original_write_version(call)
-        executor.workspace.secure_fs.supported = True
-        return result
-
-    monkeypatch.setattr(executor, "_write_version", invalid_then_enable)
-
     result = _execute(
         executor,
         "write_or_replace",
@@ -242,8 +232,8 @@ def test_invalid_preview_sentinel_cannot_authorize_later_valid_write(
     )
 
     assert result.ok is False
-    assert "安全文件版本" in (result.error or "")
-    assert approvals == 1
+    assert "审批预览无效" in (result.error or "")
+    assert approvals == 0
     assert target.read_text(encoding="utf-8") == "before\n"
 
 

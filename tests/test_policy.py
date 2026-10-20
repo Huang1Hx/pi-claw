@@ -80,6 +80,51 @@ def test_coding_profile_allows_safe_uv_commands_as_ask(workspace: Path, argv: li
 @pytest.mark.parametrize(
     "argv",
     [
+        ["python", "--version"],
+        ["python3", "--version"],
+        ["uv", "--version"],
+        ["uv", "run", "python", "--version"],
+        ["python", "-m", "pytest", "-q", "test_sample.py"],
+        ["node", "--version"],
+        ["node", "--check", "app.js"],
+    ],
+)
+def test_coding_profile_allows_exact_diagnostic_commands_with_approval(
+    workspace: Path, argv: list[str]
+) -> None:
+    (workspace / "app.js").write_text("console.log('ok')\n", encoding="utf-8")
+    decision = WorkspacePolicy(workspace, command_profile="coding").evaluate(
+        call("run_command", argv=argv)
+    )
+    assert decision.action is PolicyAction.ASK
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["node", "app.js"],
+        ["node", "-e", "console.log('unsafe')"],
+        ["node", "--check", "../outside.js"],
+        ["node", "--check", ".env"],
+        ["node", "--require", "app.js", "--check", "app.js"],
+        ["python", "-c", "print('unsafe')"],
+        ["python", "-m", "pytest", "--collect-only"],
+        ["uv", "run", "python", "-c", "print('unsafe')"],
+    ],
+)
+def test_coding_profile_still_denies_arbitrary_diagnostic_execution(
+    workspace: Path, argv: list[str]
+) -> None:
+    (workspace / "app.js").write_text("console.log('ok')\n", encoding="utf-8")
+    decision = WorkspacePolicy(workspace, command_profile="coding").evaluate(
+        call("run_command", argv=argv)
+    )
+    assert decision.action is PolicyAction.DENY
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
         ["uv", "sync"],
         ["uv", "add", "requests"],
         ["uv", "run", "python", "-c", "print('unsafe')"],
